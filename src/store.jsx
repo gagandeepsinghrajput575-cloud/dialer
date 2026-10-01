@@ -47,10 +47,22 @@ export function StoreProvider({ children }) {
 
   const openInDialer = useCallback((id) => { setActiveId(id); setDrawerId(null); setView('dialer'); }, [setView]);
 
+  const deleteProspect = useCallback(async (id) => {
+    try {
+      await api.deleteProspect(id);
+      setActiveId((cur) => (cur === id ? null : cur));
+      setDrawerId((cur) => (cur === id ? null : cur));
+      await Promise.all([refreshProspects(), refreshStats()]);
+      toast('Prospect deleted');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }, [refreshProspects, refreshStats, toast]);
+
   const value = useMemo(() => ({
     prospects, loaded, stats, settings, view, setView, activeId, setActiveId, drawerId, setDrawerId,
-    toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer]);
+    toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

@@ -20,13 +20,22 @@ const CONVO = ['conversation', 'meeting_booked'];
 const FIELDS = ['name', 'phone', 'email', 'company', 'title', 'location', 'website'];
 
 // ---------- helpers ----------
+function cleanStr(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val).trim();
+  const lower = s.toLowerCase();
+  if (['null', 'undefined', 'n/a', 'na', 'none', '-', '--', 'nil'].includes(lower)) return '';
+  return s;
+}
+
 function normalizePhone(raw) {
   if (!raw) return '';
-  let s = String(raw).trim();
+  let s = cleanStr(raw);
+  if (!s) return '';
   if (/@/.test(s) || /^sip:/i.test(s)) return s; // SIP address, keep as is
   const hasPlus = s.startsWith('+');
   let digits = s.replace(/\D/g, '');
-  if (!digits) return '';
+  if (!digits || digits.length < 5) return ''; // ignore clearly junk numbers (< 5 digits)
   if (hasPlus) return '+' + digits;
   if (digits.startsWith('00')) return '+' + digits.slice(2);
   const cc = String(getSetting('default_country_code') || '').replace(/\D/g, '');
@@ -36,15 +45,33 @@ function normalizePhone(raw) {
   return '+' + digits;
 }
 
+function escapeCsv(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val);
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
 const toApi = (r) => (r ? { ...r, dnc: !!r.dnc, extra: safeJson(r.extra) } : r);
 function safeJson(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
 const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
-function startOfLocalDay(offsetDays = 0) {
+
+function getStartOfDay(offsetDays = 0, tzOffsetMin = null) {
+  if (tzOffsetMin !== null && Number.isFinite(tzOffsetMin)) {
+    const now = Date.now();
+    const clientLocal = new Date(now - tzOffsetMin * 60000);
+    clientLocal.setUTCDate(clientLocal.getUTCDate() + offsetDays);
+    clientLocal.setUTCHours(0, 0, 0, 0);
+    return new Date(clientLocal.getTime() + tzOffsetMin * 60000);
+  }
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   d.setDate(d.getDate() + offsetDays);
   return d;
 }
+
 function statsFilter() {
   // while in dry-run mode show test calls; once live, exclude them
   return getSetting('dry_run') === '1' ? '' : 'AND dry_run = 0';
@@ -52,15 +79,65 @@ function statsFilter() {
 function touch(id) {
   db.prepare("UPDATE prospects SET updated_at = datetime('now') WHERE id = ?").run(id);
 }
-function todaysDials() {
-  const since = sqlTime(startOfLocalDay());
-  return db.prepare(`SELECT COUNT(*) c FROM calls WHERE started_at >= ? AND status != 'failed' ${statsFilter()}`).get(since).c;
+function todaysDials(tzOffset = null) {
+  const since = sqlTime(getStartOfDay(0, tzOffset));
+  return db.prepare(`SELECT COUNT(*) c FROM calls WHERE started_at >= ? AND status != 'failed' AND status != 'discarded' ${statsFilter()}`).get(since).c;
 }
 
 // ---------- prospects ----------
 app.get('/api/prospects', (req, res) => {
   const rows = db.prepare('SELECT * FROM prospects ORDER BY id DESC').all();
   res.json(rows.map(toApi));
+});
+
+// CSV Export of all prospects with notes and call metadata
+app.get('/api/prospects/export', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM prospects ORDER BY id DESC').all();
+    const notes = db.prepare('SELECT prospect_id, body, created_at FROM notes ORDER BY id DESC').all();
+    const notesByProspect = {};
+    for (const n of notes) {
+      if (!notesByProspect[n.prospect_id]) notesByProspect[n.prospect_id] = [];
+      notesByProspect[n.prospect_id].push(n.body);
+    }
+
+    const headers = [
+      'ID', 'Name', 'Phone', 'Email', 'Company', 'Title', 'Stage',
+      'Do Not Call', 'Calls Count', 'Last Called At', 'Last Outcome',
+      'Follow Up Date', 'Location', 'Website', 'Notes', 'Created At'
+    ];
+
+    const csvRows = [headers.join(',')];
+    for (const r of rows) {
+      const prospectNotes = (notesByProspect[r.id] || []).join(' | ');
+      const line = [
+        r.id,
+        escapeCsv(r.name),
+        escapeCsv(r.phone),
+        escapeCsv(r.email),
+        escapeCsv(r.company),
+        escapeCsv(r.title),
+        escapeCsv(r.stage),
+        r.dnc ? 'YES' : 'NO',
+        r.call_count,
+        escapeCsv(r.last_called_at || ''),
+        escapeCsv(r.last_outcome || ''),
+        escapeCsv(r.follow_up_at || ''),
+        escapeCsv(r.location || ''),
+        escapeCsv(r.website || ''),
+        escapeCsv(prospectNotes),
+        escapeCsv(r.created_at)
+      ];
+      csvRows.push(line.join(','));
+    }
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="pulse-prospects-${dateStr}.csv"`);
+    res.send(csvRows.join('\r\n'));
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to generate export: ' + e.message });
+  }
 });
 
 app.get('/api/prospects/:id', (req, res) => {
@@ -78,7 +155,7 @@ app.post('/api/prospects', (req, res) => {
     .prepare(
       'INSERT INTO prospects(name,phone,email,company,title,location,website,extra,stage) VALUES(?,?,?,?,?,?,?,?,?)'
     )
-    .run(b.name || '', phone, b.email || '', b.company || '', b.title || '', b.location || '', b.website || '', JSON.stringify(b.extra || {}), STAGES.includes(b.stage) ? b.stage : 'new');
+    .run(cleanStr(b.name), phone, cleanStr(b.email), cleanStr(b.company), cleanStr(b.title), cleanStr(b.location), cleanStr(b.website), JSON.stringify(b.extra || {}), STAGES.includes(b.stage) ? b.stage : 'new');
   res.json(toApi(db.prepare('SELECT * FROM prospects WHERE id = ?').get(info.lastInsertRowid)));
 });
 
@@ -91,7 +168,7 @@ app.patch('/api/prospects/:id', (req, res) => {
   for (const f of FIELDS) {
     if (f in b) {
       sets.push(`${f} = ?`);
-      vals.push(f === 'phone' ? normalizePhone(b[f]) : String(b[f] ?? ''));
+      vals.push(f === 'phone' ? normalizePhone(b[f]) : cleanStr(b[f]));
     }
   }
   if ('stage' in b && STAGES.includes(b.stage)) { sets.push('stage = ?'); vals.push(b.stage); }
@@ -135,23 +212,36 @@ app.post('/api/prospects/bulk', (req, res) => {
   const ins = db.prepare('INSERT INTO prospects(name,phone,email,company,title,location,website,extra) VALUES(?,?,?,?,?,?,?,?)');
   const mappedCols = new Set(Object.values(mapping).filter(Boolean));
   let added = 0, dupes = 0, empty = 0;
+  const JUNK_NAMES = new Set(['total', 'grand total', 'subtotal', 'average', 'summary', 'count', 'page 1', 'rows', 'name', 'full name', 'prospect', 'unnamed']);
+
   const tx = db.transaction(() => {
     for (const row of rows) {
       const v = {};
-      for (const f of FIELDS) v[f] = mapping[f] ? String(row[mapping[f]] ?? '').trim() : '';
+      for (const f of FIELDS) v[f] = mapping[f] ? cleanStr(row[mapping[f]]) : '';
       // allow first+last name mapping
       if (mapping.first_name || mapping.last_name) {
-        const fn = mapping.first_name ? String(row[mapping.first_name] ?? '').trim() : '';
-        const ln = mapping.last_name ? String(row[mapping.last_name] ?? '').trim() : '';
+        const fn = mapping.first_name ? cleanStr(row[mapping.first_name]) : '';
+        const ln = mapping.last_name ? cleanStr(row[mapping.last_name]) : '';
         mappedCols.add(mapping.first_name); mappedCols.add(mapping.last_name);
         if (!v.name) v.name = `${fn} ${ln}`.trim();
       }
       v.phone = normalizePhone(v.phone);
+      if (v.email && !v.email.includes('@')) {
+        v.email = '';
+      }
+      // Check for junk header/summary/footer row
+      const isJunkPattern = /^(total|grand total|subtotal|average|summary|count|page \d+.*|sheet\d*|workbook.*|rows?|name|full name|prospect|unnamed|untitled|header|notes)$/i.test(v.name.trim());
+      if (v.name && (JUNK_NAMES.has(v.name.toLowerCase()) || isJunkPattern)) { empty++; continue; }
       if (!v.phone && !v.name && !v.email) { empty++; continue; }
+      // A contact with no phone, no email, and no company is almost always a header or label
+      if (!v.phone && !v.email && !v.company) { empty++; continue; }
+      if (!v.phone && !v.email && v.name.length < 2) { empty++; continue; }
+
       if (skipDuplicates && v.phone && existing.has(v.phone)) { dupes++; continue; }
       const extra = {};
       for (const [k, val] of Object.entries(row)) {
-        if (!mappedCols.has(k) && String(val).trim() !== '') extra[k] = String(val).trim();
+        const cleanedVal = cleanStr(val);
+        if (!mappedCols.has(k) && cleanedVal !== '') extra[k] = cleanedVal;
       }
       ins.run(v.name, v.phone, v.email, v.company, v.title, v.location, v.website, JSON.stringify(extra));
       if (v.phone) existing.add(v.phone);
@@ -186,8 +276,9 @@ app.post('/api/prospects/:id/call', async (req, res) => {
   if (p.dnc) return res.status(403).json({ error: 'This prospect is marked Do Not Call.' });
   if (!p.phone) return res.status(400).json({ error: 'This prospect has no phone number.' });
 
+  const tzOffset = req.body?.tzOffset !== undefined ? parseInt(req.body.tzOffset, 10) : null;
   const cap = parseInt(getSetting('daily_cap'), 10) || 0;
-  if (cap && todaysDials() >= cap) {
+  if (cap && todaysDials(tzOffset) >= cap) {
     return res.status(429).json({ error: `Daily dial cap reached (${cap}). Raise it in Settings if you want to continue.` });
   }
   const dry = getSetting('dry_run') === '1';
@@ -235,11 +326,31 @@ app.patch('/api/calls/:id', (req, res) => {
   res.json({ ok: true, prospect: toApi(db.prepare('SELECT * FROM prospects WHERE id = ?').get(call.prospect_id)) });
 });
 
+// Discard an aborted/cancelled call
+app.post('/api/calls/:id/discard', (req, res) => {
+  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (call) {
+    db.prepare('DELETE FROM calls WHERE id = ?').run(call.id);
+    db.prepare("UPDATE prospects SET call_count = MAX(0, call_count - 1), updated_at = datetime('now') WHERE id = ?").run(call.prospect_id);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/calls/:id', (req, res) => {
+  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
+  if (call) {
+    db.prepare('DELETE FROM calls WHERE id = ?').run(call.id);
+    db.prepare("UPDATE prospects SET call_count = MAX(0, call_count - 1), updated_at = datetime('now') WHERE id = ?").run(call.prospect_id);
+  }
+  res.json({ ok: true });
+});
+
 // ---------- stats ----------
 app.get('/api/stats', (req, res) => {
   const f = statsFilter();
   const goal = parseInt(getSetting('daily_goal'), 10) || 0;
   const cap = parseInt(getSetting('daily_cap'), 10) || 0;
+  const tzOffset = req.query.tzOffset !== undefined ? parseInt(req.query.tzOffset, 10) : null;
 
   const summarize = (rows) => {
     const s = { dials: rows.length, pickups: 0, conversations: 0, meetings: 0, voicemails: 0, talkSec: 0 };
@@ -257,19 +368,26 @@ app.get('/api/stats', (req, res) => {
     return s;
   };
 
-  const since7 = sqlTime(startOfLocalDay(-6));
-  const rows = db.prepare(`SELECT * FROM calls WHERE started_at >= ? AND status != 'failed' ${f}`).all(since7);
+  const since7 = sqlTime(getStartOfDay(-6, tzOffset));
+  const rows = db.prepare(`SELECT * FROM calls WHERE started_at >= ? AND status != 'failed' AND status != 'discarded' ${f}`).all(since7);
   const byDay = {};
   for (let i = 6; i >= 0; i--) {
-    const d = startOfLocalDay(-i);
-    byDay[d.toDateString()] = { date: d.toISOString(), rows: [] };
+    const d = getStartOfDay(-i, tzOffset);
+    byDay[d.toISOString().slice(0, 10)] = { date: d.toISOString(), rows: [] };
   }
-  const todayStart = startOfLocalDay().getTime();
+  const todayStart = getStartOfDay(0, tzOffset).getTime();
   const todayRows = [];
   for (const r of rows) {
     const t = new Date(r.started_at.replace(' ', 'T') + 'Z');
-    const key = new Date(t.getFullYear(), t.getMonth(), t.getDate()).toDateString();
-    if (byDay[key]) byDay[key].rows.push(r);
+    for (let i = 6; i >= 0; i--) {
+      const startI = getStartOfDay(-i, tzOffset).getTime();
+      const endI = startI + 86400000;
+      if (t.getTime() >= startI && t.getTime() < endI) {
+        const bucketKey = getStartOfDay(-i, tzOffset).toISOString().slice(0, 10);
+        if (byDay[bucketKey]) byDay[bucketKey].rows.push(r);
+        break;
+      }
+    }
     if (t.getTime() >= todayStart) todayRows.push(r);
   }
   const week = Object.values(byDay).map((d) => ({ date: d.date, ...summarize(d.rows) }));
@@ -283,7 +401,7 @@ app.get('/api/stats', (req, res) => {
     .prepare(
       `SELECT c.id, c.outcome, c.duration_sec, c.started_at, c.status, p.id prospect_id, p.name, p.company
        FROM calls c JOIN prospects p ON p.id = c.prospect_id
-       WHERE c.status != 'failed' ${f.replace('dry_run', 'c.dry_run')} ORDER BY c.id DESC LIMIT 8`
+       WHERE c.status != 'failed' AND c.status != 'discarded' ${f.replace('dry_run', 'c.dry_run')} ORDER BY c.id DESC LIMIT 8`
     )
     .all();
 

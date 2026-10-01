@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Search, Phone, Plus, Upload, Users, ShieldAlert, X } from 'lucide-react';
+import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { Avatar, Empty, StageBadge } from '../components/ui.jsx';
@@ -33,7 +33,7 @@ function AddModal({ onClose }) {
 }
 
 export default function Prospects() {
-  const { prospects, loaded, setDrawerId, openInDialer, setView, refreshProspects } = useStore();
+  const { prospects, loaded, setDrawerId, openInDialer, setView, refreshProspects, deleteProspect } = useStore();
   const [q, setQ] = useState('');
   const [stage, setStage] = useState('all');
   const [adding, setAdding] = useState(false);
@@ -43,11 +43,16 @@ export default function Prospects() {
     return prospects.filter((p) => (stage === 'all' || p.stage === stage) && (!n || `${p.name} ${p.company} ${p.phone} ${p.email} ${p.title}`.toLowerCase().includes(n)));
   }, [prospects, q, stage]);
 
+  const handleExport = () => {
+    window.location.href = api.exportProspectsUrl();
+  };
+
   return (
     <div>
       <header className="page-head">
         <div><h1>Prospects</h1><p>{prospects.length} total · click anyone to see everything about them.</p></div>
         <div className="row gap">
+          <button className="btn" onClick={handleExport} title="Download CSV of all prospects, notes, and call results"><Download size={16} /> Export CSV</button>
           <button className="btn" onClick={() => setView('import')}><Upload size={16} /> Import</button>
           <button className="btn primary" onClick={() => setAdding(true)}><Plus size={16} /> Add prospect</button>
         </div>
@@ -81,7 +86,12 @@ export default function Prospects() {
                     <td>{p.dnc ? <span className="dnc-badge sm"><ShieldAlert size={12} /> DNC</span> : <StageBadge stage={p.stage} />}</td>
                     <td>{p.call_count}</td>
                     <td className="muted">{p.last_called_at ? timeAgo(p.last_called_at) : '—'}</td>
-                    <td><button className="btn sm primary" disabled={p.dnc || !p.phone} onClick={(e) => { e.stopPropagation(); openInDialer(p.id); }}><Phone size={13} /> Call</button></td>
+                    <td>
+                      <div className="row gap sm" style={{ justifyContent: 'flex-end' }}>
+                        <button className="btn sm primary" disabled={p.dnc || !p.phone} onClick={(e) => { e.stopPropagation(); openInDialer(p.id); }} title="Dial in active queue"><Phone size={13} /> Call</button>
+                        <button className="icon-btn sm danger" title="Delete prospect" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete ${p.name || 'this prospect'}?`)) deleteProspect(p.id); }}><Trash2 size={13} /></button>
+                      </div>
+                    </td>
                   </motion.tr>
                 ))}
               </AnimatePresence>

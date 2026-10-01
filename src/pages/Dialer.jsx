@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX, Circle, Phone, PhoneCall, Search, ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles, Loader2, Keyboard, Mail, Building2, NotebookPen } from 'lucide-react';
+import {
+  PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare,
+  CalendarCheck, OctagonX, Circle, Phone, PhoneCall, Search,
+  ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
+  Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X
+} from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
@@ -19,9 +24,57 @@ function Waveform({ active }) {
   return (
     <div className={`wave ${active ? 'on' : ''}`}>
       {Array.from({ length: 24 }).map((_, i) => (
-        <motion.i key={i} animate={active ? { scaleY: [0.25, 1, 0.35, 0.8, 0.25] } : { scaleY: 0.2 }} transition={active ? { duration: 1.1 + (i % 5) * 0.15, repeat: Infinity, delay: i * 0.04, ease: 'easeInOut' } : { duration: 0.3 }} />
+        <motion.i
+          key={i}
+          animate={active ? { scaleY: [0.25, 1, 0.35, 0.8, 0.25] } : { scaleY: 0.2 }}
+          transition={active ? { duration: 1.1 + (i % 5) * 0.15, repeat: Infinity, delay: i * 0.04, ease: 'easeInOut' } : { duration: 0.3 }}
+        />
       ))}
     </div>
+  );
+}
+
+function QuickAddModal({ onClose, onAdded }) {
+  const [f, setF] = useState({ name: '', phone: '', email: '', company: '', title: '' });
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF((prev) => ({ ...prev, [k]: e.target.value }));
+
+  const save = async () => {
+    if (!f.phone.trim() && !f.name.trim()) return;
+    setBusy(true);
+    try {
+      await onAdded(f);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />
+      <motion.div className="modal glass" initial={{ opacity: 0, scale: 0.94, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96 }}>
+        <div className="modal-head">
+          <h3>Add prospect to queue</h3>
+          <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="form">
+          <label>Name<input autoFocus value={f.name} onChange={set('name')} placeholder="Full name" /></label>
+          <label>Phone<input value={f.phone} onChange={set('phone')} placeholder="+91 98100 12345" /></label>
+          <label>Email<input value={f.email} onChange={set('email')} placeholder="name@company.com" /></label>
+          <div className="two">
+            <label>Company<input value={f.company} onChange={set('company')} /></label>
+            <label>Title<input value={f.title} onChange={set('title')} /></label>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" onClick={save} disabled={busy || (!f.name.trim() && !f.phone.trim())}>
+            {busy ? <Loader2 size={15} className="spin" /> : null} Add to queue
+          </button>
+        </div>
+      </motion.div>
+    </>
   );
 }
 
@@ -36,23 +89,26 @@ export default function Dialer() {
   const [flash, setFlash] = useState(null);
   const [noteFocus, setNoteFocus] = useState(0);
   const [quickNote, setQuickNote] = useState('');
-  const [classifyModal, setClassifyModal] = useState(null); // { callId, duration, prospectId }
+  const [classifyModal, setClassifyModal] = useState(null); // { callId, duration, prospect }
   const [targetStage, setTargetStage] = useState('');
   const [customNote, setCustomNote] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
+
   const sec = useTimer(phase === 'active');
   const secRef = useRef(0);
   secRef.current = sec;
   const quickNoteRef = useRef('');
   quickNoteRef.current = quickNote;
+  const activeItemRef = useRef(null);
 
+  // Compute active queue for current tab & filter
   const queue = useMemo(() => {
     const t = TABS.find((x) => x.id === tab);
     const needle = q.trim().toLowerCase();
     return prospects
-      .filter((p) => !p.dnc && t.test(p))
+      .filter((p) => !p.dnc && (t ? t.test(p) : true))
       .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle))
       .sort((a, b) => {
-        // Prioritize prospects with a phone number so you can dial right away
         const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
         const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
         if (hasPhoneA !== hasPhoneB) return hasPhoneB - hasPhoneA;
@@ -60,9 +116,70 @@ export default function Dialer() {
       });
   }, [prospects, tab, q]);
 
-  const active = useMemo(() => prospects.find((p) => p.id === activeId) || queue[0] || null, [prospects, activeId, queue]);
+  // Always resolve active prospect from the active queue
+  const active = useMemo(() => {
+    if (activeId) {
+      const match = queue.find((p) => p.id === activeId);
+      if (match) return match;
+    }
+    return queue[0] || null;
+  }, [queue, activeId]);
+
   const { detail, reload } = useDetail(active?.id);
   const idx = active ? queue.findIndex((p) => p.id === active.id) : -1;
+
+  // Auto-scroll the active queue item into view smoothly
+  useEffect(() => {
+    if (activeItemRef.current) {
+      activeItemRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [active?.id]);
+
+  // Synchronize tab when activeId changes externally (e.g. Prospects table 'Call')
+  useEffect(() => {
+    if (!activeId) return;
+    const target = prospects.find((p) => p.id === activeId);
+    if (!target) return;
+    const curTab = TABS.find((x) => x.id === tab);
+    if (curTab && !curTab.test(target)) {
+      if (target.stage === 'new') setTab('new');
+      else if (['contacted', 'interested', 'followup'].includes(target.stage)) setTab('follow');
+      else setTab('all');
+    }
+  }, [activeId, prospects, tab]);
+
+  // When switching tabs explicitly, pick the top item of the new queue
+  const handleTabChange = useCallback((newTabId) => {
+    if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
+    setTab(newTabId);
+    const t = TABS.find((x) => x.id === newTabId);
+    const needle = q.trim().toLowerCase();
+    const nextQueue = prospects
+      .filter((p) => !p.dnc && (t ? t.test(p) : true))
+      .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle));
+    if (nextQueue.length > 0) {
+      setActiveId(nextQueue[0].id);
+    } else {
+      setActiveId(null);
+    }
+  }, [phase, classifyModal, prospects, q, setActiveId, toast]);
+
+  // Safe and deterministic candidate calculation for the next prospect in queue
+  const getNextProspectId = useCallback((currentQueue, currentProspectId) => {
+    if (!currentProspectId || !currentQueue.length) return null;
+    const currentIdx = currentQueue.findIndex((p) => p.id === currentProspectId);
+    if (currentIdx === -1) return currentQueue[0]?.id || null;
+    for (let step = 1; step < currentQueue.length; step++) {
+      const candidate = currentQueue[(currentIdx + step) % currentQueue.length];
+      if (candidate && candidate.id !== currentProspectId && !done.has(candidate.id)) {
+        return candidate.id;
+      }
+    }
+    if (currentQueue.length > 1) {
+      return currentQueue[(currentIdx + 1) % currentQueue.length]?.id || null;
+    }
+    return null;
+  }, [done]);
 
   const go = useCallback((dir) => {
     if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
@@ -93,7 +210,7 @@ export default function Dialer() {
     }
   }, [active, phase, classifyModal, toast, patchLocal, refreshStats]);
 
-  // When clicking hang up button, trigger the classification modal
+  // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
     if (phase !== 'active' || !callId || !active) return;
     const dur = secRef.current;
@@ -107,10 +224,30 @@ export default function Dialer() {
     });
   }, [phase, callId, active]);
 
+  // Discard an active or hung-up call without polluting stats or history
+  const handleDiscardCall = useCallback(async () => {
+    const idToDiscard = classifyModal ? classifyModal.callId : callId;
+    if (idToDiscard) {
+      try {
+        await api.discardCall(idToDiscard);
+      } catch {
+        /* ignore */
+      }
+    }
+    setPhase('idle');
+    setCallId(null);
+    setClassifyModal(null);
+    setQuickNote('');
+    toast('Call discarded');
+    await Promise.all([refreshProspects(), refreshStats()]);
+  }, [classifyModal, callId, toast, refreshProspects, refreshStats]);
+
   const commitClassification = useCallback(async (outcomeId, chosenStage, noteText) => {
     if (!classifyModal) return;
     const o = OUTCOMES.find((x) => x.id === outcomeId) || OUTCOMES[0];
     const pid = classifyModal.prospect.id;
+    const nextId = getNextProspectId(queue, pid);
+
     try {
       await api.logCall(classifyModal.callId, { outcome: outcomeId, duration_sec: classifyModal.duration });
       if (chosenStage && chosenStage !== classifyModal.prospect.stage) {
@@ -127,13 +264,15 @@ export default function Dialer() {
       setClassifyModal(null);
       setCallId(null);
       await Promise.all([refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcomeId !== 'meeting_booked') setTimeout(() => go(1), 900);
+      if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
+        setTimeout(() => setActiveId(nextId), 750);
+      }
     } catch (e) {
       toast(e.message, 'error');
     }
-  }, [classifyModal, updateProspect, autoNext, go, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, queue, getNextProspectId, updateProspect, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
 
-  // Direct outcome logging (from 1-8 key or outcome buttons)
+  // Direct outcome logging (from 1-8 keys or outcome buttons during active call)
   const logOutcome = useCallback(async (outcome) => {
     if (classifyModal) {
       commitClassification(outcome, targetStage, customNote);
@@ -142,6 +281,7 @@ export default function Dialer() {
     if (phase !== 'active' || !callId || !active) return;
     const o = OUTCOMES.find((x) => x.id === outcome);
     const finished = active.id;
+    const nextId = getNextProspectId(queue, finished);
     const noteToSave = quickNoteRef.current.trim();
     try {
       await api.logCall(callId, { outcome, duration_sec: secRef.current });
@@ -155,11 +295,15 @@ export default function Dialer() {
       setCallId(null);
       setQuickNote('');
       await Promise.all([refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcome !== 'meeting_booked') setTimeout(() => go(1), 900);
-    } catch (e) { toast(e.message, 'error'); }
-  }, [classifyModal, commitClassification, targetStage, customNote, phase, callId, active, autoNext, go, refreshProspects, refreshStats, reload, toast]);
+      if (autoNext && outcome !== 'meeting_booked' && nextId) {
+        setTimeout(() => setActiveId(nextId), 750);
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }, [classifyModal, commitClassification, targetStage, customNote, phase, callId, active, queue, getNextProspectId, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
 
-  // Save quick note directly to server
+  // Save quick live note directly to prospect record
   const saveQuickNoteNow = async () => {
     const t = quickNote.trim();
     if (!t || !active) return;
@@ -173,28 +317,61 @@ export default function Dialer() {
     }
   };
 
-  // keyboard shortcuts
+  // Quick add from dialer queue
+  const handleQuickAdd = async (newProspectData) => {
+    const p = await api.addProspect(newProspectData);
+    await Promise.all([refreshProspects(), refreshStats()]);
+    toast('Prospect added to queue');
+    if (p && p.id) {
+      setActiveId(p.id);
+    }
+  };
+
+  // Comprehensive keyboard shortcut routing
   useEffect(() => {
     const onKey = (e) => {
       const tag = (e.target.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) {
+        return;
+      }
+
+      // Modal keyboard handling
+      if (classifyModal) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          handleDiscardCall();
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          commitClassification('conversation', targetStage, customNote);
+        } else if (/^[1-8]$/.test(e.key)) {
+          e.preventDefault();
+          commitClassification(OUTCOMES[Number(e.key) - 1].id, targetStage, customNote);
+        }
+        return;
+      }
+
+      // Normal stage shortcuts
       if (e.key === 'c') {
         e.preventDefault();
-        if (phase === 'idle' && !classifyModal) startCall();
+        if (phase === 'idle') startCall();
         else if (phase === 'active') hangUp();
-      }
-      else if (e.key === 'h' && phase === 'active') { e.preventDefault(); hangUp(); }
-      else if (e.key === 'ArrowRight') go(1);
-      else if (e.key === 'ArrowLeft') go(-1);
-      else if (e.key === 'n') {
+      } else if (e.key === 'h' && phase === 'active') {
+        e.preventDefault();
+        hangUp();
+      } else if (e.key === 'ArrowRight') {
+        go(1);
+      } else if (e.key === 'ArrowLeft') {
+        go(-1);
+      } else if (e.key === 'n') {
         e.preventDefault();
         document.getElementById('top-quick-note')?.focus();
+      } else if (/^[1-8]$/.test(e.key) && phase === 'active') {
+        logOutcome(OUTCOMES[Number(e.key) - 1].id);
       }
-      else if (/^[1-8]$/.test(e.key)) logOutcome(OUTCOMES[Number(e.key) - 1].id);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, handleDiscardCall, commitClassification, targetStage, customNote]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -212,35 +389,51 @@ export default function Dialer() {
 
   return (
     <div className="dialer">
-      {/* queue */}
+      {/* QUEUE SIDEBAR */}
       <section className="glass queue">
         <div className="seg">
           {TABS.map((t) => (
-            <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>
+            <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => handleTabChange(t.id)}>
               {tab === t.id && <motion.span layoutId="segpill" className="seg-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
               <span>{t.label}</span>
             </button>
           ))}
         </div>
-        <div className="search"><Search size={15} /><input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
-        <div className="queue-meta"><span>{queue.length} in queue</span><span>{done.size} done this session</span></div>
+        <div className="search">
+          <Search size={15} />
+          <input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        <div className="queue-meta">
+          <span>{queue.length} in queue</span>
+          <span>{done.size} dialed</span>
+          <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
+        </div>
         <div className="queue-list">
           {queue.map((p) => {
             const on = active?.id === p.id;
             return (
-              <button key={p.id} disabled={(calling || !!classifyModal) && !on} className={`q-item ${on ? 'on' : ''} ${done.has(p.id) ? 'done' : ''}`} onClick={() => !calling && !classifyModal && setActiveId(p.id)}>
+              <button
+                key={p.id}
+                ref={on ? activeItemRef : null}
+                disabled={(calling || !!classifyModal) && !on}
+                className={`q-item ${on ? 'on' : ''} ${done.has(p.id) ? 'done' : ''}`}
+                onClick={() => !calling && !classifyModal && setActiveId(p.id)}
+              >
                 {on && <motion.span layoutId="qpill" className="q-pill" transition={{ type: 'spring', stiffness: 400, damping: 36 }} />}
                 <Avatar name={p.name || p.company} size={34} seed={p.id + p.name} />
-                <div className="q-txt"><b>{p.name || '(no name)'}</b><span>{p.company || p.phone}</span></div>
+                <div className="q-txt">
+                  <b>{p.name || '(no name)'}</b>
+                  <span>{p.company || p.phone}</span>
+                </div>
                 {done.has(p.id) ? <Check size={16} className="q-check" /> : <i className="dot" style={{ background: stageMeta(p.stage).color }} />}
               </button>
             );
           })}
-          {queue.length === 0 && <div className="muted small center pad">Nobody here. Try another tab.</div>}
+          {queue.length === 0 && <div className="muted small center pad">Nobody here. Try another tab or add one above.</div>}
         </div>
       </section>
 
-      {/* center */}
+      {/* CENTER STAGE */}
       <section className="stage">
         {active ? (
           <>
@@ -358,7 +551,7 @@ export default function Dialer() {
               {phase === 'active' && (
                 <div className="row gap justify-between" style={{ marginTop: '10px' }}>
                   <button className="btn danger sm" onClick={hangUp}><PhoneOff size={14} /> Hang Up & Classify</button>
-                  <button className="link-btn" onClick={() => { setPhase('idle'); setCallId(null); setQuickNote(''); }}><SkipForward size={13} /> Discard without logging</button>
+                  <button className="link-btn" onClick={handleDiscardCall}><SkipForward size={13} /> Discard without logging</button>
                 </div>
               )}
               {dry && phase === 'idle' && <div className="hint-dry">Test mode is on. Calls are simulated. Turn it off in Settings when ready to dial live.</div>}
@@ -378,11 +571,13 @@ export default function Dialer() {
             </div>
           </>
         ) : (
-          <Empty icon={<Search size={30} />} title="Nobody matches" sub="Change the tab or search to find prospects." />
+          <Empty icon={<Search size={30} />} title="Nobody matches" sub="Change the tab, clear the search, or add a prospect to start calling.">
+            <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={16} /> Add a prospect</button>
+          </Empty>
         )}
       </section>
 
-      {/* right */}
+      {/* RIGHT SIDEBAR */}
       <section className="side-right">
         {active && (
           <>
@@ -406,13 +601,14 @@ export default function Dialer() {
       <AnimatePresence>
         {classifyModal && (
           <>
-            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setClassifyModal(null)} />
+            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={handleDiscardCall} />
             <motion.div className="modal classify-modal" initial={{ opacity: 0, scale: 0.95, y: -20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: -20 }}>
               <div className="modal-head">
                 <div>
                   <div className="eyebrow" style={{ color: '#38bdf8' }}>Call Finished ({fmtDur(classifyModal.duration)})</div>
                   <h3 style={{ fontSize: '20px', fontWeight: 800 }}>How would you classify {classifyModal.prospect.name || 'this prospect'}?</h3>
                 </div>
+                <button className="icon-btn" onClick={handleDiscardCall} title="Discard call"><X size={16} /></button>
               </div>
 
               <div className="classify-content">
@@ -466,7 +662,7 @@ export default function Dialer() {
               </div>
 
               <div className="modal-foot">
-                <button className="btn" onClick={() => setClassifyModal(null)}>Cancel</button>
+                <button className="btn danger" onClick={handleDiscardCall} title="Delete this call record without logging">Discard call</button>
                 <button
                   className="btn primary"
                   onClick={() => commitClassification('conversation', targetStage, customNote)}
@@ -476,6 +672,16 @@ export default function Dialer() {
               </div>
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* QUICK ADD MODAL */}
+      <AnimatePresence>
+        {showAdd && (
+          <QuickAddModal
+            onClose={() => setShowAdd(false)}
+            onAdded={handleQuickAdd}
+          />
         )}
       </AnimatePresence>
     </div>

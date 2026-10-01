@@ -7,13 +7,13 @@ import ProspectCard from './ProspectCard.jsx';
 import Notes, { CallHistory, useDetail } from './Notes.jsx';
 
 function Inner({ id }) {
-  const { prospects, setDrawerId, openInDialer, refreshProspects, refreshStats, toast } = useStore();
+  const { prospects, setDrawerId, openInDialer, deleteProspect } = useStore();
   const p = prospects.find((x) => x.id === id);
   const { detail, reload } = useDetail(id);
   if (!p) return null;
   const del = async () => {
     if (!confirm(`Delete ${p.name || 'this prospect'} and all their notes?`)) return;
-    await api.deleteProspect(id); setDrawerId(null); refreshProspects(); refreshStats(); toast('Prospect deleted');
+    await deleteProspect(id);
   };
   return (
     <>

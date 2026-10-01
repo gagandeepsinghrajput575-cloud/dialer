@@ -50,9 +50,10 @@ export default function Pipeline() {
     setDragging(null);
     const to = e.over?.id;
     const p = e.active?.data?.current?.p;
-    if (to && p && p.stage !== to) {
+    const targetStage = STAGES.find((s) => s.id === to);
+    if (to && p && targetStage && p.stage !== to) {
       updateProspect(p.id, { stage: to });
-      toast(`${p.name || 'Prospect'} → ${STAGES.find((s) => s.id === to).label}`);
+      toast(`${p.name || 'Prospect'} → ${targetStage.label}`);
     }
   };
 

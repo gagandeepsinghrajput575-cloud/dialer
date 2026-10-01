@@ -1,0 +1,33 @@
+{
+  "name": "pulse-dialer",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "vite build",
+    "start": "node server/index.js",
+    "dev": "concurrently -k \"node server/index.js\" \"vite\"",
+    "app": "vite build && node server/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Sonetel-powered dialer + mini CRM",
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "papaparse": "^5.7.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^9.2.4",
+    "framer-motion": "^13.5.0",
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "vite": "^8.3.2"
+  }
+}

@@ -5,7 +5,7 @@ import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
-import { Avatar, Empty, Switch } from '../components/ui.jsx';
+import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import { OUTCOMES, STAGES, fmtDur, stageMeta, useTimer } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
@@ -51,7 +51,13 @@ export default function Dialer() {
     return prospects
       .filter((p) => !p.dnc && t.test(p))
       .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle))
-      .sort((a, b) => a.id - b.id);
+      .sort((a, b) => {
+        // Prioritize prospects with a phone number so you can dial right away
+        const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
+        const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
+        if (hasPhoneA !== hasPhoneB) return hasPhoneB - hasPhoneA;
+        return a.id - b.id;
+      });
   }, [prospects, tab, q]);
 
   const active = useMemo(() => prospects.find((p) => p.id === activeId) || queue[0] || null, [prospects, activeId, queue]);
@@ -249,6 +255,15 @@ export default function Dialer() {
                     {active.dnc && <span className="dnc-badge sm"><Ban size={12} /> DNC</span>}
                   </div>
                   <div className="banner-contacts">
+                    {active.phone ? (
+                      <span className="banner-phone-chip">
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value={active.phone} placeholder="+91…" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                      </span>
+                    ) : (
+                      <span className="banner-phone-chip missing">
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value="" placeholder="Click to add phone (+91…)" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                      </span>
+                    )}
                     {active.email ? (
                       <a href={`mailto:${active.email}`} className="banner-email-chip" title="Click to email">
                         <Mail size={14} /> <span>{active.email}</span>
@@ -268,7 +283,7 @@ export default function Dialer() {
               {/* QUICK TOP NOTES BOX - ALWAYS AT THE TOP */}
               <div className="top-notes-box">
                 <div className="top-notes-head">
-                  <label htmlFor="top-quick-note"><NotebookPen size={14} /> <b>Live Notes</b> <small>(saves with call)</small></label>
+                  <label htmlFor="top-quick-note"><NotebookPen size={14} /> <b>Live Notes</b> <small>(synced with lower notes)</small></label>
                   {quickNote.trim() && (
                     <button className="btn sm primary" onClick={saveQuickNoteNow}>Save now</button>
                   )}
@@ -290,7 +305,7 @@ export default function Dialer() {
               <div className="callbar-top">
                 <div>
                   <div className="eyebrow">{phase === 'idle' ? 'Ready to dial' : phase === 'dialing' ? 'Connecting…' : 'Call in progress'}</div>
-                  <div className="callnum">{active.phone || 'No number'}</div>
+                  <div className="callnum">{active.phone || 'No number (add phone above)'}</div>
                   <div className="callwho">
                     <strong>{active.name}</strong>
                     {active.email ? ` · ${active.email}` : ''}
@@ -309,7 +324,7 @@ export default function Dialer() {
                         className={`call-btn ${phase === 'active' ? 'hangup-active' : phase}`}
                         onClick={phase === 'active' ? hangUp : startCall}
                         disabled={(phase === 'dialing') || active.dnc || !active.phone}
-                        title={phase === 'active' ? "Hang up & Classify (H or C)" : "Call (C)"}
+                        title={phase === 'active' ? "Hang up & Classify (H or C)" : active.phone ? "Call (C)" : "Add phone number to dial"}
                       >
                         {phase === 'dialing' ? (
                           <Loader2 size={26} className="spin" />
@@ -371,7 +386,17 @@ export default function Dialer() {
       <section className="side-right">
         {active && (
           <>
-            <div className="glass pad-lg"><Notes key={active.id} pid={active.id} notes={detail?.notes || []} reload={reload} autoFocusKey={noteFocus} /></div>
+            <div className="glass pad-lg">
+              <Notes
+                key={active.id}
+                pid={active.id}
+                notes={detail?.notes || []}
+                reload={reload}
+                autoFocusKey={noteFocus}
+                draftValue={quickNote}
+                onDraftChange={setQuickNote}
+              />
+            </div>
             <div className="glass pad-lg"><CallHistory calls={detail?.calls || []} /></div>
           </>
         )}

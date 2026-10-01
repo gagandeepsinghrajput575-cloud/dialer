@@ -15,9 +15,11 @@ export function useDetail(id) {
   return { detail, reload };
 }
 
-export default function Notes({ pid, notes = [], reload, autoFocusKey }) {
+export default function Notes({ pid, notes = [], reload, autoFocusKey, draftValue, onDraftChange }) {
   const { toast } = useStore();
-  const [draft, setDraft] = useState('');
+  const [internalDraft, setInternalDraft] = useState('');
+  const draft = draftValue !== undefined ? draftValue : internalDraft;
+  const setDraft = onDraftChange || setInternalDraft;
   const draftRef = useRef('');
   const ta = useRef(null);
   draftRef.current = draft;

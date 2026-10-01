@@ -434,3 +434,192 @@ input[type='date'].inline-edit { color-scheme: dark; }
   .info-grid, .extra-grid, .form.two, .map-grid { grid-template-columns: 1fr; }
   .goal, .funnel, .week, .pipe-mini, .recent { grid-column: span 12; }
 }
+
+/* TOP PROSPECT BANNER - PROMINENT NAME & EMAIL (NO SCROLL) */
+.top-prospect-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding: 18px 22px;
+  background: linear-gradient(135deg, rgba(22, 27, 54, 0.9), rgba(15, 18, 38, 0.95));
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+}
+.banner-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  flex: 1;
+}
+.banner-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.banner-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.banner-name {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #fff;
+  line-height: 1.1;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.banner-title-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a78bfa;
+  background: rgba(139, 92, 246, 0.16);
+  padding: 3px 10px;
+  border-radius: 99px;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+.banner-contacts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.banner-email-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  text-decoration: none;
+  transition: all 0.15s;
+}
+.banner-email-chip:hover {
+  background: rgba(56, 189, 248, 0.22);
+  color: #e0f2fe;
+}
+.banner-email-chip.muted {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--line);
+}
+.banner-company-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+/* TOP QUICK NOTES BOX */
+.top-notes-box {
+  width: 320px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.top-notes-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+.top-notes-head label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #c4b5fd;
+  cursor: pointer;
+}
+.top-notes-head label small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.top-notes-input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #fff;
+  resize: none;
+  outline: none;
+  transition: all 0.15s;
+}
+.top-notes-input:focus {
+  border-color: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+}
+
+/* HANGUP ACTIVE BUTTON (RED GLOW) */
+.call-btn.hangup-active {
+  background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+  box-shadow: 0 10px 34px rgba(239, 68, 68, 0.6) !important;
+}
+
+/* CLASSIFICATION MODAL */
+.classify-modal {
+  width: min(600px, 94vw);
+  background: #0f132a;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
+  border-radius: 20px;
+}
+.classify-label {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+.classify-outcomes-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.classify-note-input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  color: #fff;
+  resize: vertical;
+  outline: none;
+}
+.classify-note-input:focus {
+  border-color: rgba(139, 92, 246, 0.6);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+}
+@media (max-width: 1100px) {
+  .top-prospect-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .top-notes-box {
+    width: 100%;
+  }
+}
+

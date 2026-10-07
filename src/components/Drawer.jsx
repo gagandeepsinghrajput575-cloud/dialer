@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { X, PhoneCall, Trash2 } from 'lucide-react';
+import { X, PhoneCall, Trash2, Mail } from 'lucide-react';
+import EmailComposer, { VerifyBadge } from './EmailComposer.jsx';
 import { useStore } from '../store.jsx';
 import { api } from '../api';
 import ProspectCard from './ProspectCard.jsx';
@@ -10,18 +11,33 @@ function Inner({ id }) {
   const { prospects, setDrawerId, openInDialer, deleteProspect } = useStore();
   const p = prospects.find((x) => x.id === id);
   const { detail, reload } = useDetail(id);
+  const [mailing, setMailing] = useState(false);
+  const [verdict, setVerdict] = useState(null);
   if (!p) return null;
   const del = async () => {
     if (!confirm(`Delete ${p.name || 'this prospect'} and all their notes?`)) return;
     await deleteProspect(id);
   };
+  // Check the address before the agent spends time writing to it.
+  const checkEmail = async () => {
+    try { setVerdict(await api.verifyEmail(p.email)); } catch { setVerdict(null); }
+  };
   return (
     <>
       <div className="drawer-top">
         <button className="btn primary" onClick={() => openInDialer(id)} disabled={p.dnc || !p.phone}><PhoneCall size={16} /> Open in dialer</button>
+        <button className="btn" onClick={() => setMailing(true)} disabled={!p.email} title={p.email ? 'Send an email' : 'No email address on this prospect'}><Mail size={16} /> Email</button>
         <button className="icon-btn danger" onClick={del} title="Delete prospect"><Trash2 size={16} /></button>
         <button className="icon-btn" onClick={() => setDrawerId(null)} title="Close"><X size={18} /></button>
       </div>
+      {p.email && (
+        <div className="drawer-verify">
+          <button className="link-btn sm" onClick={checkEmail} title="Check whether this address can actually receive mail">
+            {verdict ? <VerifyBadge result={verdict} /> : <>Check {p.email}</>}
+          </button>
+        </div>
+      )}
+      {mailing && <EmailComposer prospectId={id} recipient={p.name} onClose={() => setMailing(false)} />}
       <div className="drawer-body">
         <ProspectCard p={p} />
         <Notes pid={id} notes={detail?.notes || []} reload={reload} />

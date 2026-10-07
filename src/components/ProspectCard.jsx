@@ -55,7 +55,7 @@ export default function ProspectCard({ p, big = false }) {
 
       <div className="info-grid">
         <Row icon={Phone} label="Phone" extra={<CopyBtn text={p.phone} />}>
-          <Editable className="phone-big" value={p.phone} placeholder="+91…" onSave={save('phone')} />
+          <Editable className="phone-big" value={p.phone} placeholder="+45 20 12 34 56" onSave={save('phone')} />
         </Row>
         <Row icon={Mail} label="Email" extra={<><CopyBtn text={p.email} />{p.email && <a className="icon-btn sm" href={`mailto:${p.email}`} title="Send email"><Mail size={14} /></a>}</>}>
           <Editable value={p.email} placeholder="name@company.com" onSave={save('email')} />

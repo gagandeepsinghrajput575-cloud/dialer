@@ -11,7 +11,7 @@ export default function Toasts() {
         {toasts.map((t) => (
           <motion.div key={t.id} layout className={`toast ${t.type}`} initial={{ opacity: 0, x: 40, scale: 0.95 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 40, scale: 0.95 }} transition={{ type: 'spring', stiffness: 400, damping: 30 }}>
             {t.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
-            <span>{t.msg}</span>
+            <span>{t.msg}{t.repeats > 1 ? ` (×${t.repeats})` : ''}</span>
           </motion.div>
         ))}
       </AnimatePresence>

@@ -15,12 +15,16 @@ export function useDetail(id) {
   return { detail, reload };
 }
 
-export default function Notes({ pid, notes = [], reload, autoFocusKey, draftValue, onDraftChange }) {
+export default function Notes({ pid, notes = [], reload, autoFocusKey, draftValue, onDraftChange, draftRef: externalDraftRef }) {
   const { toast } = useStore();
   const [internalDraft, setInternalDraft] = useState('');
   const draft = draftValue !== undefined ? draftValue : internalDraft;
   const setDraft = onDraftChange || setInternalDraft;
-  const draftRef = useRef('');
+  const ownDraftRef = useRef('');
+  // When the caller owns the draft it shares its ref, so clearing the draft after a call is
+  // synchronous. Otherwise this cleanup can still see the old text on unmount and save the
+  // note a second time (React flushes state after the cleanup for an unmounting tree runs).
+  const draftRef = externalDraftRef || ownDraftRef;
   const ta = useRef(null);
   draftRef.current = draft;
 
@@ -81,7 +85,7 @@ export function CallHistory({ calls = [] }) {
               <i className="dot" style={{ background: o ? o.color : c.status === 'failed' ? '#f87171' : '#64748b' }} />
               <div>
                 <b>{o ? o.label : c.status === 'failed' ? 'Failed to connect' : 'No result logged'}</b>
-                <span>{fmtDateTime(c.started_at)}{c.dry_run ? ' · test' : ''}</span>
+                <span>{fmtDateTime(c.started_at)}{c.dry_run ? ' · test' : ''}{c.dial_uri ? ` · ${c.dial_uri}` : ''}</span>
               </div>
               <em>{c.duration_sec ? fmtDur(c.duration_sec) : ''}</em>
             </div>

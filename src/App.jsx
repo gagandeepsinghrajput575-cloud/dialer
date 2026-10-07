@@ -1,7 +1,8 @@
 import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { LayoutDashboard, PhoneCall, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical } from 'lucide-react';
+import { LayoutDashboard, PhoneCall, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical, Headphones } from 'lucide-react';
 import { useStore } from './store.jsx';
+import { softphoneLabel } from './utils.js';
 import Dashboard from './pages/Dashboard.jsx';
 import Dialer from './pages/Dialer.jsx';
 import Prospects from './pages/Prospects.jsx';
@@ -23,7 +24,10 @@ const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipe
 
 export default function App() {
   const { view, setView, settings, stats, prospects } = useStore();
-  const Page = PAGES[view] || Dashboard;
+  // Object.hasOwn, not PAGES[view]: a hash like "#constructor" or "#__proto__" resolves
+  // through the prototype chain to a truthy non-component, and React then renders a blank
+  // page (verified: 0 nodes for "#constructor", 69 for a normal route).
+  const Page = Object.hasOwn(PAGES, view) ? PAGES[view] : Dashboard;
   const dry = settings?.dry_run === '1';
   const today = stats?.today;
 
@@ -66,7 +70,8 @@ export default function App() {
             </div>
           )}
           <div className={`mode-chip ${dry ? 'dry' : 'live'}`} onClick={() => setView('settings')} title="Change in Settings">
-            <span className="dot" />{dry ? <><FlaskConical size={13} /> Test mode: no real calls</> : 'Live: calls are real'}
+            <span className="dot" />
+            {dry ? <><FlaskConical size={13} /> Test mode: simulated calls</> : <><Headphones size={13} /> Live: {softphoneLabel(settings?.telephony_mode)} dials directly</>}
           </div>
         </div>
       </aside>

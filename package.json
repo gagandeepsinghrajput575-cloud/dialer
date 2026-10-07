@@ -5,26 +5,32 @@
     "build": "vite build",
     "start": "node server/index.js",
     "dev": "concurrently -k \"node server/index.js\" \"vite\"",
-    "app": "vite build && node server/index.js"
+    "app": "vite build && node server/index.js",
+    "test": "node test/all-tests.js",
+    "test:unit": "node test/unit/repositories.test.js && node test/unit/hardening.test.js && node test/unit/email.test.js",
+    "test:ui": "vite build && node test/ui/dialer-race.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Sonetel-powered dialer + mini CRM",
+  "description": "VOIP.SO & Softphone-powered dialer + mini CRM (layered Express backend, Danish cold-calling superpowers)",
   "dependencies": {
     "better-sqlite3": "^12.11.1",
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "multer": "^2.4.0",
+    "nodemailer": "^10.0.16",
     "papaparse": "^5.7.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^9.2.4",
     "framer-motion": "^13.5.0",
+    "jsdom": "^30.1.2",
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

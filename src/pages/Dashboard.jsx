@@ -67,7 +67,7 @@ export default function Dashboard() {
       </header>
 
       {settings?.dry_run === '1' && (
-        <div className="banner"><Sparkles size={16} /> Test mode is on. Calls are simulated, so numbers below include test calls. Switch to live in <a onClick={() => setView('settings')}>Settings</a> once your Sonetel details are in.</div>
+        <div className="banner"><Sparkles size={16} /> Test mode is on. Calls are simulated. Switch to Live mode in <a onClick={() => setView('settings')}>Settings</a> once Zoiper is connected — the numbers below include your test calls.</div>
       )}
 
       <div className="stat-grid">

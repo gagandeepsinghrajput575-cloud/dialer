@@ -94,3 +94,53 @@ export function useTimer(running) {
   }, [running]);
   return sec;
 }
+
+// ---------- direct softphone dialing ----------
+// The softphone that answers a sip:/tel: URI on the agent's desktop.
+export const SOFTPHONE_LABEL = { softphone: 'Zoiper', webrtc: 'browser softphone' };
+export const softphoneLabel = (mode) => SOFTPHONE_LABEL[mode] || SOFTPHONE_LABEL.softphone;
+export const ccLabel = (cc) => (cc ? `+${String(cc).replace(/\D/g, '')}` : '');
+
+// Cross-tab mutual exclusion. The per-tab dialLockRef cannot see a second open tab, so two
+// tabs could both dial the same prospect and both log a call. navigator.locks is the
+// browser's own mutex; where it is missing (older engines, jsdom) we degrade to running the
+// work directly, which is exactly today's behaviour — never worse.
+export function withCrossTabLock(key, fn) {
+  if (typeof navigator === 'undefined' || !navigator.locks || typeof navigator.locks.request !== 'function') {
+    return Promise.resolve({ blocked: false, value: undefined, ran: false, noApi: true }).then((r) => fn().then((v) => ({ ...r, value: v, ran: true })));
+  }
+  return navigator.locks.request(key, { ifAvailable: true }, (lock) => {
+    if (!lock) return { blocked: true, ran: false, noApi: false };
+    return Promise.resolve()
+      .then(fn)
+      .then((value) => ({ blocked: false, value, ran: true, noApi: false }));
+  });
+}
+
+// Hand the dial URI to the OS so the registered softphone (Zoiper, Linphone, Telephone)
+// dials out immediately.
+//
+// This clicks a real <a> rather than pointing a hidden iframe at the URI. Browsers only
+// show the "Open Zoiper?" external-protocol prompt when the navigation is tied to user
+// activation, and an iframe src set from a timer/key handler routinely loses it — the dial
+// then fails *silently*, which is the worst possible outcome for a power dialer. A click on
+// an anchor we created inside the keydown handler keeps the activation, and target="_self"
+// on an unknown scheme never navigates the page away.
+export function dispatchDialUri(uri) {
+  if (!uri || typeof document === 'undefined') return false;
+  try {
+    const a = document.createElement('a');
+    a.href = uri;
+    a.rel = 'noopener noreferrer';
+    a.target = '_self';
+    a.setAttribute('aria-hidden', 'true');
+    a.style.cssText = 'position:fixed;top:-1000px;left:-1000px;width:1px;height:1px;opacity:0';
+    document.body.appendChild(a);
+    a.click();
+    if (a.parentNode) a.remove();
+    return true;
+  } catch {
+    // Older engines: a plain assignment still reaches the OS handler.
+    try { window.location.href = uri; return true; } catch { return false; }
+  }
+}

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2 } from 'lucide-react';
+import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2, Loader2 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { Avatar, Empty, StageBadge } from '../components/ui.jsx';
@@ -10,10 +10,19 @@ function AddModal({ onClose }) {
   const { refreshProspects, refreshStats, toast, setDrawerId } = useStore();
   const [f, setF] = useState({ name: '', phone: '', email: '', company: '', title: '' });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const [saving, setSaving] = useState(false);
   const save = async () => {
     if (!f.phone && !f.name) return toast('Add at least a name or phone number', 'error');
-    const p = await api.addProspect(f);
-    await refreshProspects(); refreshStats(); toast('Prospect added'); onClose(); setDrawerId(p.id);
+    setSaving(true);
+    try {
+      const p = await api.addProspect(f);
+      await refreshProspects(); refreshStats(); toast('Prospect added'); onClose(); setDrawerId(p.id);
+    } catch (e) {
+      // Without this the modal just sat there: the rejection escaped to the console and the
+      // agent got no message at all when the server rejected the row.
+      toast(e.message, 'error');
+    }
+    setSaving(false);
   };
   return (
     <>
@@ -22,11 +31,11 @@ function AddModal({ onClose }) {
         <div className="modal-head"><h3>Add prospect</h3><button className="icon-btn" onClick={onClose}><X size={16} /></button></div>
         <div className="form">
           <label>Name<input autoFocus value={f.name} onChange={set('name')} placeholder="Full name" /></label>
-          <label>Phone<input value={f.phone} onChange={set('phone')} placeholder="+91 98100 12345" /></label>
+          <label>Phone<input value={f.phone} onChange={set('phone')} placeholder="+45 20 12 34 56" /></label>
           <label>Email<input value={f.email} onChange={set('email')} placeholder="name@company.com" /></label>
           <div className="two"><label>Company<input value={f.company} onChange={set('company')} /></label><label>Title<input value={f.title} onChange={set('title')} /></label></div>
         </div>
-        <div className="modal-foot"><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}>Add prospect</button></div>
+        <div className="modal-foot"><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={saving}>{saving ? <Loader2 size={15} className="spin" /> : null} Add prospect</button></div>
       </motion.div>
     </>
   );

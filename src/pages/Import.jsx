@@ -26,7 +26,7 @@ function guess(headers) {
   return m;
 }
 
-const SAMPLE = 'Name,Phone,Email,Company,Title,City,Notes from list\nAarav Mehta,9810012345,aarav@northwind.in,Northwind Logistics,Operations Head,Delhi,Met at expo\nPriya Sharma,+919811123456,priya@brightlabs.io,BrightLabs,Founder,Noida,Referred by Rahul\n';
+const SAMPLE = 'Name,Phone,Email,Company,Title,City,Notes from list\nMette Jensen,20123456,mette@nordiclogistik.dk,Nordic Logistik,Driftschef,København,Met at expo\nAnders Nielsen,+4522345678,anders@brightlab.dk,BrightLab ApS,Founder,Aarhus,Referred by Sofie\n';
 
 export default function ImportPage() {
   const { refreshProspects, refreshStats, setView, toast } = useStore();

@@ -4,14 +4,15 @@ import {
   PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare,
   CalendarCheck, OctagonX, Circle, Phone, PhoneCall, Search,
   ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
-  Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X
+  Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
+  Headphones, RotateCw, FlaskConical, Wifi
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
-import { OUTCOMES, STAGES, fmtDur, stageMeta, useTimer } from '../utils.js';
+import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
 const TABS = [
@@ -60,7 +61,7 @@ function QuickAddModal({ onClose, onAdded }) {
         </div>
         <div className="form">
           <label>Name<input autoFocus value={f.name} onChange={set('name')} placeholder="Full name" /></label>
-          <label>Phone<input value={f.phone} onChange={set('phone')} placeholder="+91 98100 12345" /></label>
+          <label>Phone<input value={f.phone} onChange={set('phone')} placeholder="+45 20 12 34 56" /></label>
           <label>Email<input value={f.email} onChange={set('email')} placeholder="name@company.com" /></label>
           <div className="two">
             <label>Company<input value={f.company} onChange={set('company')} /></label>
@@ -84,6 +85,8 @@ export default function Dialer() {
   const [q, setQ] = useState('');
   const [phase, setPhase] = useState('idle'); // idle | dialing | active
   const [callId, setCallId] = useState(null);
+  const [dial, setDial] = useState(null); // { uri, full, protocol, mode, phone } handed to the softphone
+  const [launched, setLaunched] = useState(false); // OS accepted the dial URI
   const [done, setDone] = useState(() => new Set());
   const [autoNext, setAutoNext] = useState(true);
   const [flash, setFlash] = useState(null);
@@ -99,7 +102,34 @@ export default function Dialer() {
   secRef.current = sec;
   const quickNoteRef = useRef('');
   quickNoteRef.current = quickNote;
+  // Clears the draft in the ref *and* the state, so the Notes auto-save-on-unmount guard
+  // cannot fire with text that has already been written to the prospect.
+  const clearQuickNote = useCallback((restore = '') => {
+    quickNoteRef.current = restore;
+    setQuickNote(restore);
+  }, []);
   const activeItemRef = useRef(null);
+
+  // Synchronous guards. React state updates are asynchronous, so a second keypress landing in
+  // the same tick would otherwise sail past every `phase !== 'idle'` check and dial twice
+  // (or log the same call twice). Refs are updated immediately, so they close that window.
+  const phaseRef = useRef('idle');
+  const classifyRef = useRef(null);
+  const dialLockRef = useRef(false);
+  const logLockRef = useRef(false);
+  const setPhaseSafe = useCallback((next) => { phaseRef.current = next; setPhase(next); }, []);
+  const setClassifySafe = useCallback((next) => { classifyRef.current = next; setClassifyModal(next); }, []);
+  const timersRef = useRef(new Set());
+  // setTimeout that is always cleaned up, so nothing fires after the dialer unmounts.
+  const later = useCallback((fn, ms) => {
+    const id = setTimeout(() => { timersRef.current.delete(id); fn(); }, ms);
+    timersRef.current.add(id);
+    return id;
+  }, []);
+  useEffect(() => {
+    const pending = timersRef.current;
+    return () => { for (const id of pending) clearTimeout(id); pending.clear(); };
+  }, []);
 
   // Compute active queue for current tab & filter
   const queue = useMemo(() => {
@@ -150,7 +180,7 @@ export default function Dialer() {
 
   // When switching tabs explicitly, pick the top item of the new queue
   const handleTabChange = useCallback((newTabId) => {
-    if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
+    if (phaseRef.current !== 'idle' || classifyRef.current) return toast('Finish or classify this call first.', 'error');
     setTab(newTabId);
     const t = TABS.find((x) => x.id === newTabId);
     const needle = q.trim().toLowerCase();
@@ -182,7 +212,7 @@ export default function Dialer() {
   }, [done]);
 
   const go = useCallback((dir) => {
-    if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
+    if (phaseRef.current !== 'idle' || classifyRef.current) return toast('Finish or classify this call first.', 'error');
     if (!queue.length) return;
     let i = idx;
     for (let step = 0; step < queue.length; step++) {
@@ -192,41 +222,86 @@ export default function Dialer() {
     setActiveId(queue[i].id);
   }, [phase, classifyModal, queue, idx, done, setActiveId, toast]);
 
+  // Hand the dial URI (sip:/tel:) straight to the desktop softphone and go 'active' immediately —
+  // no second leg to wait for, so the timer and the shortcut keys are live the moment you press C.
   const startCall = useCallback(async () => {
-    if (!active || phase !== 'idle' || classifyModal) return;
+    // One dial at a time, per tick and per request: mash C as hard as you like.
+    if (dialLockRef.current) return;
+    if (!active || phaseRef.current !== 'idle' || classifyRef.current) return;
     if (active.dnc) return toast('This prospect is marked Do Not Call.', 'error');
     if (!active.phone) return toast('No phone number for this prospect.', 'error');
-    setPhase('dialing');
+    // Danish 70/90 ranges cost real money. Ask first, because the call is logged and the
+    // softphone is handed the number the moment this function continues.
+    const nk = active.number_kind;
+    if (nk && nk.expensive && !confirm(`${nk.label}\n${active.phone}\n\n${nk.note}\n\nDial anyway?`)) return;
+    dialLockRef.current = true;
+    setPhaseSafe('dialing');
+    setLaunched(false);
     try {
-      const r = await api.call(active.id);
+      // Hold a cross-tab mutex around the server call only. Two open tabs used to be able to
+      // dial the same prospect and log two calls; now the second tab is refused instead.
+      const guarded = await withCrossTabLock(`pulse-dial-${active.id}`, () => api.call(active.id));
+      if (guarded.blocked) {
+        setPhaseSafe('idle');
+        return toast('Another tab is already dialing this prospect.', 'error');
+      }
+      const r = guarded.value;
       setCallId(r.callId);
-      setPhase('active');
+      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, phone: r.phone });
       patchLocal(active.id, { call_count: active.call_count + 1, last_called_at: new Date().toISOString() });
-      toast(r.dryRun ? 'Test mode: call simulated' : 'Calling… answer your phone/SIP to connect');
+      const softphone = softphoneLabel(r.telephonyMode);
+      if (r.dryRun) {
+        toast(`Test mode: ${r.dialUri} simulated in-browser`);
+      } else {
+        const ok = r.telephonyMode === 'softphone' ? dispatchDialUri(r.dialUri) : false;
+        setLaunched(ok);
+        if (ok) toast(`${softphone} is dialing ${r.phone}…`);
+        else toast(r.warning || `Launch ${r.dialUri} in ${softphone} to connect`, 'error');
+      }
+      setPhaseSafe('active');
+      refreshStats();
     } catch (e) {
-      setPhase('idle');
+      setPhaseSafe('idle');
+      setDial(null);
       toast(e.message, 'error');
       refreshStats();
+    } finally {
+      dialLockRef.current = false;
     }
-  }, [active, phase, classifyModal, toast, patchLocal, refreshStats]);
+  }, [active, setPhaseSafe, toast, patchLocal, refreshStats]);
+
+  // Re-dispatch the same URI when the OS prompt was dismissed or the softphone was closed.
+  const relaunchSoftphone = useCallback(() => {
+    if (!dial?.uri) return;
+    const softphone = softphoneLabel(dial.mode);
+    if (phaseRef.current === 'idle') return;
+    // Test mode must never hand a dial URI to the OS — not even on a re-launch.
+    if (settings?.dry_run === '1') {
+      return toast(`Test mode is on: ${dial.uri} stays simulated, nothing is dialed.`);
+    }
+    const ok = dispatchDialUri(dial.uri);
+    setLaunched(ok);
+    toast(ok ? `Re-launching ${dial.uri} in ${softphone}` : `Could not launch ${softphone} — open it and dial ${dial.phone} manually`, ok ? 'ok' : 'error');
+  }, [dial, settings, toast]);
 
   // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
-    if (phase !== 'active' || !callId || !active) return;
+    if (phaseRef.current !== 'active' || !callId || !active) return;
     const dur = secRef.current;
-    setPhase('idle');
+    setPhaseSafe('idle');
+    setLaunched(false);
     setTargetStage(active.stage || 'contacted');
     setCustomNote(quickNoteRef.current.trim());
-    setClassifyModal({
+    setClassifySafe({
       callId,
       duration: dur,
       prospect: active,
     });
-  }, [phase, callId, active]);
+  }, [callId, active, setPhaseSafe, setClassifySafe]);
 
   // Discard an active or hung-up call without polluting stats or history
   const handleDiscardCall = useCallback(async () => {
-    const idToDiscard = classifyModal ? classifyModal.callId : callId;
+    const idToDiscard = classifyRef.current ? classifyRef.current.callId : callId;
     if (idToDiscard) {
       try {
         await api.discardCall(idToDiscard);
@@ -234,23 +309,27 @@ export default function Dialer() {
         /* ignore */
       }
     }
-    setPhase('idle');
+    setPhaseSafe('idle');
     setCallId(null);
-    setClassifyModal(null);
+    setClassifySafe(null);
+    setDial(null);
+    setLaunched(false);
     setQuickNote('');
     toast('Call discarded');
     await Promise.all([refreshProspects(), refreshStats()]);
-  }, [classifyModal, callId, toast, refreshProspects, refreshStats]);
+  }, [callId, setPhaseSafe, setClassifySafe, toast, refreshProspects, refreshStats]);
 
   const commitClassification = useCallback(async (outcomeId, chosenStage, noteText) => {
-    if (!classifyModal) return;
+    const modal = classifyRef.current || classifyModal;
+    if (!modal || logLockRef.current) return; // one classification per call, however fast you press
+    logLockRef.current = true;
     const o = OUTCOMES.find((x) => x.id === outcomeId) || OUTCOMES[0];
-    const pid = classifyModal.prospect.id;
+    const pid = modal.prospect.id;
     const nextId = getNextProspectId(queue, pid);
 
     try {
-      await api.logCall(classifyModal.callId, { outcome: outcomeId, duration_sec: classifyModal.duration });
-      if (chosenStage && chosenStage !== classifyModal.prospect.stage) {
+      await api.logCall(modal.callId, { outcome: outcomeId, duration_sec: modal.duration });
+      if (chosenStage && chosenStage !== modal.prospect.stage) {
         await updateProspect(pid, { stage: chosenStage });
       }
       const noteToSave = (noteText || '').trim();
@@ -258,50 +337,64 @@ export default function Dialer() {
         await api.addNote(pid, noteToSave);
       }
       setFlash({ label: o.label, color: o.color, id: Date.now() });
-      setTimeout(() => setFlash(null), 1400);
+      later(() => setFlash(null), 1400);
       setDone((d) => new Set(d).add(pid));
       setQuickNote('');
-      setClassifyModal(null);
+      setClassifySafe(null);
       setCallId(null);
+      setDial(null);
+      setLaunched(false);
       await Promise.all([refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
-        setTimeout(() => setActiveId(nextId), 750);
+        later(() => setActiveId(nextId), 750);
       }
     } catch (e) {
       toast(e.message, 'error');
+    } finally {
+      logLockRef.current = false;
     }
-  }, [classifyModal, queue, getNextProspectId, updateProspect, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, queue, getNextProspectId, updateProspect, autoNext, setActiveId, setClassifySafe, later, refreshProspects, refreshStats, reload, toast]);
 
   // Direct outcome logging (from 1-8 keys or outcome buttons during active call)
   const logOutcome = useCallback(async (outcome) => {
-    if (classifyModal) {
+    if (classifyRef.current || classifyModal) {
       commitClassification(outcome, targetStage, customNote);
       return;
     }
-    if (phase !== 'active' || !callId || !active) return;
+    if (logLockRef.current) return; // a mashed outcome key logs the call once, saves the note once
+    if (phaseRef.current !== 'active' || !callId || !active) return;
+    logLockRef.current = true;
     const o = OUTCOMES.find((x) => x.id === outcome);
     const finished = active.id;
     const nextId = getNextProspectId(queue, finished);
     const noteToSave = quickNoteRef.current.trim();
+    // Hand the note over before any await: from here on the draft is empty, so nothing can
+    // save it a second time while this request is in flight.
+    if (noteToSave) clearQuickNote();
     try {
       await api.logCall(callId, { outcome, duration_sec: secRef.current });
       if (noteToSave) {
         await api.addNote(finished, noteToSave);
       }
       setFlash({ label: o.label, color: o.color, id: Date.now() });
-      setTimeout(() => setFlash(null), 1300);
+      later(() => setFlash(null), 1300);
       setDone((d) => new Set(d).add(finished));
-      setPhase('idle');
+      setPhaseSafe('idle');
       setCallId(null);
-      setQuickNote('');
+      setDial(null);
+      setLaunched(false);
+      clearQuickNote();
       await Promise.all([refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcome !== 'meeting_booked' && nextId) {
-        setTimeout(() => setActiveId(nextId), 750);
+        later(() => setActiveId(nextId), 750);
       }
     } catch (e) {
+      clearQuickNote(noteToSave); // give the note back so the agent does not lose it
       toast(e.message, 'error');
+    } finally {
+      logLockRef.current = false;
     }
-  }, [classifyModal, commitClassification, targetStage, customNote, phase, callId, active, queue, getNextProspectId, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, commitClassification, targetStage, customNote, callId, active, queue, getNextProspectId, autoNext, setActiveId, setPhaseSafe, clearQuickNote, later, refreshProspects, refreshStats, reload, toast]);
 
   // Save quick live note directly to prospect record
   const saveQuickNoteNow = async () => {
@@ -319,11 +412,13 @@ export default function Dialer() {
 
   // Quick add from dialer queue
   const handleQuickAdd = async (newProspectData) => {
-    const p = await api.addProspect(newProspectData);
-    await Promise.all([refreshProspects(), refreshStats()]);
-    toast('Prospect added to queue');
-    if (p && p.id) {
-      setActiveId(p.id);
+    try {
+      const p = await api.addProspect(newProspectData);
+      await Promise.all([refreshProspects(), refreshStats()]);
+      toast('Prospect added to queue');
+      if (p && p.id) setActiveId(p.id);
+    } catch (e) {
+      toast(e.message, 'error');
     }
   };
 
@@ -334,9 +429,16 @@ export default function Dialer() {
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) {
         return;
       }
+      // Deliberately checks e.target (where the keystroke happened) and NOT
+      // document.activeElement: focus legitimately stays in the live-notes box between calls,
+      // and C / 1-8 must keep working while it does.
+      // OS key repeat (holding a key down) must not stack up calls or classifications.
+      if (e.repeat) return;
+      // Single-character shortcuts work regardless of Shift/CapsLock; named keys stay verbatim.
+      const k = typeof e.key === 'string' && e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
       // Modal keyboard handling
-      if (classifyModal) {
+      if (classifyRef.current || classifyModal) {
         if (e.key === 'Escape') {
           e.preventDefault();
           handleDiscardCall();
@@ -351,27 +453,30 @@ export default function Dialer() {
       }
 
       // Normal stage shortcuts
-      if (e.key === 'c') {
+      if (k === 'c') {
         e.preventDefault();
-        if (phase === 'idle') startCall();
-        else if (phase === 'active') hangUp();
-      } else if (e.key === 'h' && phase === 'active') {
+        if (phaseRef.current === 'idle') startCall();
+        else if (phaseRef.current === 'active') hangUp();
+      } else if (k === 'h' && phaseRef.current === 'active') {
         e.preventDefault();
         hangUp();
-      } else if (e.key === 'ArrowRight') {
+      } else if (k === 'ArrowRight') {
         go(1);
-      } else if (e.key === 'ArrowLeft') {
+      } else if (k === 'ArrowLeft') {
         go(-1);
-      } else if (e.key === 'n') {
+      } else if (k === 'n') {
         e.preventDefault();
         document.getElementById('top-quick-note')?.focus();
-      } else if (/^[1-8]$/.test(e.key) && phase === 'active') {
-        logOutcome(OUTCOMES[Number(e.key) - 1].id);
+      } else if (k === 'r' && phaseRef.current === 'active') {
+        e.preventDefault();
+        relaunchSoftphone();
+      } else if (/^[1-8]$/.test(k) && phaseRef.current === 'active') {
+        logOutcome(OUTCOMES[Number(k) - 1].id);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, handleDiscardCall, commitClassification, targetStage, customNote]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -386,6 +491,14 @@ export default function Dialer() {
 
   const calling = phase !== 'idle';
   const dry = settings?.dry_run === '1';
+  const softphone = softphoneLabel(settings?.telephony_mode);
+  const cc = ccLabel(settings?.default_country_code);
+  const proto = settings?.softphone_protocol === 'tel' ? 'tel' : 'sip';
+  const inflightText = dry
+    ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`}`
+    : launched || phase === 'dialing'
+      ? `Dialing via ${softphone} (${cc})…`
+      : `Waiting on ${softphone} (${cc})`;
 
   return (
     <div className="dialer">
@@ -450,11 +563,11 @@ export default function Dialer() {
                   <div className="banner-contacts">
                     {active.phone ? (
                       <span className="banner-phone-chip">
-                        <Phone size={14} /> <Editable className="banner-phone-edit" value={active.phone} placeholder="+91…" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value={active.phone} placeholder="+45 20 12 34 56" onSave={(v) => updateProspect(active.id, { phone: v })} />
                       </span>
                     ) : (
                       <span className="banner-phone-chip missing">
-                        <Phone size={14} /> <Editable className="banner-phone-edit" value="" placeholder="Click to add phone (+91…)" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value="" placeholder="Click to add phone (+45 20 12 34 56)" onSave={(v) => updateProspect(active.id, { phone: v })} />
                       </span>
                     )}
                     {active.email ? (
@@ -495,10 +608,43 @@ export default function Dialer() {
             {/* CALL BAR */}
             <div className={`glass callbar ${phase}`}>
               <div className="callbar-glow" />
+              <AnimatePresence>
+                {calling && (
+                  <motion.div
+                    className={`inflight ${dry ? 'dry' : launched ? 'live' : 'wait'}`}
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.22, ease: 'easeOut' }}
+                  >
+                    <span className="inflight-dot" />
+                    {dry ? <FlaskConical size={14} /> : launched ? <Headphones size={14} /> : <Wifi size={14} />}
+                    <span className="inflight-txt">{inflightText}</span>
+                    {dial?.uri && <code className="inflight-uri">{dial.uri}</code>}
+                    {!dry && phase === 'active' && (
+                      <button className="btn xs" onClick={relaunchSoftphone} title="Re-launch the softphone (R)">
+                        <RotateCw size={12} /> Re-launch
+                      </button>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <div className="callbar-top">
                 <div>
-                  <div className="eyebrow">{phase === 'idle' ? 'Ready to dial' : phase === 'dialing' ? 'Connecting…' : 'Call in progress'}</div>
-                  <div className="callnum">{active.phone || 'No number (add phone above)'}</div>
+                  <div className="eyebrow">
+                    {phase === 'idle' ? 'Ready to dial' : phase === 'dialing' ? `Dispatching to ${softphone}…` : 'Call in progress'}
+                  </div>
+                  <div className="callnum">
+                    {active.phone || 'No number (add phone above)'}
+                    {active.number_kind && (
+                      <span
+                        className={`num-kind ${active.number_kind.expensive ? 'expensive' : 'info'}`}
+                        title={active.number_kind.note}
+                      >
+                        {active.number_kind.label}
+                      </span>
+                    )}
+                  </div>
                   <div className="callwho">
                     <strong>{active.name}</strong>
                     {active.email ? ` · ${active.email}` : ''}
@@ -549,12 +695,29 @@ export default function Dialer() {
                 })}
               </div>
               {phase === 'active' && (
-                <div className="row gap justify-between" style={{ marginTop: '10px' }}>
-                  <button className="btn danger sm" onClick={hangUp}><PhoneOff size={14} /> Hang Up & Classify</button>
-                  <button className="link-btn" onClick={handleDiscardCall}><SkipForward size={13} /> Discard without logging</button>
+                <div className="row gap justify-between call-actions">
+                  <div className="row gap">
+                    <button className="btn danger sm" onClick={hangUp} title={dry ? 'Hang up and classify (H)' : `End the call in ${softphone}, then classify here (H)`}><PhoneOff size={14} /> Hang Up & Classify</button>
+                    <button className="link-btn" onClick={handleDiscardCall}><SkipForward size={13} /> Discard without logging</button>
+                  </div>
+                  {!dry && dial?.uri && (
+                    <a
+                      className="link-btn softphone-link"
+                      href={launched ? dial.full || dial.uri : dial.uri}
+                      title={`Launch ${dial.uri} in ${softphone}`}
+                    >
+                      <Headphones size={13} />
+                      {launched ? `Re-open ${dial.full || dial.uri}` : `${softphone} didn't open? Launch ${dial.uri}`}
+                    </a>
+                  )}
                 </div>
               )}
-              {dry && phase === 'idle' && <div className="hint-dry">Test mode is on. Calls are simulated. Turn it off in Settings when ready to dial live.</div>}
+              {dry && phase === 'idle' && (
+                <div className="hint-dry">
+                  <FlaskConical size={13} /> Test mode is on. Calls are simulated in the browser — nothing is dialed.
+                  Switch to Live mode in Settings once {softphone} is registered with VOIP.SO.
+                </div>
+              )}
               <AnimatePresence>
                 {flash && (
                   <motion.div key={flash.id} className="flash" style={{ '--c': flash.color }} initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.1 }}>
@@ -567,7 +730,7 @@ export default function Dialer() {
             {/* FULL DETAILS CARD */}
             <div className="glass card-wrap">
               <ProspectCard p={active} big />
-              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hangup · <kbd>1-8</kbd> classify · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
+              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>R</kbd> re-launch softphone · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
             </div>
           </>
         ) : (
@@ -590,6 +753,7 @@ export default function Dialer() {
                 autoFocusKey={noteFocus}
                 draftValue={quickNote}
                 onDraftChange={setQuickNote}
+                draftRef={quickNoteRef}
               />
             </div>
             <div className="glass pad-lg"><CallHistory calls={detail?.calls || []} /></div>

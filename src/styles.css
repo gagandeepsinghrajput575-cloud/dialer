@@ -723,3 +723,100 @@ input[type='date'].inline-edit { color-scheme: dark; }
 }
 .num-kind.expensive { background: rgba(251, 113, 133, 0.16); color: #fb7185; border: 1px solid rgba(251, 113, 133, 0.32); }
 .num-kind.info { background: rgba(96, 165, 250, 0.16); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.32); }
+
+/* ---------- server-paginated queue ---------- */
+.btn.xs { padding: 4px 9px; font-size: 11.5px; border-radius: 9px; gap: 5px; }
+.seg-count { position: relative; z-index: 1; margin-left: 5px; font-style: normal; font-size: 10.5px; font-weight: 700; padding: 0 5px; border-radius: 99px; background: rgba(255,255,255,0.12); color: var(--muted); }
+.seg button.on .seg-count { background: rgba(255,255,255,0.22); color: #fff; }
+.queue-sentinel { height: 1px; flex: none; }
+.load-more { width: 100%; margin-top: 5px; justify-content: center; }
+.load-more-count { font-style: normal; margin-left: 7px; opacity: 0.72; font-variant-numeric: tabular-nums; }
+.queue-end { padding: 10px 0 4px; font-size: 11.5px; }
+.queue-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.3); color: #fca5a5; font-size: 12.5px; }
+.queue-skeleton { display: flex; flex-direction: column; gap: 3px; }
+.q-skel { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+.q-skel-avatar { width: 34px; height: 34px; border-radius: 50%; flex: none; }
+.q-skel-lines { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.q-skel-lines i { display: block; height: 9px; border-radius: 5px; }
+.q-skel-lines i:last-child { width: 58%; }
+.q-skel-avatar, .q-skel-lines i {
+  background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.14), rgba(255,255,255,0.05));
+  background-size: 220% 100%; animation: shimmer 1.25s ease-in-out infinite;
+}
+@keyframes shimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
+.stage-loading { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 180px; color: var(--muted); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  .q-skel-avatar, .q-skel-lines i { animation: none; }
+  .queue-skeleton { opacity: 0.6; }
+}
+
+/* ---------- touch targets ----------
+   44x44 CSS px (WCAG 2.5.5 / Apple HIG / Material 48dp).
+   Scoped to coarse pointers so dense desktop layout is untouched. */
+button, a, label, summary, input, select, textarea,
+.q-item, .chip-btn, .stage-pill, .nav-item, .mode-chip, .table tbody tr {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (pointer: coarse) {
+  .btn { min-height: 44px; padding: 12px 18px; }
+  .btn.sm { min-height: 44px; padding: 11px 14px; font-size: 13px; }
+  .btn.xs { min-height: 44px; padding: 10px 13px; font-size: 12.5px; }
+  .icon-btn { width: 44px; height: 44px; border-radius: 13px; }
+  .icon-btn.sm { width: 44px; height: 44px; border-radius: 12px; }
+  .link-btn { min-height: 44px; padding: 12px 10px; font-size: 13.5px; }
+  .load-more { min-height: 46px; }
+
+  .nav { gap: 6px; }
+  .nav-item { min-height: 46px; padding: 12px 14px; }
+  .mode-chip { min-height: 44px; padding: 12px 14px; }
+  .seg { padding: 5px; }
+  .seg button { min-height: 44px; padding: 10px 4px; font-size: 13px; }
+  .chip-btn { min-height: 44px; padding: 10px 16px; font-size: 13px; }
+  .chips { gap: 8px; }
+  .stage-pill { min-height: 44px; padding: 10px 16px; font-size: 13px; }
+  .stage-picker { gap: 8px; }
+
+  .switch { width: 54px; height: 32px; padding: 4px; }
+  .switch span { width: 24px; height: 24px; }
+  .auto-next .switch { width: 54px; height: 32px; }
+  .auto-next .switch span { width: 24px; height: 24px; }
+  .dnc-toggle input, .check-row input { width: 22px; height: 22px; }
+  .dnc-toggle, .check-row { min-height: 44px; }
+
+  .queue-list { gap: 6px; }
+  .q-item { min-height: 52px; padding: 11px 13px; gap: 12px; }
+  .q-txt b { font-size: 14.5px; }
+  .q-txt span { font-size: 12.5px; }
+  .queue-meta { align-items: center; gap: 8px; min-height: 44px; }
+
+  .call-btn { width: 76px; height: 76px; }
+  .callctl { gap: 14px; }
+  .callctl .row.gap { gap: 16px; }
+  .outcomes { gap: 10px; }
+  .outcome { min-height: 84px; padding: 16px 8px 12px; font-size: 12.5px; gap: 7px; }
+  .outcome kbd { top: 7px; right: 7px; }
+  .grip { min-width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; }
+
+  .note-compose textarea, .form input, .form select, .search input,
+  .map-row select, .top-notes-input, .classify-note-input, .inline-edit {
+    font-size: 16px;
+  }
+  .search input, .queue .search input, .form input, .form select, .map-row select {
+    min-height: 44px; padding-top: 12px; padding-bottom: 12px;
+  }
+  .queue .search input { padding-left: 38px; }
+  .inline-edit { min-height: 44px; padding: 11px 9px; }
+  .top-notes-input, .classify-note-input { padding: 12px 14px; }
+
+  .table td { padding: 14px 16px; }
+  .table.compact td { padding: 12px; }
+  .cell-who b { font-size: 14px; }
+  .kcard { padding: 14px; }
+  .kcard-foot { gap: 8px; }
+  .note-meta { min-height: 44px; }
+  .drawer-top { gap: 10px; }
+  .modal-foot { gap: 12px; }
+  .banner-phone-chip, .banner-email-chip, .banner-company-chip { min-height: 40px; padding-top: 9px; padding-bottom: 9px; }
+}
+

@@ -10,8 +10,11 @@ import {
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
+import QueueList from '../components/QueueList.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
+import useServerQueue from '../useServerQueue.js';
+import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex, tabForProspect } from '../queue.js';
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
@@ -131,32 +134,51 @@ export default function Dialer() {
     return () => { for (const id of pending) clearTimeout(id); pending.clear(); };
   }, []);
 
-  // Compute active queue for current tab & filter
-  const queue = useMemo(() => {
-    const t = TABS.find((x) => x.id === tab);
-    const needle = q.trim().toLowerCase();
-    return prospects
-      .filter((p) => !p.dnc && (t ? t.test(p) : true))
-      .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle))
-      .sort((a, b) => {
-        const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
-        const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
-        if (hasPhoneA !== hasPhoneB) return hasPhoneB - hasPhoneA;
-        return a.id - b.id;
-      });
-  }, [prospects, tab, q]);
+  // Server-backed queue: filtering, ranking, and paging live on the server
+  const queue = useServerQueue({ tab, q, limit: QUEUE_LIMIT });
+  const { items, total, counts, hasMore, loading, loadingMore, error } = queue;
 
-  // Always resolve active prospect from the active queue
+  // Selected prospect outside loaded page -> fetch on demand so center stage stays populated
+  const [pinned, setPinned] = useState(null);
+  const pinnedRef = useRef(null);
+  pinnedRef.current = pinned;
+  const pinTriedRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!activeId) {
+      if (pinnedRef.current) setPinned(null);
+      return undefined;
+    }
+    if (items.some((p) => p.id === activeId)) {
+      if (pinnedRef.current?.id === activeId) setPinned(null);
+      pinTriedRef.current.delete(activeId);
+      return undefined;
+    }
+    if (pinnedRef.current?.id === activeId) return undefined;
+    if (pinTriedRef.current.has(activeId)) return undefined;
+
+    let cancelled = false;
+    pinTriedRef.current.add(activeId);
+    api.prospect(activeId)
+      .then((p) => { if (!cancelled && p) setPinned(p); })
+      .catch(() => {
+        pinTriedRef.current.delete(activeId);
+      });
+    return () => { cancelled = true; };
+  }, [activeId, items]);
+
+  // Always resolve active prospect from active queue or pinned prospect
   const active = useMemo(() => {
     if (activeId) {
-      const match = queue.find((p) => p.id === activeId);
+      const match = items.find((p) => p.id === activeId);
       if (match) return match;
+      if (pinned && pinned.id === activeId) return pinned;
     }
-    return queue[0] || null;
-  }, [queue, activeId]);
+    return items[0] || null;
+  }, [items, activeId, pinned]);
 
   const { detail, reload } = useDetail(active?.id);
-  const idx = active ? queue.findIndex((p) => p.id === active.id) : -1;
+  const idx = active ? items.findIndex((p) => p.id === active.id) : -1;
 
   // Auto-scroll the active queue item into view smoothly
   useEffect(() => {
@@ -168,7 +190,7 @@ export default function Dialer() {
   // Synchronize tab when activeId changes externally (e.g. Prospects table 'Call')
   useEffect(() => {
     if (!activeId) return;
-    const target = prospects.find((p) => p.id === activeId);
+    const target = items.find((p) => p.id === activeId) || pinned;
     if (!target) return;
     const curTab = TABS.find((x) => x.id === tab);
     if (curTab && !curTab.test(target)) {
@@ -176,51 +198,41 @@ export default function Dialer() {
       else if (['contacted', 'interested', 'followup'].includes(target.stage)) setTab('follow');
       else setTab('all');
     }
-  }, [activeId, prospects, tab]);
+  }, [activeId, items, pinned, tab]);
 
   // When switching tabs explicitly, pick the top item of the new queue
   const handleTabChange = useCallback((newTabId) => {
     if (phaseRef.current !== 'idle' || classifyRef.current) return toast('Finish or classify this call first.', 'error');
     setTab(newTabId);
-    const t = TABS.find((x) => x.id === newTabId);
-    const needle = q.trim().toLowerCase();
-    const nextQueue = prospects
-      .filter((p) => !p.dnc && (t ? t.test(p) : true))
-      .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle));
-    if (nextQueue.length > 0) {
-      setActiveId(nextQueue[0].id);
-    } else {
-      setActiveId(null);
-    }
-  }, [phase, classifyModal, prospects, q, setActiveId, toast]);
+    setActiveId(null);
+  }, [toast]);
 
-  // Safe and deterministic candidate calculation for the next prospect in queue
+  // Candidate calculation for the next prospect in queue
   const getNextProspectId = useCallback((currentQueue, currentProspectId) => {
-    if (!currentProspectId || !currentQueue.length) return null;
-    const currentIdx = currentQueue.findIndex((p) => p.id === currentProspectId);
-    if (currentIdx === -1) return currentQueue[0]?.id || null;
-    for (let step = 1; step < currentQueue.length; step++) {
-      const candidate = currentQueue[(currentIdx + step) % currentQueue.length];
+    const list = Array.isArray(currentQueue) ? currentQueue : (items || []);
+    if (!currentProspectId || !list.length) return null;
+    const currentIdx = list.findIndex((p) => p.id === currentProspectId);
+    if (currentIdx === -1) return list[0]?.id || null;
+    for (let step = 1; step < list.length; step++) {
+      const candidate = list[(currentIdx + step) % list.length];
       if (candidate && candidate.id !== currentProspectId && !done.has(candidate.id)) {
         return candidate.id;
       }
     }
-    if (currentQueue.length > 1) {
-      return currentQueue[(currentIdx + 1) % currentQueue.length]?.id || null;
+    if (list.length > 1) {
+      return list[(currentIdx + 1) % list.length]?.id || null;
     }
     return null;
-  }, [done]);
+  }, [items, done]);
 
   const go = useCallback((dir) => {
     if (phaseRef.current !== 'idle' || classifyRef.current) return toast('Finish or classify this call first.', 'error');
-    if (!queue.length) return;
-    let i = idx;
-    for (let step = 0; step < queue.length; step++) {
-      i = (i + dir + queue.length) % queue.length;
-      if (dir < 0 || !done.has(queue[i].id) || step === queue.length - 1) break;
+    if (!items.length) return;
+    const nextIdx = stepIndex(items.length, idx, dir);
+    if (nextIdx >= 0 && items[nextIdx]) {
+      setActiveId(items[nextIdx].id);
     }
-    setActiveId(queue[i].id);
-  }, [phase, classifyModal, queue, idx, done, setActiveId, toast]);
+  }, [items, idx, setActiveId, toast]);
 
   // Hand the dial URI (sip:/tel:) straight to the desktop softphone and go 'active' immediately —
   // no second leg to wait for, so the timer and the shortcut keys are live the moment you press C.
@@ -316,8 +328,8 @@ export default function Dialer() {
     setLaunched(false);
     setQuickNote('');
     toast('Call discarded');
-    await Promise.all([refreshProspects(), refreshStats()]);
-  }, [callId, setPhaseSafe, setClassifySafe, toast, refreshProspects, refreshStats]);
+    await Promise.all([queue.refresh(), refreshProspects(), refreshStats()]);
+  }, [callId, queue, setPhaseSafe, setClassifySafe, toast, refreshProspects, refreshStats]);
 
   const commitClassification = useCallback(async (outcomeId, chosenStage, noteText) => {
     const modal = classifyRef.current || classifyModal;
@@ -325,7 +337,7 @@ export default function Dialer() {
     logLockRef.current = true;
     const o = OUTCOMES.find((x) => x.id === outcomeId) || OUTCOMES[0];
     const pid = modal.prospect.id;
-    const nextId = getNextProspectId(queue, pid);
+    const nextId = getNextProspectId(items, pid);
 
     try {
       await api.logCall(modal.callId, { outcome: outcomeId, duration_sec: modal.duration });
@@ -344,7 +356,7 @@ export default function Dialer() {
       setCallId(null);
       setDial(null);
       setLaunched(false);
-      await Promise.all([refreshProspects(), refreshStats(), reload()]);
+      await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
       }
@@ -353,7 +365,7 @@ export default function Dialer() {
     } finally {
       logLockRef.current = false;
     }
-  }, [classifyModal, queue, getNextProspectId, updateProspect, autoNext, setActiveId, setClassifySafe, later, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, items, getNextProspectId, updateProspect, autoNext, setActiveId, setClassifySafe, later, queue, refreshProspects, refreshStats, reload, toast]);
 
   // Direct outcome logging (from 1-8 keys or outcome buttons during active call)
   const logOutcome = useCallback(async (outcome) => {
@@ -366,7 +378,7 @@ export default function Dialer() {
     logLockRef.current = true;
     const o = OUTCOMES.find((x) => x.id === outcome);
     const finished = active.id;
-    const nextId = getNextProspectId(queue, finished);
+    const nextId = getNextProspectId(items, finished);
     const noteToSave = quickNoteRef.current.trim();
     // Hand the note over before any await: from here on the draft is empty, so nothing can
     // save it a second time while this request is in flight.
@@ -384,7 +396,7 @@ export default function Dialer() {
       setDial(null);
       setLaunched(false);
       clearQuickNote();
-      await Promise.all([refreshProspects(), refreshStats(), reload()]);
+      await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcome !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
       }
@@ -394,7 +406,7 @@ export default function Dialer() {
     } finally {
       logLockRef.current = false;
     }
-  }, [classifyModal, commitClassification, targetStage, customNote, callId, active, queue, getNextProspectId, autoNext, setActiveId, setPhaseSafe, clearQuickNote, later, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, commitClassification, targetStage, customNote, callId, active, items, getNextProspectId, autoNext, setActiveId, setPhaseSafe, clearQuickNote, later, queue, refreshProspects, refreshStats, reload, toast]);
 
   // Save quick live note directly to prospect record
   const saveQuickNoteNow = async () => {
@@ -509,6 +521,7 @@ export default function Dialer() {
             <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => handleTabChange(t.id)}>
               {tab === t.id && <motion.span layoutId="segpill" className="seg-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
               <span>{t.label}</span>
+              {counts?.[t.id] ? <em className="seg-count">{counts[t.id]}</em> : null}
             </button>
           ))}
         </div>
@@ -517,33 +530,25 @@ export default function Dialer() {
           <input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <div className="queue-meta">
-          <span>{queue.length} in queue</span>
+          <span>{total || items.length} in queue</span>
           <span>{done.size} dialed</span>
           <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
         </div>
-        <div className="queue-list">
-          {queue.map((p) => {
-            const on = active?.id === p.id;
-            return (
-              <button
-                key={p.id}
-                ref={on ? activeItemRef : null}
-                disabled={(calling || !!classifyModal) && !on}
-                className={`q-item ${on ? 'on' : ''} ${done.has(p.id) ? 'done' : ''}`}
-                onClick={() => !calling && !classifyModal && setActiveId(p.id)}
-              >
-                {on && <motion.span layoutId="qpill" className="q-pill" transition={{ type: 'spring', stiffness: 400, damping: 36 }} />}
-                <Avatar name={p.name || p.company} size={34} seed={p.id + p.name} />
-                <div className="q-txt">
-                  <b>{p.name || '(no name)'}</b>
-                  <span>{p.company || p.phone}</span>
-                </div>
-                {done.has(p.id) ? <Check size={16} className="q-check" /> : <i className="dot" style={{ background: stageMeta(p.stage).color }} />}
-              </button>
-            );
-          })}
-          {queue.length === 0 && <div className="muted small center pad">Nobody here. Try another tab or add one above.</div>}
-        </div>
+        <QueueList
+          items={items}
+          activeId={active?.id ?? null}
+          done={done}
+          locked={calling || !!classifyModal}
+          total={total}
+          hasMore={hasMore}
+          loading={loading}
+          loadingMore={loadingMore}
+          error={error}
+          onSelect={setActiveId}
+          onLoadMore={queue.loadMore}
+          onRetry={queue.retry}
+          activeItemRef={activeItemRef}
+        />
       </section>
 
       {/* CENTER STAGE */}

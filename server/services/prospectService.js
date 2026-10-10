@@ -189,21 +189,69 @@ const QUEUE_TABS = {
   all: () => true,
 };
 
-function rankedQueue({ tab = 'all', search: q = '' } = {}) {
+function encodeCursor(row, index) {
+  return Buffer.from(JSON.stringify({ id: row.id, idx: index }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(raw) {
+  try {
+    return JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
   const smart = settings.getBool('queue_smart_sort');
   const test = QUEUE_TABS[tab] || QUEUE_TABS.all;
   const needle = String(q || '').trim().toLowerCase();
   const now = Date.now();
 
-  const rows = prospects.list()
-    .filter((p) => !p.dnc && test(p))
+  const allFiltered = prospects.list().filter((p) => !p.dnc);
+  const counts = {
+    new: allFiltered.filter((p) => QUEUE_TABS.new(p)).length,
+    follow: allFiltered.filter((p) => QUEUE_TABS.follow(p)).length,
+    all: allFiltered.length,
+  };
+
+  const rows = allFiltered
+    .filter((p) => test(p))
     .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle))
     .map((p) => ({ ...p, number_kind: telephony.numberKind(p.phone), ...rankProspect(p, now) }))
     .sort((a, b) => (smart ? b.score - a.score : 0) || (b.phone ? 1 : 0) - (a.phone ? 1 : 0) || a.id - b.id);
 
   const reasons = {};
   for (const r of rows) reasons[r.reason] = (reasons[r.reason] || 0) + 1;
-  return { smartSort: smart, businessHours: telephony.businessHours(new Date()), rows, reasons, total: rows.length };
+
+  let startIndex = 0;
+  if (cursor) {
+    const cur = decodeCursor(cursor);
+    if (cur && cur.id != null) {
+      const idx = rows.findIndex((r) => r.id === cur.id);
+      if (idx !== -1) startIndex = idx + 1;
+      else if (typeof cur.idx === 'number') startIndex = cur.idx + 1;
+    }
+  }
+
+  const pageSize = limit ? Math.min(500, Math.max(1, limit)) : rows.length;
+  const pageRows = rows.slice(startIndex, startIndex + pageSize);
+  const hasMore = startIndex + pageRows.length < rows.length;
+  const nextCursor = hasMore && pageRows.length ? encodeCursor(pageRows[pageRows.length - 1], startIndex + pageRows.length - 1) : null;
+
+  return {
+    smartSort: smart,
+    businessHours: telephony.businessHours(new Date()),
+    rows: pageRows,
+    items: pageRows,
+    reasons,
+    total: rows.length,
+    counts,
+    hasMore,
+    limit: pageSize,
+    tab,
+    q: needle,
+    nextCursor,
+  };
 }
 
 module.exports = {

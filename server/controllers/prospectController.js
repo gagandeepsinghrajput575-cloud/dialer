@@ -22,7 +22,12 @@ const bulk = asyncHandler(async (req, res) => res.json(await prospectService.bul
 
 const search = asyncHandler(async (req, res) => res.json(prospectService.search(req.query.q, req.query.limit)));
 
-const queue = asyncHandler(async (req, res) => res.json(prospectService.rankedQueue({ tab: req.query.tab, search: req.query.q })));
+const queue = asyncHandler(async (req, res) => res.json(prospectService.rankedQueue({
+  tab: req.query.tab,
+  search: req.query.q,
+  limit: req.query.limit !== undefined ? Number(req.query.limit) : undefined,
+  cursor: req.query.cursor,
+})));
 
 const followUps = asyncHandler(async (req, res) => res.json({ due: followUpService.due(), businessHours: telephony.businessHours() }));
 

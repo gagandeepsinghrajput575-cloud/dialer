@@ -145,7 +145,12 @@ const emailSend = z.object({
   force: z.boolean().optional(),
 });
 const emailDraft = z.object({ noteText: z.string().max(8000).optional(), at: z.string().max(40).optional() });
-const queueQuery = z.object({ tab: z.enum(['new', 'follow', 'all']).optional(), q: z.string().max(120).optional() });
+const queueQuery = z.object({
+  tab: z.enum(['new', 'follow', 'all']).optional(),
+  q: z.string().max(120).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  cursor: z.string().max(256).optional(),
+});
 
 module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,

@@ -15,15 +15,25 @@ function loadToken() {
   return tokenLoad;
 }
 
-async function req(method, url, body, isForm, retried) {
+function toFetchSignal(sig) {
+  if (!sig) return undefined;
+  if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent)) {
+    return undefined;
+  }
+  return sig;
+}
+
+async function req(method, url, body, isForm, retried, signal) {
   await loadToken();
   const headers = {};
   if (body && !isForm) headers['Content-Type'] = 'application/json';
   if (sessionToken) headers['x-pulse-token'] = sessionToken;
+  headers['x-requested-with'] = 'pulse-dialer';
   const res = await fetch(url, {
     method,
     headers,
     body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
+    signal: toFetchSignal(signal),
   });
   let data = null;
   try { data = await res.json(); } catch { /* empty */ }
@@ -31,7 +41,7 @@ async function req(method, url, body, isForm, retried) {
   if (res.status === 401 && !retried) {
     sessionToken = '';
     await loadToken();
-    return req(method, url, body, isForm, true);
+    return req(method, url, body, isForm, true, signal);
   }
   if (!res.ok) {
     const err = new Error((data && (data.error || data.message)) || `Request failed (${res.status})`);
@@ -62,7 +72,18 @@ export const api = {
   demo: () => req('POST', '/api/demo', {}),
 
   // ---- Phase A: queue intelligence, voicemail drop, copilot, follow-ups, ops ----
-  queue: (tab = 'all', q = '') => req('GET', `/api/queue?tab=${encodeURIComponent(tab)}${q ? `&q=${encodeURIComponent(q)}` : ''}`),
+  queue: (opts = 'all', q = '') => {
+    if (typeof opts === 'string') {
+      return req('GET', `/api/queue?tab=${encodeURIComponent(opts)}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
+    }
+    const { tab = 'all', q: query = '', limit = 50, cursor = null, signal } = opts || {};
+    const params = new URLSearchParams();
+    if (tab) params.set('tab', tab);
+    if (query) params.set('q', query);
+    if (limit) params.set('limit', String(limit));
+    if (cursor) params.set('cursor', String(cursor));
+    return req('GET', `/api/queue?${params.toString()}`, null, false, false, signal);
+  },
   searchProspects: (q, limit = 25) => req('GET', `/api/prospects/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   followUps: () => req('GET', '/api/prospects/follow-ups'),
   voicemailDrop: (id, b) => req('POST', `/api/calls/${id}/voicemail-drop`, b || {}),

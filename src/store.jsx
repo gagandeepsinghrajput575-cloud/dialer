@@ -86,6 +86,16 @@ export function StoreProvider({ children }) {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  const listenersRef = useRef({ saved: new Set(), deleted: new Set() });
+  const onProspectSaved = useCallback((fn) => {
+    listenersRef.current.saved.add(fn);
+    return () => listenersRef.current.saved.delete(fn);
+  }, []);
+  const onProspectDeleted = useCallback((fn) => {
+    listenersRef.current.deleted.add(fn);
+    return () => listenersRef.current.deleted.delete(fn);
+  }, []);
+
   // optimistic local patch + server save
   const updateProspect = useCallback(async (id, patch) => {
     setProspects((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -93,6 +103,7 @@ export function StoreProvider({ children }) {
       const saved = await api.updateProspect(id, patch);
       setProspects((list) => list.map((p) => (p.id === id ? { ...p, ...saved } : p)));
       refreshStats();
+      for (const fn of listenersRef.current.saved) { try { fn(saved); } catch {} }
       return saved;
     } catch (e) { toast(e.message, 'error'); refreshProspects(); return null; }
   }, [refreshProspects, refreshStats, toast]);
@@ -107,6 +118,7 @@ export function StoreProvider({ children }) {
       setActiveId((cur) => (cur === id ? null : cur));
       setDrawerId((cur) => (cur === id ? null : cur));
       await Promise.all([refreshProspects(), refreshStats()]);
+      for (const fn of listenersRef.current.deleted) { try { fn(id); } catch {} }
       toast('Prospect deleted');
     } catch (e) {
       toast(e.message, 'error');
@@ -116,7 +128,8 @@ export function StoreProvider({ children }) {
   const value = useMemo(() => ({
     prospects, loaded, stats, settings, view, setView, activeId, setActiveId, drawerId, setDrawerId,
     toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect]);
+    onProspectSaved, onProspectDeleted,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, onProspectSaved, onProspectDeleted]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

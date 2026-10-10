@@ -22,10 +22,13 @@ const NAV = [
 const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipeline: Pipeline, import: ImportPage, settings: SettingsPage };
 
 export default function App() {
-  const { view, setView, settings, stats, prospects } = useStore();
+  const { view, setView, settings, stats } = useStore();
   const Page = PAGES[view] || Dashboard;
   const dry = settings?.dry_run === '1';
   const today = stats?.today;
+  // The full list is loaded lazily, so take the nav badge from stats instead —
+  // it is always up to date and costs no extra request.
+  const prospectCount = stats?.total ?? 0;
 
   return (
     <div className="shell">
@@ -51,7 +54,7 @@ export default function App() {
                 {active && <motion.span layoutId="navpill" className="nav-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
                 <Icon size={18} />
                 <span>{n.label}</span>
-                {n.id === 'prospects' && <em className="count">{prospects.length}</em>}
+                {n.id === 'prospects' && <em className="count">{prospectCount}</em>}
               </button>
             );
           })}

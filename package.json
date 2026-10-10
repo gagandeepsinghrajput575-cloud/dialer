@@ -5,7 +5,10 @@
     "build": "vite build",
     "start": "node server/index.js",
     "dev": "concurrently -k \"node server/index.js\" \"vite\"",
-    "app": "vite build && node server/index.js"
+    "app": "vite build && node server/index.js",
+    "test": "node test/run.js",
+    "test:ui": "node test/ui.mjs && node test/ui.dom.mjs && node test/queue.hook.mjs",
+    "test:all": "node test/run.js && node test/ui.mjs && node test/ui.dom.mjs && node test/queue.hook.mjs"
   },
   "keywords": [],
   "author": "",
@@ -17,7 +20,6 @@
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "multer": "^2.4.0",
-    "papaparse": "^5.7.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -25,6 +27,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^9.2.4",
     "framer-motion": "^13.5.0",
+    "jsdom": "^30.1.2",
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

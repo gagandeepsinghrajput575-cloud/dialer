@@ -1,8 +1,19 @@
-async function req(method, url, body, isForm) {
+import { buildQueueQuery } from './queue.js';
+
+// The server refuses mutating requests that do not carry this header. A
+// cross-origin page cannot set it without triggering a CORS preflight, which the
+// server declines — that is what stops a malicious website from driving the API.
+const CSRF_HEADER = { 'X-Requested-With': 'pulse-dialer' };
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+async function req(method, url, body, isForm, opts) {
+  const headers = { ...(MUTATING.has(method) ? CSRF_HEADER : {}) };
+  if (body && !isForm) headers['Content-Type'] = 'application/json';
   const res = await fetch(url, {
     method,
-    headers: body && !isForm ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
+    signal: opts?.signal,
   });
   let data = null;
   try { data = await res.json(); } catch { /* empty */ }
@@ -15,6 +26,9 @@ async function req(method, url, body, isForm) {
 }
 export const api = {
   prospects: () => req('GET', '/api/prospects'),
+  /** Server-backed, cursor-paginated dialer queue. See GET /api/queue. */
+  queue: ({ tab = 'all', q = '', limit, cursor = null, signal } = {}) =>
+    req('GET', `/api/queue?${buildQueueQuery({ tab, q, limit, cursor })}`, null, false, { signal }),
   prospect: (id) => req('GET', `/api/prospects/${id}`),
   addProspect: (b) => req('POST', '/api/prospects', b),
   updateProspect: (id, b) => req('PATCH', `/api/prospects/${id}`, b),

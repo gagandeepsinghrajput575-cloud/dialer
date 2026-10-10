@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { DndContext, DragOverlay, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from '@dnd-kit/core';
 import { Phone, Building2, GripVertical } from 'lucide-react';
@@ -42,8 +42,11 @@ function Column({ stage, items }) {
 }
 
 export default function Pipeline() {
-  const { prospects, updateProspect, toast } = useStore();
+  const { prospects, updateProspect, ensureProspects, toast } = useStore();
   const [dragging, setDragging] = useState(null);
+
+  // The kanban shows every stage at once, so it needs the full list.
+  useEffect(() => { ensureProspects(); }, [ensureProspects]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const onEnd = (e) => {

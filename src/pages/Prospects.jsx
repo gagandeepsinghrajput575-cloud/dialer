@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2 } from 'lucide-react';
 import { api } from '../api';
@@ -33,10 +33,13 @@ function AddModal({ onClose }) {
 }
 
 export default function Prospects() {
-  const { prospects, loaded, setDrawerId, openInDialer, setView, refreshProspects, deleteProspect } = useStore();
+  const { prospects, loaded, setDrawerId, openInDialer, setView, refreshProspects, ensureProspects, deleteProspect } = useStore();
   const [q, setQ] = useState('');
   const [stage, setStage] = useState('all');
   const [adding, setAdding] = useState(false);
+
+  // This page renders the whole list, so it is the one that asks for it.
+  useEffect(() => { ensureProspects(); }, [ensureProspects]);
 
   const rows = useMemo(() => {
     const n = q.trim().toLowerCase();

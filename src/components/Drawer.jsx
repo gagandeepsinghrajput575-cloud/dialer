@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X, PhoneCall, Trash2 } from 'lucide-react';
 import { useStore } from '../store.jsx';
@@ -7,9 +7,14 @@ import ProspectCard from './ProspectCard.jsx';
 import Notes, { CallHistory, useDetail } from './Notes.jsx';
 
 function Inner({ id }) {
-  const { prospects, setDrawerId, openInDialer, deleteProspect } = useStore();
-  const p = prospects.find((x) => x.id === id);
+  const { prospects, setDrawerId, openInDialer, deleteProspect, onProspectSaved } = useStore();
   const { detail, reload } = useDetail(id);
+  // ProspectCard saves through the store, so re-read after a save instead of
+  // showing the values from before the edit.
+  useEffect(() => onProspectSaved((saved) => { if (saved?.id === id) reload(); }), [onProspectSaved, id, reload]);
+  // Prefer the freshly fetched record: the full list is loaded lazily, so it may
+  // not be in memory when the drawer is opened from the dashboard's recent calls.
+  const p = detail || prospects.find((x) => x.id === id);
   if (!p) return null;
   const del = async () => {
     if (!confirm(`Delete ${p.name || 'this prospect'} and all their notes?`)) return;

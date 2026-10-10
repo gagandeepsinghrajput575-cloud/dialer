@@ -9,9 +9,63 @@ const { db, getSetting, setSetting, allSettings } = require('./db');
 const sonetel = require('./sonetel');
 
 const app = express();
-app.use(cors());
+
+// ---------- request hardening ----------
+// The browser client is always same-origin in a supported setup: the vite dev
+// server proxies /api, and production serves dist/ from this same process. So a
+// wildcard CORS policy bought nothing and advertised the whole API to every
+// website the operator ever visited. Origins are opt-in via CORS_ORIGIN.
+const CORS_ORIGINS = String(process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: CORS_ORIGINS.length ? CORS_ORIGINS : false }));
+
+// Tightening CORS is not enough on its own: it hides the *response*, it does not
+// stop the *request*. A cross-origin `fetch` with a text/plain body is a "simple
+// request" — no preflight — and endpoints like POST /api/prospects/clear never
+// read the body, so the damage would already be done. Requiring a custom header
+// on every mutating call is what actually blocks it: a simple request cannot set
+// one, and setting it forces a preflight, which the policy above refuses.
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const CSRF_HEADER = 'x-requested-with';
+const CSRF_TOKEN = 'pulse-dialer';
+app.use('/api', (req, res, next) => {
+  if (SAFE_METHODS.has(req.method)) return next();
+  if (req.get(CSRF_HEADER) !== CSRF_TOKEN) {
+    return res.status(403).json({ error: 'Cross-site request refused: missing X-Requested-With header.' });
+  }
+  next();
+});
+
+// No helmet dependency needed for this set.
+//
+// frame-ancestors is configurable because this app is routinely viewed through
+// a reverse proxy in an iframe (preview environments, an internal portal). A
+// hardcoded 'none' would render those blank. The default stays locked down and
+// the operator opts in with e.g. FRAME_ANCESTORS="https://*.example.com".
+const FRAME_ANCESTORS = String(process.env.FRAME_ANCESTORS || "'none'").trim() || "'none'";
+const CSP = [
+  "default-src 'self'", "base-uri 'self'", "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:",
+  "font-src 'self' data:", "connect-src 'self'", "form-action 'self'",
+  `frame-ancestors ${FRAME_ANCESTORS}`, "object-src 'none'",
+].join('; ');
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', CSP);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // X-Frame-Options cannot express a per-origin allowlist, so it is only sent
+  // for the locked-down default; CSP frame-ancestors covers the rest.
+  if (FRAME_ANCESTORS === "'none'") res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+});
+
 app.use(express.json({ limit: '25mb' }));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
+
+// Growth limits. Both endpoints are unauthenticated by design (single-operator
+// tool), so without a ceiling one stray loop — or one hostile page — could grow
+// the database without bound.
+const DEMO_MAX_PROSPECTS = 500;
+const BULK_MAX_ROWS = 100000;
 
 const STAGES = ['new', 'contacted', 'interested', 'followup', 'meeting', 'won', 'lost'];
 const OUTCOMES = ['no_answer', 'voicemail', 'wrong_number', 'gatekeeper', 'hung_up', 'conversation', 'meeting_booked', 'dnc'];
@@ -28,7 +82,9 @@ function cleanStr(val) {
   return s;
 }
 
-function normalizePhone(raw) {
+// `countryCode` lets a caller hoist the settings lookup out of a loop: a bulk
+// import would otherwise run one identical SELECT per row.
+function normalizePhone(raw, countryCode) {
   if (!raw) return '';
   let s = cleanStr(raw);
   if (!s) return '';
@@ -38,16 +94,30 @@ function normalizePhone(raw) {
   if (!digits || digits.length < 5) return ''; // ignore clearly junk numbers (< 5 digits)
   if (hasPlus) return '+' + digits;
   if (digits.startsWith('00')) return '+' + digits.slice(2);
-  const cc = String(getSetting('default_country_code') || '').replace(/\D/g, '');
+  const cc = String(countryCode !== undefined ? countryCode : getSetting('default_country_code') || '').replace(/\D/g, '');
   if (cc && digits.startsWith('0')) digits = digits.replace(/^0+/, '');
   if (cc && digits.length <= 10) return '+' + cc + digits;
   if (cc && digits.startsWith(cc) && digits.length > 10) return '+' + digits;
   return '+' + digits;
 }
 
+// A CSV cell that begins with = + - @ (or a leading tab/CR) is evaluated as a
+// formula when the export is opened in Excel or Sheets, which turns an imported
+// lead name into code execution on the operator's machine (OWASP "CSV
+// injection"). Prefixing a single quote makes the spreadsheet treat it as text.
+// Exception: a leading +/- followed by nothing but digits is a phone number or a
+// quantity, which can only ever render as a number — quoting those would corrupt
+// every exported phone number for no security gain.
+const CSV_FORMULA_HEAD = /^[=+\-@\t\r]/;
 function escapeCsv(val) {
   if (val === null || val === undefined) return '';
-  const s = String(val);
+  let s = String(val);
+  if (CSV_FORMULA_HEAD.test(s)) {
+    const head = s[0];
+    const rest = s.slice(1).trim();
+    const harmlessNumber = (head === '+' || head === '-') && /^\d+(\.\d+)?$/.test(rest);
+    if (!harmlessNumber) s = `'${s}`;
+  }
   if (/[",\n\r]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }
@@ -88,6 +158,119 @@ function todaysDials(tzOffset = null) {
 app.get('/api/prospects', (req, res) => {
   const rows = db.prepare('SELECT * FROM prospects ORDER BY id DESC').all();
   res.json(rows.map(toApi));
+});
+
+// ---------- server-backed dialer queue ----------
+// Keyset (cursor) pagination over the same ordering the dialer has always used:
+// prospects that have a phone number first, then ascending id. A cursor is an
+// opaque base64url blob of the last row's sort key, so inserts/deletes between
+// pages can never duplicate or skip a row the way OFFSET would.
+const QUEUE_TABS = {
+  new: "stage = 'new'",
+  follow: "stage IN ('contacted','interested','followup')",
+  all: null,
+};
+const QUEUE_DEFAULT_LIMIT = 50;
+const QUEUE_MAX_LIMIT = 500;
+const HAS_PHONE = "(CASE WHEN TRIM(phone) <> '' THEN 1 ELSE 0 END)";
+
+function escapeLike(s) {
+  return String(s).replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+// Search across the same fields the dialer's client-side filter used.
+// SQLite's LIKE is case-insensitive for ASCII, matching the old toLowerCase().
+function queueSearch(q) {
+  const needle = String(q || '').trim();
+  if (!needle) return { sql: '', params: [] };
+  const like = `%${escapeLike(needle)}%`;
+  const cols = ['name', 'company', 'phone', 'email', 'title'];
+  return {
+    sql: ` AND (${cols.map((c) => `${c} LIKE ? ESCAPE '\\'`).join(' OR ')})`,
+    params: cols.map(() => like),
+  };
+}
+
+function encodeCursor(row) {
+  return Buffer.from(JSON.stringify({ p: row.has_phone, i: row.id }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(raw) {
+  try {
+    const v = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
+    const hp = Number(v?.p);
+    const id = Number(v?.i);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    if (hp !== 0 && hp !== 1) return null;
+    return { hp, id };
+  } catch {
+    return null;
+  }
+}
+
+app.get('/api/queue', (req, res) => {
+  const tab = String(req.query.tab ?? 'all');
+  if (!Object.prototype.hasOwnProperty.call(QUEUE_TABS, tab)) {
+    return res.status(400).json({ error: `Unknown tab "${tab}"` });
+  }
+  const rawLimit = req.query.limit === undefined ? NaN : Number(req.query.limit);
+  if (req.query.limit !== undefined && (!Number.isFinite(rawLimit) || rawLimit < 1)) {
+    return res.status(400).json({ error: 'limit must be a number >= 1' });
+  }
+  const limit = Math.min(QUEUE_MAX_LIMIT, Math.max(1, Math.floor(Number.isFinite(rawLimit) ? rawLimit : QUEUE_DEFAULT_LIMIT)));
+
+  const q = String(req.query.q ?? '').trim();
+  const search = queueSearch(q);
+  const stageSql = QUEUE_TABS[tab] ? ` AND ${QUEUE_TABS[tab]}` : '';
+
+  // One search-aware pass gives the badge count for every tab plus this tab's total.
+  const c = db
+    .prepare(
+      `SELECT COUNT(*) AS allCount,
+              COALESCE(SUM(CASE WHEN stage = 'new' THEN 1 ELSE 0 END), 0) AS newCount,
+              COALESCE(SUM(CASE WHEN stage IN ('contacted','interested','followup') THEN 1 ELSE 0 END), 0) AS followCount
+       FROM prospects WHERE dnc = 0${search.sql}`
+    )
+    .get(...search.params);
+  const counts = { new: c.newCount, follow: c.followCount, all: c.allCount };
+  const total = tab === 'new' ? counts.new : tab === 'follow' ? counts.follow : counts.all;
+
+  // Cursor predicate for "strictly after the last row we served".
+  let cursorSql = '';
+  const cursorParams = [];
+  if (req.query.cursor) {
+    const cur = decodeCursor(req.query.cursor);
+    if (!cur) return res.status(400).json({ error: 'Malformed cursor' });
+    cursorSql = ` AND (${HAS_PHONE} < ? OR (${HAS_PHONE} = ? AND id > ?))`;
+    cursorParams.push(cur.hp, cur.hp, cur.id);
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT *, ${HAS_PHONE} AS has_phone FROM prospects
+       WHERE dnc = 0${stageSql}${search.sql}${cursorSql}
+       ORDER BY ${HAS_PHONE} DESC, id ASC
+       LIMIT ?`
+    )
+    .all(...search.params, ...cursorParams, limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const items = page.map((r) => {
+    const { has_phone, ...rest } = r;
+    return toApi(rest);
+  });
+
+  res.json({
+    items,
+    total,
+    counts,
+    hasMore,
+    limit,
+    tab,
+    q,
+    nextCursor: hasMore && page.length ? encodeCursor(page[page.length - 1]) : null,
+  });
 });
 
 // CSV Export of all prospects with notes and call metadata
@@ -171,7 +354,12 @@ app.patch('/api/prospects/:id', (req, res) => {
       vals.push(f === 'phone' ? normalizePhone(b[f]) : cleanStr(b[f]));
     }
   }
-  if ('stage' in b && STAGES.includes(b.stage)) { sets.push('stage = ?'); vals.push(b.stage); }
+  if ('stage' in b) {
+    // Silently dropping an invalid stage let a client believe a move succeeded
+    // while the row never changed. Say no instead.
+    if (!STAGES.includes(b.stage)) return res.status(400).json({ error: `Unknown stage "${b.stage}"` });
+    sets.push('stage = ?'); vals.push(b.stage);
+  }
   if ('dnc' in b) { sets.push('dnc = ?'); vals.push(b.dnc ? 1 : 0); }
   if ('follow_up_at' in b) { sets.push('follow_up_at = ?'); vals.push(b.follow_up_at || null); }
   if ('extra' in b) { sets.push('extra = ?'); vals.push(JSON.stringify(b.extra || {})); }
@@ -183,7 +371,8 @@ app.patch('/api/prospects/:id', (req, res) => {
 });
 
 app.delete('/api/prospects/:id', (req, res) => {
-  db.prepare('DELETE FROM prospects WHERE id = ?').run(req.params.id);
+  const info = db.prepare('DELETE FROM prospects WHERE id = ?').run(req.params.id);
+  if (!info.changes) return res.status(404).json({ error: 'Not found' });
   res.json({ ok: true });
 });
 
@@ -208,6 +397,11 @@ app.post('/api/import/parse', upload.single('file'), (req, res) => {
 
 app.post('/api/prospects/bulk', (req, res) => {
   const { rows = [], mapping = {}, skipDuplicates = true } = req.body || {};
+  if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows must be an array' });
+  if (rows.length > BULK_MAX_ROWS) {
+    return res.status(400).json({ error: `Too many rows: ${rows.length}. The limit is ${BULK_MAX_ROWS} per import — split the file.` });
+  }
+  const countryCode = String(getSetting('default_country_code') || '').replace(/\D/g, '');
   const existing = new Set(db.prepare("SELECT phone FROM prospects WHERE phone != ''").all().map((r) => r.phone));
   const ins = db.prepare('INSERT INTO prospects(name,phone,email,company,title,location,website,extra) VALUES(?,?,?,?,?,?,?,?)');
   const mappedCols = new Set(Object.values(mapping).filter(Boolean));
@@ -225,7 +419,7 @@ app.post('/api/prospects/bulk', (req, res) => {
         mappedCols.add(mapping.first_name); mappedCols.add(mapping.last_name);
         if (!v.name) v.name = `${fn} ${ln}`.trim();
       }
-      v.phone = normalizePhone(v.phone);
+      v.phone = normalizePhone(v.phone, countryCode);
       if (v.email && !v.email.includes('@')) {
         v.email = '';
       }
@@ -254,15 +448,25 @@ app.post('/api/prospects/bulk', (req, res) => {
 
 // ---------- notes ----------
 app.post('/api/prospects/:id/notes', (req, res) => {
+  const p = db.prepare('SELECT id FROM prospects WHERE id = ?').get(req.params.id);
+  // Without this the INSERT hits the notes→prospects foreign key and Express
+  // answered with an HTML 500 carrying the SqliteError and our file paths.
+  if (!p) return res.status(404).json({ error: 'Prospect not found' });
   const body = String((req.body && req.body.body) || '').trim();
   if (!body) return res.status(400).json({ error: 'Empty note' });
-  const info = db.prepare('INSERT INTO notes(prospect_id, body) VALUES(?,?)').run(req.params.id, body);
-  touch(req.params.id);
+  const info = db.prepare('INSERT INTO notes(prospect_id, body) VALUES(?,?)').run(p.id, body);
+  touch(p.id);
   res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(info.lastInsertRowid));
 });
 app.patch('/api/notes/:id', (req, res) => {
-  db.prepare('UPDATE notes SET body = ? WHERE id = ?').run(String(req.body.body || ''), req.params.id);
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  if (!note) return res.status(404).json({ error: 'Note not found' });
+  // req.body is undefined when the caller sends no JSON at all, which used to
+  // throw a TypeError and answer with an HTML 500.
+  const body = String((req.body && req.body.body) || '').trim();
+  if (!body) return res.status(400).json({ error: 'Empty note' });
+  db.prepare('UPDATE notes SET body = ? WHERE id = ?').run(body, note.id);
+  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id));
 });
 app.delete('/api/notes/:id', (req, res) => {
   db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
@@ -326,22 +530,29 @@ app.patch('/api/calls/:id', (req, res) => {
   res.json({ ok: true, prospect: toApi(db.prepare('SELECT * FROM prospects WHERE id = ?').get(call.prospect_id)) });
 });
 
+// Removing a call also gives the dial back: an aborted call should not count
+// against the prospect's call_count or the operator's daily total. Both routes
+// below were byte-identical copies of this.
+//
+// Idempotent on purpose — dropping a call that is already gone answers ok rather
+// than 404, because the UI fires discard on unmount and a double-discard is
+// harmless. Returns false when there was nothing to remove.
+function dropCall(id) {
+  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(id);
+  if (!call) return false;
+  db.prepare('DELETE FROM calls WHERE id = ?').run(call.id);
+  db.prepare("UPDATE prospects SET call_count = MAX(0, call_count - 1), updated_at = datetime('now') WHERE id = ?").run(call.prospect_id);
+  return true;
+}
+
 // Discard an aborted/cancelled call
 app.post('/api/calls/:id/discard', (req, res) => {
-  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
-  if (call) {
-    db.prepare('DELETE FROM calls WHERE id = ?').run(call.id);
-    db.prepare("UPDATE prospects SET call_count = MAX(0, call_count - 1), updated_at = datetime('now') WHERE id = ?").run(call.prospect_id);
-  }
+  dropCall(req.params.id);
   res.json({ ok: true });
 });
 
 app.delete('/api/calls/:id', (req, res) => {
-  const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
-  if (call) {
-    db.prepare('DELETE FROM calls WHERE id = ?').run(call.id);
-    db.prepare("UPDATE prospects SET call_count = MAX(0, call_count - 1), updated_at = datetime('now') WHERE id = ?").run(call.prospect_id);
-  }
+  dropCall(req.params.id);
   res.json({ ok: true });
 });
 
@@ -436,6 +647,10 @@ app.post('/api/settings/test', async (req, res) => {
 
 // ---------- demo data ----------
 app.post('/api/demo', (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) c FROM prospects').get().c;
+  if (total >= DEMO_MAX_PROSPECTS) {
+    return res.status(409).json({ error: `Demo data is capped at ${DEMO_MAX_PROSPECTS} prospects (already ${total}). Delete some first.` });
+  }
   const demo = [
     ['Aarav Mehta', '+919810012345', 'aarav@northwind.in', 'Northwind Logistics', 'Operations Head', 'Delhi, IN'],
     ['Priya Sharma', '+919811123456', 'priya@brightlabs.io', 'BrightLabs', 'Founder & CEO', 'Noida, IN'],
@@ -455,12 +670,42 @@ app.post('/api/demo', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- api fallthrough + error handling ----------
+// Anything under /api that matched no route answers as JSON. It used to fall
+// through to Express's HTML 404, which the client's res.json() cannot parse, so
+// a typo'd endpoint surfaced as an opaque "Request failed (404)".
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: `No such endpoint: ${req.method} ${req.path}` });
+});
+
 // ---------- static client ----------
 const dist = path.join(__dirname, '..', 'dist');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
   app.get(/^\/(?!api).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
 }
+
+
+// Last resort. The real error is logged server-side; the client gets something
+// safe. The default handler was returning HTML 500s containing the SqliteError
+// text and absolute paths from this machine.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  let status = Number.isInteger(err && err.status) ? err.status : 500;
+  let message = String((err && err.message) || 'Request failed');
+  if (err && err.name === 'MulterError') {
+    status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    message = err.code === 'LIMIT_FILE_SIZE' ? 'That file is too large (30MB limit).' : `Upload failed: ${err.code}`;
+  } else if (err && err.type === 'entity.parse.failed') {
+    status = 400;
+    message = 'Malformed JSON body.';
+  } else if (err && err.type === 'entity.too.large') {
+    status = 413;
+    message = 'Request body is too large.';
+  }
+  if (status >= 500) console.error(`[api] ${req.method} ${req.originalUrl}`, err);
+  res.status(status).json({ error: status >= 500 ? 'Internal server error' : message });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => console.log(`Pulse Dialer running on http://localhost:${PORT}`));

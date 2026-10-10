@@ -2,9 +2,12 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-const dataDir = path.join(__dirname, '..', 'data');
-fs.mkdirSync(dataDir, { recursive: true });
-const db = new Database(path.join(dataDir, 'dialer.db'));
+// DB_PATH / DATA_DIR let tests boot the server against a throwaway database
+// instead of the real data/dialer.db.
+const dataDir = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const dbFile = process.env.DB_PATH || path.join(dataDir, 'dialer.db');
+fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+const db = new Database(dbFile);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -29,6 +32,8 @@ CREATE TABLE IF NOT EXISTS prospects (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_prospects_stage ON prospects(stage);
+-- covers the dialer queue: dnc filter + stage tab filter + id keyset order
+CREATE INDEX IF NOT EXISTS idx_prospects_queue ON prospects(dnc, stage, id);
 CREATE TABLE IF NOT EXISTS notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   prospect_id INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,

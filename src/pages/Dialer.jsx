@@ -9,16 +9,14 @@ import {
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
+import QueueList from '../components/QueueList.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
-import { OUTCOMES, STAGES, fmtDur, stageMeta, useTimer } from '../utils.js';
+import useServerQueue from '../useServerQueue.js';
+import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex, tabForProspect } from '../queue.js';
+import { OUTCOMES, STAGES, fmtDur, useTimer } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
-const TABS = [
-  { id: 'new', label: 'To call', test: (p) => p.stage === 'new' },
-  { id: 'follow', label: 'Follow-ups', test: (p) => ['contacted', 'interested', 'followup'].includes(p.stage) },
-  { id: 'all', label: 'All', test: () => true },
-];
 
 function Waveform({ active }) {
   return (
@@ -79,12 +77,14 @@ function QuickAddModal({ onClose, onAdded }) {
 }
 
 export default function Dialer() {
-  const { prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect } = useStore();
+  const {
+    activeId, setActiveId, refreshStats, toast, setView, settings, updateProspect, patchLocal, stats,
+    onProspectSaved, onProspectDeleted,
+  } = useStore();
   const [tab, setTab] = useState('new');
   const [q, setQ] = useState('');
   const [phase, setPhase] = useState('idle'); // idle | dialing | active
   const [callId, setCallId] = useState(null);
-  const [done, setDone] = useState(() => new Set());
   const [autoNext, setAutoNext] = useState(true);
   const [flash, setFlash] = useState(null);
   const [noteFocus, setNoteFocus] = useState(0);
@@ -101,32 +101,87 @@ export default function Dialer() {
   quickNoteRef.current = quickNote;
   const activeItemRef = useRef(null);
 
-  // Compute active queue for current tab & filter
-  const queue = useMemo(() => {
-    const t = TABS.find((x) => x.id === tab);
-    const needle = q.trim().toLowerCase();
-    return prospects
-      .filter((p) => !p.dnc && (t ? t.test(p) : true))
-      .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle))
-      .sort((a, b) => {
-        const hasPhoneA = a.phone && a.phone.trim().length > 0 ? 1 : 0;
-        const hasPhoneB = b.phone && b.phone.trim().length > 0 ? 1 : 0;
-        if (hasPhoneA !== hasPhoneB) return hasPhoneB - hasPhoneA;
-        return a.id - b.id;
-      });
-  }, [prospects, tab, q]);
+  // Prospects dialed this session: dimmed in the list and skipped by auto-next.
+  // A ref is the source of truth so callbacks never read a stale Set.
+  const doneRef = useRef(new Set());
+  const [done, setDone] = useState(() => doneRef.current);
+  const markDone = useCallback((id) => {
+    if (id == null || doneRef.current.has(id)) return;
+    doneRef.current.add(id);
+    setDone(new Set(doneRef.current));
+  }, []);
 
-  // Always resolve active prospect from the active queue
+  // The queue itself now lives on the server: tab, search, DNC filtering,
+  // ordering and paging are all done by GET /api/queue.
+  const queue = useServerQueue({ tab, q, limit: QUEUE_LIMIT });
+  const { items, total, counts, hasMore, loading, loadingMore, error } = queue;
+
+  // A selected prospect can sit outside the loaded page (opened from the
+  // Prospects table, or just added). Fetch that one record on demand so the
+  // centre stage never blanks out or silently shows somebody else.
+  const [pinned, setPinned] = useState(null);
+  const [pinState, setPinState] = useState('idle'); // idle | loading | ready | missing
+  const pinnedRef = useRef(null);
+  pinnedRef.current = pinned;
+  const pinTriedRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!activeId) {
+      if (pinnedRef.current) setPinned(null);
+      setPinState('idle');
+      return undefined;
+    }
+    if (items.some((p) => p.id === activeId)) {
+      if (pinnedRef.current?.id === activeId) setPinned(null);
+      pinTriedRef.current.delete(activeId);
+      setPinState('idle');
+      return undefined;
+    }
+    if (pinnedRef.current?.id === activeId) { setPinState('ready'); return undefined; }
+    if (pinTriedRef.current.has(activeId)) { setPinState('missing'); return undefined; }
+
+    let cancelled = false;
+    pinTriedRef.current.add(activeId);
+    setPinState('loading');
+    api.prospect(activeId)
+      .then((p) => { if (!cancelled && p) { setPinned(p); setPinState('ready'); } })
+      .catch((e) => {
+        if (cancelled) return;
+        if (e?.status === 404) {
+          setPinned(null);
+          setPinState('missing');
+        } else {
+          // Transient failure: allow a retry and keep the dialer usable.
+          pinTriedRef.current.delete(activeId);
+          setPinned(null);
+          setPinState('error');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [activeId, items]);
+
+  // The selected prospect was deleted elsewhere — release the selection so the
+  // top of the queue takes over instead of showing a blank stage.
+  useEffect(() => {
+    if (pinState !== 'missing' || !activeId) return;
+    setPinState('idle');
+    setActiveId(null);
+    toast('That prospect is no longer available.', 'error');
+  }, [pinState, activeId, setActiveId, toast]);
+
   const active = useMemo(() => {
     if (activeId) {
-      const match = queue.find((p) => p.id === activeId);
+      const match = items.find((p) => p.id === activeId);
       if (match) return match;
+      if (pinned && pinned.id === activeId) return pinned;
+      // Could not pin it (network): fall back rather than blanking the stage.
+      if (pinState === 'error') return items[0] || null;
+      return null; // still resolving — never fall back to a different person
     }
-    return queue[0] || null;
-  }, [queue, activeId]);
+    return items[0] || null;
+  }, [items, activeId, pinned, pinState]);
 
   const { detail, reload } = useDetail(active?.id);
-  const idx = active ? queue.findIndex((p) => p.id === active.id) : -1;
 
   // Auto-scroll the active queue item into view smoothly
   useEffect(() => {
@@ -135,62 +190,84 @@ export default function Dialer() {
     }
   }, [active?.id]);
 
+  // Edits and deletes can come from anywhere (drawer, prospects table), and the
+  // dialer no longer holds the full list to see them happen — so keep the loaded
+  // window in step through the store's save/delete notifications.
+  useEffect(() => onProspectSaved((p) => { if (p?.id != null) queue.patchItem(p.id, p); }), [onProspectSaved, queue]);
+  useEffect(() => onProspectDeleted((id) => queue.removeItem(id)), [onProspectDeleted, queue]);
+
   // Synchronize tab when activeId changes externally (e.g. Prospects table 'Call')
   useEffect(() => {
     if (!activeId) return;
-    const target = prospects.find((p) => p.id === activeId);
+    // Never chase a prospect we have just finished: logging an outcome moves it
+    // to another tab, and following it there would yank the whole queue away
+    // from the list the user is working through (and break auto-next).
+    if (doneRef.current.has(activeId)) return;
+    const target = items.find((p) => p.id === activeId) || (pinned?.id === activeId ? pinned : null);
     if (!target) return;
-    const curTab = TABS.find((x) => x.id === tab);
+    const curTab = queueTab(tab);
     if (curTab && !curTab.test(target)) {
-      if (target.stage === 'new') setTab('new');
-      else if (['contacted', 'interested', 'followup'].includes(target.stage)) setTab('follow');
-      else setTab('all');
+      const next = tabForProspect(target);
+      if (next && next !== tab) setTab(next);
     }
-  }, [activeId, prospects, tab]);
+  }, [activeId, items, pinned, tab]);
 
-  // When switching tabs explicitly, pick the top item of the new queue
+  // Switching tabs reloads page 1; clearing activeId lets its top row take over.
   const handleTabChange = useCallback((newTabId) => {
+    if (newTabId === tab) return;
     if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
     setTab(newTabId);
-    const t = TABS.find((x) => x.id === newTabId);
-    const needle = q.trim().toLowerCase();
-    const nextQueue = prospects
-      .filter((p) => !p.dnc && (t ? t.test(p) : true))
-      .filter((p) => !needle || `${p.name} ${p.company} ${p.phone} ${p.email}`.toLowerCase().includes(needle));
-    if (nextQueue.length > 0) {
-      setActiveId(nextQueue[0].id);
-    } else {
-      setActiveId(null);
-    }
-  }, [phase, classifyModal, prospects, q, setActiveId, toast]);
+    setActiveId(null);
+    setPinned(null);
+    setPinState('idle');
+  }, [tab, phase, classifyModal, setActiveId, toast]);
 
-  // Safe and deterministic candidate calculation for the next prospect in queue
-  const getNextProspectId = useCallback((currentQueue, currentProspectId) => {
-    if (!currentProspectId || !currentQueue.length) return null;
-    const currentIdx = currentQueue.findIndex((p) => p.id === currentProspectId);
-    if (currentIdx === -1) return currentQueue[0]?.id || null;
-    for (let step = 1; step < currentQueue.length; step++) {
-      const candidate = currentQueue[(currentIdx + step) % currentQueue.length];
-      if (candidate && candidate.id !== currentProspectId && !done.has(candidate.id)) {
-        return candidate.id;
+  /**
+   * Next prospect to show, skipping anything already dialed. When the walk runs
+   * off the end of the loaded window it fetches the next page and continues, so
+   * auto-next works across page boundaries. Falls back to wrapping around, and
+   * finally to the top row, so the dialer can never get stuck.
+   */
+  const advance = useCallback(async (fromId, fromIndex = -1) => {
+    let list = queue.getItems();
+    if (!list.length) return null;
+    const idx = fromId == null ? -1 : list.findIndex((p) => p.id === fromId);
+
+    // Logging an outcome usually moves that prospect to another tab, so after a
+    // refresh it is gone from the window and its old index is meaningless.
+    // Resume from the row that slid into its place rather than jumping back to
+    // the top of the queue — `fromIndex` is the position captured beforehand.
+    if (idx === -1 && fromIndex >= 0) {
+      for (let i = Math.min(fromIndex, list.length - 1); i < list.length; i++) {
+        if (!doneRef.current.has(list[i].id)) return list[i].id;
       }
     }
-    if (currentQueue.length > 1) {
-      return currentQueue[(currentIdx + 1) % currentQueue.length]?.id || null;
+
+    let pick = pickNextId(list, fromId, doneRef.current);
+    if (!pick.id && pick.hitEnd && queue.getState().hasMore) {
+      const added = await queue.loadMore();
+      if (added) {
+        list = queue.getItems();
+        pick = pickNextId(list, fromId, doneRef.current);
+      }
     }
-    return null;
-  }, [done]);
+    return pick.id ?? firstFreshId(list, doneRef.current) ?? list[0]?.id ?? null;
+  }, [queue]);
 
   const go = useCallback((dir) => {
     if (phase !== 'idle' || classifyModal) return toast('Finish or classify this call first.', 'error');
-    if (!queue.length) return;
-    let i = idx;
-    for (let step = 0; step < queue.length; step++) {
-      i = (i + dir + queue.length) % queue.length;
-      if (dir < 0 || !done.has(queue[i].id) || step === queue.length - 1) break;
+    const list = queue.getItems();
+    if (!list.length) return;
+    if (dir > 0) {
+      advance(active?.id ?? null).then((id) => { if (id != null) setActiveId(id); });
+      return undefined;
     }
-    setActiveId(queue[i].id);
-  }, [phase, classifyModal, queue, idx, done, setActiveId, toast]);
+    // Backwards never skips dialed prospects: it is an explicit "go back".
+    const i = list.findIndex((p) => p.id === active?.id);
+    const at = stepIndex(list.length, i, -1);
+    if (at >= 0) setActiveId(list[at].id);
+    return undefined;
+  }, [phase, classifyModal, queue, active, advance, setActiveId, toast]);
 
   const startCall = useCallback(async () => {
     if (!active || phase !== 'idle' || classifyModal) return;
@@ -202,6 +279,7 @@ export default function Dialer() {
       setCallId(r.callId);
       setPhase('active');
       patchLocal(active.id, { call_count: active.call_count + 1, last_called_at: new Date().toISOString() });
+      queue.patchItem(active.id, { call_count: (active.call_count || 0) + 1, last_called_at: new Date().toISOString() });
       toast(r.dryRun ? 'Test mode: call simulated' : 'Calling… answer your phone/SIP to connect');
     } catch (e) {
       setPhase('idle');
@@ -239,14 +317,20 @@ export default function Dialer() {
     setClassifyModal(null);
     setQuickNote('');
     toast('Call discarded');
-    await Promise.all([refreshProspects(), refreshStats()]);
-  }, [classifyModal, callId, toast, refreshProspects, refreshStats]);
+    await Promise.all([queue.refresh(), refreshStats()]);
+  }, [classifyModal, callId, toast, queue, refreshStats]);
 
   const commitClassification = useCallback(async (outcomeId, chosenStage, noteText) => {
     if (!classifyModal) return;
     const o = OUTCOMES.find((x) => x.id === outcomeId) || OUTCOMES[0];
     const pid = classifyModal.prospect.id;
-    const nextId = getNextProspectId(queue, pid);
+    const nextStage = chosenStage || classifyModal.prospect.stage;
+    markDone(pid);
+    // Plan the next target *before* refreshing: logging an outcome can move this
+    // prospect out of the current tab, and that must not change where we go next.
+    const listBefore = queue.getItems();
+    const planned = pickNextId(listBefore, pid, doneRef.current);
+    const plannedIndex = listBefore.findIndex((p) => p.id === pid);
 
     try {
       await api.logCall(classifyModal.callId, { outcome: outcomeId, duration_sec: classifyModal.duration });
@@ -259,18 +343,21 @@ export default function Dialer() {
       }
       setFlash({ label: o.label, color: o.color, id: Date.now() });
       setTimeout(() => setFlash(null), 1400);
-      setDone((d) => new Set(d).add(pid));
       setQuickNote('');
       setClassifyModal(null);
       setCallId(null);
-      await Promise.all([refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
-        setTimeout(() => setActiveId(nextId), 750);
+      // optimistic, then reconciled by the refresh below
+      queue.patchItem(pid, { last_outcome: outcomeId, stage: nextStage });
+      await Promise.all([queue.refresh(), refreshStats(), reload()]);
+      if (autoNext && outcomeId !== 'meeting_booked') {
+        let target = planned.id;
+        if (target == null || !queue.getItems().some((p) => p.id === target)) target = await advance(pid, plannedIndex);
+        if (target != null) setTimeout(() => setActiveId(target), 750);
       }
     } catch (e) {
       toast(e.message, 'error');
     }
-  }, [classifyModal, queue, getNextProspectId, updateProspect, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, queue, markDone, advance, updateProspect, autoNext, setActiveId, refreshStats, reload, toast]);
 
   // Direct outcome logging (from 1-8 keys or outcome buttons during active call)
   const logOutcome = useCallback(async (outcome) => {
@@ -281,7 +368,10 @@ export default function Dialer() {
     if (phase !== 'active' || !callId || !active) return;
     const o = OUTCOMES.find((x) => x.id === outcome);
     const finished = active.id;
-    const nextId = getNextProspectId(queue, finished);
+    markDone(finished);
+    const listBefore = queue.getItems();
+    const planned = pickNextId(listBefore, finished, doneRef.current);
+    const plannedIndex = listBefore.findIndex((p) => p.id === finished);
     const noteToSave = quickNoteRef.current.trim();
     try {
       await api.logCall(callId, { outcome, duration_sec: secRef.current });
@@ -290,18 +380,20 @@ export default function Dialer() {
       }
       setFlash({ label: o.label, color: o.color, id: Date.now() });
       setTimeout(() => setFlash(null), 1300);
-      setDone((d) => new Set(d).add(finished));
       setPhase('idle');
       setCallId(null);
       setQuickNote('');
-      await Promise.all([refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcome !== 'meeting_booked' && nextId) {
-        setTimeout(() => setActiveId(nextId), 750);
+      queue.patchItem(finished, { last_outcome: outcome });
+      await Promise.all([queue.refresh(), refreshStats(), reload()]);
+      if (autoNext && outcome !== 'meeting_booked') {
+        let target = planned.id;
+        if (target == null || !queue.getItems().some((p) => p.id === target)) target = await advance(finished, plannedIndex);
+        if (target != null) setTimeout(() => setActiveId(target), 750);
       }
     } catch (e) {
       toast(e.message, 'error');
     }
-  }, [classifyModal, commitClassification, targetStage, customNote, phase, callId, active, queue, getNextProspectId, autoNext, setActiveId, refreshProspects, refreshStats, reload, toast]);
+  }, [classifyModal, commitClassification, targetStage, customNote, phase, callId, active, queue, markDone, advance, autoNext, setActiveId, refreshStats, reload, toast]);
 
   // Save quick live note directly to prospect record
   const saveQuickNoteNow = async () => {
@@ -320,9 +412,13 @@ export default function Dialer() {
   // Quick add from dialer queue
   const handleQuickAdd = async (newProspectData) => {
     const p = await api.addProspect(newProspectData);
-    await Promise.all([refreshProspects(), refreshStats()]);
+    await Promise.all([queue.refresh(), refreshStats()]);
     toast('Prospect added to queue');
     if (p && p.id) {
+      // A brand new row sorts last (highest id) so it can land past the loaded
+      // page; the pin fetch resolves it while the queue window catches up.
+      pinTriedRef.current.delete(p.id);
+      setPinned(null);
       setActiveId(p.id);
     }
   };
@@ -373,12 +469,12 @@ export default function Dialer() {
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, classifyModal, startCall, hangUp, go, logOutcome, handleDiscardCall, commitClassification, targetStage, customNote]);
 
-  if (loaded && prospects.length === 0) {
+  if (stats && stats.total === 0) {
     return (
       <Empty icon={<PhoneCall size={34} />} title="No prospects to dial yet" sub="Upload your list and every prospect's details will appear here while you call.">
         <div className="row gap">
           <button className="btn primary" onClick={() => setView('import')}><Upload size={16} /> Import a list</button>
-          <button className="btn" onClick={async () => { await api.demo(); await refreshProspects(); }}><Sparkles size={16} /> Load demo data</button>
+          <button className="btn" onClick={async () => { await api.demo(); await Promise.all([queue.refresh(), refreshStats()]); }}><Sparkles size={16} /> Load demo data</button>
         </div>
       </Empty>
     );
@@ -386,51 +482,61 @@ export default function Dialer() {
 
   const calling = phase !== 'idle';
   const dry = settings?.dry_run === '1';
+  // Page 1 in flight, or the selected prospect is being fetched from outside it.
+  const resolving = (!!activeId && pinState === 'loading') || (loading && !items.length && !error);
 
   return (
     <div className="dialer">
       {/* QUEUE SIDEBAR */}
       <section className="glass queue">
-        <div className="seg">
-          {TABS.map((t) => (
-            <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => handleTabChange(t.id)}>
+        {/* A segmented filter, not a tab strip: there is no tabpanel to control,
+            so use a group of toggle buttons rather than an invalid role="tablist". */}
+        <div className="seg" role="group" aria-label="Queue filter">
+          {QUEUE_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              aria-pressed={tab === t.id}
+              className={tab === t.id ? 'on' : ''}
+              onClick={() => handleTabChange(t.id)}
+              title={`${t.label}: ${counts[t.id] ?? 0}`}
+            >
               {tab === t.id && <motion.span layoutId="segpill" className="seg-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
               <span>{t.label}</span>
+              {counts[t.id] ? <em className="seg-count">{counts[t.id]}</em> : null}
             </button>
           ))}
         </div>
         <div className="search">
           <Search size={15} />
-          <input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input
+            type="search"
+            placeholder="Search queue…"
+            aria-label="Search the dial queue"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
         <div className="queue-meta">
-          <span>{queue.length} in queue</span>
+          <span>{loading && !items.length ? 'Loading…' : `${total} in queue`}</span>
           <span>{done.size} dialed</span>
           <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
         </div>
-        <div className="queue-list">
-          {queue.map((p) => {
-            const on = active?.id === p.id;
-            return (
-              <button
-                key={p.id}
-                ref={on ? activeItemRef : null}
-                disabled={(calling || !!classifyModal) && !on}
-                className={`q-item ${on ? 'on' : ''} ${done.has(p.id) ? 'done' : ''}`}
-                onClick={() => !calling && !classifyModal && setActiveId(p.id)}
-              >
-                {on && <motion.span layoutId="qpill" className="q-pill" transition={{ type: 'spring', stiffness: 400, damping: 36 }} />}
-                <Avatar name={p.name || p.company} size={34} seed={p.id + p.name} />
-                <div className="q-txt">
-                  <b>{p.name || '(no name)'}</b>
-                  <span>{p.company || p.phone}</span>
-                </div>
-                {done.has(p.id) ? <Check size={16} className="q-check" /> : <i className="dot" style={{ background: stageMeta(p.stage).color }} />}
-              </button>
-            );
-          })}
-          {queue.length === 0 && <div className="muted small center pad">Nobody here. Try another tab or add one above.</div>}
-        </div>
+        <QueueList
+          items={items}
+          activeId={active?.id ?? null}
+          done={done}
+          locked={calling || !!classifyModal}
+          total={total}
+          hasMore={hasMore}
+          loading={loading}
+          loadingMore={loadingMore}
+          error={error}
+          onSelect={setActiveId}
+          onLoadMore={queue.loadMore}
+          onRetry={queue.retry}
+          activeItemRef={activeItemRef}
+        />
       </section>
 
       {/* CENTER STAGE */}
@@ -570,6 +676,10 @@ export default function Dialer() {
               <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hangup · <kbd>1-8</kbd> classify · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
             </div>
           </>
+        ) : resolving ? (
+          <div className="glass pad-lg stage-loading" aria-live="polite">
+            <Loader2 size={18} className="spin" /> <span>Loading prospect…</span>
+          </div>
         ) : (
           <Empty icon={<Search size={30} />} title="Nobody matches" sub="Change the tab, clear the search, or add a prospect to start calling.">
             <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={16} /> Add a prospect</button>

@@ -7,6 +7,16 @@ const path = require('path');
 const fs = require('fs');
 const { db, getSetting, setSetting, allSettings } = require('./db');
 const sonetel = require('./sonetel');
+// Pure, side-effect-free cores. They live in their own modules so they can be
+// require()d by the property suite without booting Express or opening the DB.
+const { cleanStr } = require('./services/text');
+const { normalizePhone } = require('./services/telephony');
+const { escapeCsv } = require('./services/csv');
+const { isJunkName, isEmptyRow } = require('./services/imports');
+const {
+  QUEUE_TABS, QUEUE_DEFAULT_LIMIT, QUEUE_MAX_LIMIT, HAS_PHONE,
+  queueSearch, encodeCursor, decodeCursor, cursorPredicate,
+} = require('./services/queue');
 
 const app = express();
 
@@ -74,55 +84,8 @@ const CONVO = ['conversation', 'meeting_booked'];
 const FIELDS = ['name', 'phone', 'email', 'company', 'title', 'location', 'website'];
 
 // ---------- helpers ----------
-function cleanStr(val) {
-  if (val === null || val === undefined) return '';
-  const s = String(val).trim();
-  const lower = s.toLowerCase();
-  if (['null', 'undefined', 'n/a', 'na', 'none', '-', '--', 'nil'].includes(lower)) return '';
-  return s;
-}
-
-// `countryCode` lets a caller hoist the settings lookup out of a loop: a bulk
-// import would otherwise run one identical SELECT per row.
-function normalizePhone(raw, countryCode) {
-  if (!raw) return '';
-  let s = cleanStr(raw);
-  if (!s) return '';
-  if (/@/.test(s) || /^sip:/i.test(s)) return s; // SIP address, keep as is
-  const hasPlus = s.startsWith('+');
-  let digits = s.replace(/\D/g, '');
-  if (!digits || digits.length < 5) return ''; // ignore clearly junk numbers (< 5 digits)
-  if (hasPlus) return '+' + digits;
-  if (digits.startsWith('00')) return '+' + digits.slice(2);
-  const cc = String(countryCode !== undefined ? countryCode : getSetting('default_country_code') || '').replace(/\D/g, '');
-  if (cc && digits.startsWith('0')) digits = digits.replace(/^0+/, '');
-  if (cc && digits.length <= 10) return '+' + cc + digits;
-  if (cc && digits.startsWith(cc) && digits.length > 10) return '+' + digits;
-  return '+' + digits;
-}
-
-// A CSV cell that begins with = + - @ (or a leading tab/CR) is evaluated as a
-// formula when the export is opened in Excel or Sheets, which turns an imported
-// lead name into code execution on the operator's machine (OWASP "CSV
-// injection"). Prefixing a single quote makes the spreadsheet treat it as text.
-// Exception: a leading +/- followed by nothing but digits is a phone number or a
-// quantity, which can only ever render as a number — quoting those would corrupt
-// every exported phone number for no security gain.
-const CSV_FORMULA_HEAD = /^[=+\-@\t\r]/;
-function escapeCsv(val) {
-  if (val === null || val === undefined) return '';
-  let s = String(val);
-  if (CSV_FORMULA_HEAD.test(s)) {
-    const head = s[0];
-    const rest = s.slice(1).trim();
-    const harmlessNumber = (head === '+' || head === '-') && /^\d+(\.\d+)?$/.test(rest);
-    if (!harmlessNumber) s = `'${s}`;
-  }
-  if (/[",\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
+// cleanStr, normalizePhone and escapeCsv now live in server/services/ so they can
+// be fuzzed without starting the server. See test/unit/property.test.js.
 
 const toApi = (r) => (r ? { ...r, dnc: !!r.dnc, extra: safeJson(r.extra) } : r);
 function safeJson(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
@@ -164,49 +127,8 @@ app.get('/api/prospects', (req, res) => {
 // Keyset (cursor) pagination over the same ordering the dialer has always used:
 // prospects that have a phone number first, then ascending id. A cursor is an
 // opaque base64url blob of the last row's sort key, so inserts/deletes between
-// pages can never duplicate or skip a row the way OFFSET would.
-const QUEUE_TABS = {
-  new: "stage = 'new'",
-  follow: "stage IN ('contacted','interested','followup')",
-  all: null,
-};
-const QUEUE_DEFAULT_LIMIT = 50;
-const QUEUE_MAX_LIMIT = 500;
-const HAS_PHONE = "(CASE WHEN TRIM(phone) <> '' THEN 1 ELSE 0 END)";
-
-function escapeLike(s) {
-  return String(s).replace(/[\\%_]/g, (c) => `\\${c}`);
-}
-
-// Search across the same fields the dialer's client-side filter used.
-// SQLite's LIKE is case-insensitive for ASCII, matching the old toLowerCase().
-function queueSearch(q) {
-  const needle = String(q || '').trim();
-  if (!needle) return { sql: '', params: [] };
-  const like = `%${escapeLike(needle)}%`;
-  const cols = ['name', 'company', 'phone', 'email', 'title'];
-  return {
-    sql: ` AND (${cols.map((c) => `${c} LIKE ? ESCAPE '\\'`).join(' OR ')})`,
-    params: cols.map(() => like),
-  };
-}
-
-function encodeCursor(row) {
-  return Buffer.from(JSON.stringify({ p: row.has_phone, i: row.id }), 'utf8').toString('base64url');
-}
-
-function decodeCursor(raw) {
-  try {
-    const v = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
-    const hp = Number(v?.p);
-    const id = Number(v?.i);
-    if (!Number.isInteger(id) || id <= 0) return null;
-    if (hp !== 0 && hp !== 1) return null;
-    return { hp, id };
-  } catch {
-    return null;
-  }
-}
+// pages can never duplicate or skip a row the way OFFSET would. The codec and the
+// search builder live in server/services/queue.js.
 
 app.get('/api/queue', (req, res) => {
   const tab = String(req.query.tab ?? 'all');
@@ -237,12 +159,13 @@ app.get('/api/queue', (req, res) => {
 
   // Cursor predicate for "strictly after the last row we served".
   let cursorSql = '';
-  const cursorParams = [];
+  let cursorParams = [];
   if (req.query.cursor) {
     const cur = decodeCursor(req.query.cursor);
     if (!cur) return res.status(400).json({ error: 'Malformed cursor' });
-    cursorSql = ` AND (${HAS_PHONE} < ? OR (${HAS_PHONE} = ? AND id > ?))`;
-    cursorParams.push(cur.hp, cur.hp, cur.id);
+    const pred = cursorPredicate(cur);
+    cursorSql = pred.sql;
+    cursorParams = pred.params;
   }
 
   const rows = db
@@ -333,7 +256,7 @@ app.get('/api/prospects/:id', (req, res) => {
 
 app.post('/api/prospects', (req, res) => {
   const b = req.body || {};
-  const phone = normalizePhone(b.phone);
+  const phone = normalizePhone(b.phone, getSetting('default_country_code'));
   const info = db
     .prepare(
       'INSERT INTO prospects(name,phone,email,company,title,location,website,extra,stage) VALUES(?,?,?,?,?,?,?,?,?)'
@@ -351,7 +274,7 @@ app.patch('/api/prospects/:id', (req, res) => {
   for (const f of FIELDS) {
     if (f in b) {
       sets.push(`${f} = ?`);
-      vals.push(f === 'phone' ? normalizePhone(b[f]) : cleanStr(b[f]));
+      vals.push(f === 'phone' ? normalizePhone(b[f], getSetting('default_country_code')) : cleanStr(b[f]));
     }
   }
   if ('stage' in b) {
@@ -406,7 +329,6 @@ app.post('/api/prospects/bulk', (req, res) => {
   const ins = db.prepare('INSERT INTO prospects(name,phone,email,company,title,location,website,extra) VALUES(?,?,?,?,?,?,?,?)');
   const mappedCols = new Set(Object.values(mapping).filter(Boolean));
   let added = 0, dupes = 0, empty = 0;
-  const JUNK_NAMES = new Set(['total', 'grand total', 'subtotal', 'average', 'summary', 'count', 'page 1', 'rows', 'name', 'full name', 'prospect', 'unnamed']);
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -423,13 +345,9 @@ app.post('/api/prospects/bulk', (req, res) => {
       if (v.email && !v.email.includes('@')) {
         v.email = '';
       }
-      // Check for junk header/summary/footer row
-      const isJunkPattern = /^(total|grand total|subtotal|average|summary|count|page \d+.*|sheet\d*|workbook.*|rows?|name|full name|prospect|unnamed|untitled|header|notes)$/i.test(v.name.trim());
-      if (v.name && (JUNK_NAMES.has(v.name.toLowerCase()) || isJunkPattern)) { empty++; continue; }
-      if (!v.phone && !v.name && !v.email) { empty++; continue; }
-      // A contact with no phone, no email, and no company is almost always a header or label
-      if (!v.phone && !v.email && !v.company) { empty++; continue; }
-      if (!v.phone && !v.email && v.name.length < 2) { empty++; continue; }
+      // Header/footer/summary furniture, and rows carrying nothing to store
+      if (v.name && isJunkName(v.name)) { empty++; continue; }
+      if (isEmptyRow(v)) { empty++; continue; }
 
       if (skipDuplicates && v.phone && existing.has(v.phone)) { dupes++; continue; }
       const extra = {};

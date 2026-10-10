@@ -6,9 +6,10 @@
     "start": "node server/index.js",
     "dev": "concurrently -k \"node server/index.js\" \"vite\"",
     "app": "vite build && node server/index.js",
-    "test": "node test/run.js",
+    "test": "node test/run.js && node test/unit/property.test.js",
+    "test:property": "node test/unit/property.test.js",
     "test:ui": "node test/ui.mjs && node test/ui.dom.mjs && node test/queue.hook.mjs",
-    "test:all": "node test/run.js && node test/ui.mjs && node test/ui.dom.mjs && node test/queue.hook.mjs"
+    "test:all": "node test/run.js && node test/unit/property.test.js && node test/ui.mjs && node test/ui.dom.mjs && node test/queue.hook.mjs"
   },
   "keywords": [],
   "author": "",

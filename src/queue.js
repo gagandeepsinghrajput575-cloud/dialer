@@ -98,10 +98,26 @@ export function stepIndex(count, idx, dir) {
   return (((base + d) % count) + count) % count;
 }
 
-/** Merge a freshly fetched page into the loaded window, dropping duplicates by id. */
+/**
+ * Merge a freshly fetched page into the loaded window, dropping duplicates by id.
+ *
+ * Deduplicates within `incoming` as well as against `current`: the contract is
+ * that the returned window has no repeated ids, and a helper that promises that
+ * should not depend on its caller handing it an already-unique page. Also
+ * tolerates null/undefined holes and non-array arguments, since this runs on
+ * whatever a response body contained. Returns the SAME array reference when
+ * nothing was added, so callers can cheaply detect a no-op.
+ */
 export function appendPage(current, incoming) {
   const list = Array.isArray(current) ? current : [];
-  const seen = new Set(list.map((p) => p.id));
-  const add = (Array.isArray(incoming) ? incoming : []).filter((p) => p && !seen.has(p.id));
+  const seen = new Set();
+  for (const p of list) if (p && p.id !== undefined && p.id !== null) seen.add(p.id);
+  const add = [];
+  for (const p of Array.isArray(incoming) ? incoming : []) {
+    if (!p || p.id === undefined || p.id === null) continue;
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
+    add.push(p);
+  }
   return add.length ? [...list, ...add] : list;
 }

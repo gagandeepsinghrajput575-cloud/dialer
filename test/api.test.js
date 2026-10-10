@@ -72,6 +72,32 @@ async function runCoreTests(req) {
     return `id ${testId}`;
   });
 
+  await test('phone normalisation is stable when applied twice', async () => {
+    // '00568' used to normalise to '+568' — long enough as raw input, too short
+    // once the 00 access prefix was stripped. The stored value then normalised to
+    // '' on any later PATCH, so the same number had two canonical forms. The
+    // property suite caught it; this pins the HTTP contract.
+    const cases = [
+      ['00568', ''],            // 00 prefix leaves 3 digits
+      ['00000', ''],            // nothing but padding
+      ['+12', ''],              // under the 5-digit floor
+      ['004520123456', '+4520123456'], // a real 00-prefixed international number
+      ['09810099998', '+919810099998'], // trunk 0 with the default country code
+    ];
+    for (const [input, expected] of cases) {
+      const r = await req('POST', '/api/prospects', { name: `Phone Case ${input}`, phone: input });
+      assert.strictEqual(r.status, 200);
+      assert.strictEqual(r.json.phone, expected, `normalizePhone(${JSON.stringify(input)}) -> ${JSON.stringify(r.json.phone)}, expected ${JSON.stringify(expected)}`);
+      // Whatever was stored must survive a second pass unchanged.
+      const again = await req('PATCH', `/api/prospects/${r.json.id}`, { phone: r.json.phone || 'n/a' });
+      if (r.json.phone) {
+        assert.strictEqual(again.json.phone, r.json.phone, `not idempotent for ${JSON.stringify(input)}: ${r.json.phone} -> ${again.json.phone}`);
+      }
+      await req('DELETE', `/api/prospects/${r.json.id}`);
+    }
+    return `${cases.length} cases, all stable under re-normalisation`;
+  });
+
   await test('PATCH /api/prospects/:id updates stage and title', async () => {
     const r = await req('PATCH', `/api/prospects/${testId}`, { stage: 'interested', title: 'VP Quality' });
     assert.strictEqual(r.status, 200);
@@ -292,6 +318,11 @@ async function runQueueTests(req) {
       Buffer.from('{"p":1}').toString('base64url'),          // missing id
       Buffer.from('[]').toString('base64url'),
       Buffer.from('null').toString('base64url'),
+      // Beyond 2^53 the JSON round-trip is lossy, so the codec cannot promise a
+      // faithful page. Found by the property suite; see test/unit/property.test.js.
+      Buffer.from('{"p":1,"i":9007199254740993}').toString('base64url'),
+      Buffer.from('{"p":1,"i":1e308}').toString('base64url'),
+      Buffer.from('{"p":1,"i":9223372036854775807}').toString('base64url'),
     ];
     for (const c of garbage) {
       const r = await req('GET', `/api/queue?cursor=${encodeURIComponent(c)}`);

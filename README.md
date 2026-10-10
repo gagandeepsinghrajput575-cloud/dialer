@@ -26,11 +26,14 @@ Pickup = a live person answered (gatekeeper, hung up, conversation, meeting). Vo
 
 ## Tests
 ```bash
-npm test          # API integration: boots the server three times on throwaway SQLite files
-                  # (core flows, hardening, then the 2000-row queue scale suite)
-npm run test:ui   # UI: rendered components, the CSS touch-target contract, the real Dialer
-                  # mounted in jsdom against a fake backend, then useServerQueue on its own
-npm run test:all  # everything
+npm test              # API integration (boots the server three times on throwaway
+                      # SQLite files: core flows, hardening, then the 2000-row scale
+                      # suite) and then the property-based fuzz suite
+npm run test:property # just the fuzz suite
+npm run test:ui       # UI: rendered components, the CSS touch-target contract, the real
+                      # Dialer mounted in jsdom against a fake backend, then
+                      # useServerQueue on its own
+npm run test:all      # everything
 ```
 `npm test` never reads or writes your real `data/dialer.db` — it points the server at a
 temp database via `DB_PATH` and deletes it afterwards. (`node test/all-tests.js` still
@@ -39,6 +42,26 @@ works against an already-running server if you want that instead.)
 `test/hardening.test.js` and `test/queue.hook.mjs` are regression tests for defects that
 were reproduced, minimised and fixed; every one of them was mutation-tested, meaning
 reverting its fix turns it red.
+
+### Property-based fuzzing
+`test/unit/property.test.js` runs ~10,600 pseudo-random iterations over the algorithmic
+and security cores, checking invariants that must hold for *every* input rather than a
+handful of chosen ones: crash freedom, idempotence (`f(f(x)) === f(x)`), round-trip
+invertibility of the pagination cursor, boundedness of `clampLimit`, deduplication in
+`appendPage`, CSV formula neutralisation, and that no user input ever reaches SQL text.
+
+The PRNG is seeded (`FUZZ_SEED` overrides it), so a failure reproduces exactly, and every
+failing input is shrunk to a minimal counterexample and printed as JSON.
+
+It found three real defects: `normalizePhone('00568')` returned `+568`, which normalised
+to `''` on a second pass, so one logical number had two canonical forms; the cursor codec
+accepted ids above 2^53 where its own JSON round-trip is lossy; and `appendPage` neither
+deduplicated within an incoming page nor tolerated a null row.
+
+### Layout
+Pure, side-effect-free logic lives in `server/services/` (`text`, `telephony`, `csv`,
+`imports`, `queue`) so it can be `require()`d by tests without booting Express or opening
+the database. `server/index.js` keeps routing, middleware and SQL.
 
 ## Security
 This is a single-operator tool with no login, so the API is protected at the edges rather

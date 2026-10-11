@@ -55,6 +55,16 @@ const DEFAULTS = {
   // ---- Google Meet ----
   meet_link: '', // your standing meeting link; {{meet_link}} inserts it into the template
   email_verify_deep: '0', // SMTP RCPT probing — see emailService.js for why it is off
+  // ---- in-browser WebRTC softphone (telephony_mode: 'webrtc') ----
+  // The SIP-over-WebSocket gateway the browser registers against. Empty derives a default
+  // from the SIP server below; set it explicitly when your provider uses another port/path.
+  webrtc_ws_url: '',
+  // The browser cannot register with a SIP server without the SIP password. That is a real
+  // tension with the rule that this secret never reaches the browser, so the handoff is an
+  // explicit, off-by-default decision rather than something an endpoint does quietly.
+  webrtc_credential_handoff: '0',
+  webrtc_mic_device: '', // preferred microphone deviceId ('' = browser default)
+  webrtc_speaker_device: '', // preferred output deviceId ('' = browser default)
   // ---- UI ----
   sound_cues: '0',
 };
@@ -94,6 +104,7 @@ const ENV_SEEDS = {
   smtp_from: 'SMTP_FROM',
   smtp_reply_to: 'SMTP_REPLY_TO',
   meet_link: 'PULSE_MEET_LINK',
+  webrtc_ws_url: 'PULSE_WEBRTC_WS_URL',
 };
 
 module.exports = {

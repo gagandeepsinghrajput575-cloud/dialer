@@ -50,6 +50,26 @@ async function req(method, urlPath, body, attempt = 1) {
   }
 }
 
+// For endpoints that demand the session token even on a GET (currently only the WebRTC
+// session descriptor, which returns SIP credentials). The browser client fetches the token
+// once and echoes it on every request; this mirrors that.
+let cachedToken = '';
+async function tokened(method, urlPath, body) {
+  if (!cachedToken) cachedToken = (await req('GET', '/api/session')).json.token;
+  const res = await fetch(`${BASE}${urlPath}`, {
+    method,
+    headers: {
+      'x-pulse-token': cachedToken,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* not json */ }
+  return { status: res.status, json, text };
+}
+
 // Same retry as req(), for the hand-built attack requests in the security group.
 // Retries only on transport errors — a 403/401 answer means nothing was mutated.
 async function raw(url, init, attempt = 1) {
@@ -145,6 +165,7 @@ async function run() {
     'queue_smart_sort', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
     'vm_auto_advance', 'vm_greeting', 'voipso_sip_password', 'voipso_sip_server', 'voipso_sip_user',
+    'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
   ]);
   assert.strictEqual(s.ai_provider, 'local', 'copilot defaults to the local summarizer');
   assert.strictEqual(s.business_tz, 'Europe/Copenhagen');
@@ -176,7 +197,33 @@ async function run() {
   await req('PUT', '/api/settings', { voipso_sip_password: '' }); // blank = keep
   const s3 = (await req('GET', '/api/settings')).json;
   assert.strictEqual(s3.has_password, true, 'blank password must not wipe the stored secret');
-  ok('telephony + VOIP.SO keys saved, caller ID kept, secret never echoed back');
+
+  // The settings schema is a whitelist and strips unknown keys, so a setting that exists in
+  // DEFAULTS but not in the schema is silently un-settable — the PUT returns 200 and the value
+  // never persists. Assert the two lists agree, so adding a setting cannot half-land again.
+  {
+    const { SETTING_KEYS } = require('../server/config/defaults');
+    const { settingsUpdate } = require('../server/validation/schemas');
+    const schemaKeys = new Set(Object.keys(settingsUpdate.shape || {}));
+    const unschemaed = SETTING_KEYS.filter((k) => !schemaKeys.has(k));
+    assert.deepStrictEqual(unschemaed, [],
+      `settings exist in DEFAULTS but are stripped by the settingsUpdate schema: ${unschemaed.join(', ')}`);
+  }
+
+  // The in-browser softphone settings must round-trip rather than be silently dropped.
+  await req('PUT', '/api/settings', {
+    webrtc_ws_url: 'wss://gateway.example.dk:8089/ws',
+    webrtc_credential_handoff: '1',
+    webrtc_mic_device: 'mic-abc',
+    webrtc_speaker_device: 'spk-xyz',
+  });
+  const s4 = (await req('GET', '/api/settings')).json;
+  assert.strictEqual(s4.webrtc_ws_url, 'wss://gateway.example.dk:8089/ws', 'webrtc_ws_url persists');
+  assert.strictEqual(s4.webrtc_credential_handoff, '1', 'webrtc_credential_handoff persists');
+  assert.strictEqual(s4.webrtc_mic_device, 'mic-abc', 'the microphone choice persists');
+  assert.strictEqual(s4.webrtc_speaker_device, 'spk-xyz', 'the speaker choice persists');
+  await req('PUT', '/api/settings', { webrtc_ws_url: '', webrtc_credential_handoff: '0', webrtc_mic_device: '', webrtc_speaker_device: '' });
+  ok('telephony + VOIP.SO keys saved, caller ID kept, secret never echoed back (every setting the schema accepts round-trips)');
 
   // ---------------------------------------------------------------- Danish normalization
   step(3, TOTAL, 'POST /api/prospects — Danish number normalization (+45)');
@@ -256,7 +303,74 @@ async function run() {
   assert.strictEqual(t.json.sampleNumber, E164);
   assert.strictEqual(t.json.dialUri, `sip:${E164}`);
   assert.strictEqual(t.json.sipServer, 'sip.voip.so');
-  ok(`test launch would dispatch ${t.json.dialUri} (configured=${t.json.configured})`);
+  assert.strictEqual(t.json.inBrowser, false, 'a softphone launch is not an in-browser session');
+
+  // ------------------------------------------------- in-browser WebRTC session descriptor
+  // The endpoint can hand out live SIP credentials, so it demands the session token even
+  // though it is a GET.
+  assert.strictEqual((await req('GET', '/api/telephony/webrtc-session')).status, 401,
+    'the WebRTC session endpoint refuses a caller with no token');
+
+  const sess = await tokened('GET', '/api/telephony/webrtc-session');
+  assert.strictEqual(sess.status, 200);
+  assert.strictEqual(sess.json.mode, 'webrtc');
+  assert.ok(sess.json.wsUrl.startsWith('wss://'), `the signalling gateway is a wss URL (got ${sess.json.wsUrl})`);
+  assert.strictEqual(sess.json.server, 'sip.voip.so');
+  assert.strictEqual(sess.json.username, '1001');
+
+  // The SIP secret stays on the server unless the agent explicitly opts into the handoff —
+  // a browser cannot register without it, so the descriptor says so instead of omitting it.
+  await req('PUT', '/api/settings', { webrtc_credential_handoff: '0' });
+  const closed = await tokened('GET', '/api/telephony/webrtc-session');
+  assert.strictEqual(closed.json.password, '', 'the SIP secret is withheld while the handoff is off');
+  assert.strictEqual(closed.json.hasPassword, true, 'the descriptor still reports that a secret exists');
+  assert.strictEqual(closed.json.canRegister, false, 'the browser cannot register without the secret');
+
+  await req('PUT', '/api/settings', { webrtc_credential_handoff: '1' });
+  const open = await tokened('GET', '/api/telephony/webrtc-session');
+  assert.strictEqual(open.json.password, 'super-secret', 'an explicit handoff releases the secret to the same-origin tab');
+  assert.strictEqual(open.json.canRegister, true);
+  assert.strictEqual((await req('GET', '/api/settings')).json.voipso_sip_password, '',
+    'even with the handoff on, /api/settings keeps masking the secret');
+  await req('PUT', '/api/settings', { webrtc_credential_handoff: '0' });
+
+  // A configured gateway beats the derived one; with none set, the URL is derived and labelled.
+  await req('PUT', '/api/settings', { webrtc_ws_url: 'wss://gw.example.dk:7443/sip' });
+  const customGw = await tokened('GET', '/api/telephony/webrtc-session');
+  assert.strictEqual(customGw.json.wsUrl, 'wss://gw.example.dk:7443/sip', 'a configured gateway overrides the derived default');
+  assert.strictEqual(customGw.json.wsUrlSource, 'settings');
+  await req('PUT', '/api/settings', { webrtc_ws_url: '' });
+  assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'derived');
+
+  // A webrtc dial addresses the SIP server over the gateway and never degrades to tel:.
+  // Its own prospect, so the shared fixture's call counter stays exactly as later groups
+  // expect it (the same reason the email group uses a throwaway prospect).
+  const webrtcProspect = await req('POST', '/api/prospects', { name: 'Browser Call', phone: '20334455' });
+  assert.strictEqual(webrtcProspect.status, 200);
+  await req('PUT', '/api/settings', { telephony_mode: 'webrtc', dry_run: '1' });
+  const webCall = await req('POST', `/api/prospects/${webrtcProspect.json.id}/call`);
+  assert.strictEqual(webCall.status, 200);
+  assert.strictEqual(webCall.json.telephonyMode, 'webrtc');
+  assert.strictEqual(webCall.json.inBrowser, true, 'the client is told to open an in-browser session');
+  assert.strictEqual(webCall.json.protocol, 'webrtc');
+  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.voip.so;transport=ws',
+    `webrtc dial URI (got ${webCall.json.dialUri})`);
+  assert.ok(!/^tel:/.test(webCall.json.dialUri), 'a webrtc dial never degrades to a tel: URI');
+  assert.strictEqual(webCall.json.callerId, '+4520123456', 'caller-ID rotation still applies in webrtc mode');
+  assert.strictEqual((await req('GET', `/api/prospects/${webrtcProspect.json.id}`)).json.calls[0].dial_uri,
+    'sip:+4520334455@sip.voip.so;transport=ws', 'the gateway URI is what lands in call history');
+  await req('DELETE', `/api/prospects/${webrtcProspect.json.id}`);
+
+  // The test-launch endpoint used to answer "configured: true" for webrtc unconditionally.
+  const wt = await req('POST', '/api/settings/test-softphone', { number: SAMPLE });
+  assert.strictEqual(wt.json.inBrowser, true);
+  assert.strictEqual(wt.json.protocol, 'webrtc');
+  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.voip.so;transport=ws`, 'the test launch shows the gateway URI');
+  assert.strictEqual(wt.json.configured, false, 'webrtc readiness is not claimed while the handoff is off');
+  assert.match(wt.json.message, /handoff|Settings/i);
+
+  await req('PUT', '/api/settings', { telephony_mode: 'softphone', dry_run: '1' });
+  ok(`test launch dispatches ${t.json.dialUri} (configured=${t.json.configured}); the WebRTC descriptor is token-gated and its secret is opt-in`);
 
   // ---------------------------------------------------------------- outcome logging
   step(9, TOTAL, 'PATCH /api/calls/:id — outcome classification and pipeline stage');

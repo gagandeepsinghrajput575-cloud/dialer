@@ -28,7 +28,15 @@ function loadApp(JSDOM, VirtualConsole, hash) {
   const assets = path.join(REPO, 'dist', 'assets');
   const html = fs.readFileSync(path.join(REPO, 'dist', 'index.html'), 'utf8')
     .replace(/<script type="module"[^>]*><\/script>/, '');
-  const bundle = fs.readFileSync(path.join(assets, fs.readdirSync(assets).find((f) => f.endsWith('.js'))), 'utf8');
+  // The app is code-split now (the SIP adapter is its own chunk), so the entry must be read
+  // from index.html rather than guessed as "the first .js file in the directory".
+  const entry = (html.match(/<script[^>]*src="\/assets\/([^"]+\.js)"/) || [])[1]
+    || fs.readdirSync(assets).filter((f) => f.endsWith('.js')).sort((a, b) => fs.statSync(path.join(assets, b)).size - fs.statSync(path.join(assets, a)).size)[0];
+  // jsdom evaluates the bundle as a classic script, so the one `import.meta` Vite leaves in the
+  // dynamic-import preload helper has to become a plain object first.
+  const bundle = fs.readFileSync(path.join(assets, entry), 'utf8')
+    .replace(/import\.meta/g, '__pulseImportMeta')
+    .replace(/export\{[^}]*\};?/g, '');   // the entry re-exports one shared symbol; jsdom runs classic scripts
 
   const vc = new VirtualConsole();
   const consoleErrors = [];
@@ -53,6 +61,7 @@ function loadApp(JSDOM, VirtualConsole, hash) {
   window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
   window.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } };
   window.Element.prototype.scrollIntoView = function () {};
+  window.__pulseImportMeta = { url: `${BASE}/assets/${entry}`, resolve: () => '' };
   window.confirm = () => true;
   window.eval(bundle);
   return { dom, window, jsErrors, consoleErrors, drain: () => calls.splice(0) };
@@ -363,6 +372,106 @@ async function run() {
       check(/Another tab/.test(lockToast), `the agent is told why ("${lockToast.slice(0, 44)}")`);
     }
     lockApp.dom.window.close();
+    // --- W1: the in-browser softphone (telephony_mode = webrtc) -------------------
+    // The point of this mode is that the call never leaves the tab. Test mode is on, so the
+    // engine runs its dry-run simulator — the same component code and the same state machine,
+    // just with no audio hardware to talk to.
+    await put('/api/settings', { telephony_mode: 'webrtc', dry_run: '1' });
+    await post('/api/prospects', { name: 'WebRTC Target', phone: '+4520334455' });
+
+    const wApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    await wait(() => wApp.window.document.querySelector('.q-item'), 15000, 'webrtc queue');
+    await ensureListener(wApp);
+    const wItem = [...wApp.window.document.querySelectorAll('.q-item')].find((el) => /WebRTC Target/.test(el.textContent));
+    check(!!wItem, 'the in-browser fixture prospect is in the queue');
+    if (wItem) wItem.dispatchEvent(new wApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(700);
+    wApp.drain();
+    key(wApp.window, 'c');
+
+    // A call bar that says "active" before any audio path exists is the defect this mode
+    // exists to remove: the timer must not run on a silent call.
+    await wait(() => !!wApp.window.document.querySelector('.inflight'), 8000, 'in-browser strip');
+    await sleep(350);
+    const earlyClass = wApp.window.document.querySelector('.callbar')?.className || '';
+    check(!/active/.test(earlyClass) && !wApp.window.document.querySelector('.webrtc-badge'),
+      'the call bar stays out of "active" until the audio path is real');
+    check(/transport=ws/.test(wApp.window.document.querySelector('.inflight-uri')?.textContent || ''),
+      `the dial URI is a SIP-over-WebSocket route (${(wApp.window.document.querySelector('.inflight-uri')?.textContent || '').slice(0, 46)})`);
+    check(!wApp.window.document.querySelector('.softphone-link'),
+      'the "launch your softphone" affordance is gone in this mode');
+
+    // ...and then the engine reports the audio path, and only then does the call go live.
+    await wait(() => wApp.window.document.querySelector('.webrtc-badge'), 12000, 'WebRTC active badge');
+    check(/WebRTC Active \u00b7 Mic Live/.test(wApp.window.document.querySelector('.webrtc-badge').textContent),
+      'the badge reads "WebRTC Active \u00b7 Mic Live"');
+    check(wApp.window.document.querySelectorAll('iframe[src^="sip:"], iframe[src^="tel:"]').length === 0,
+      'no dial URI is handed to the operating system in this mode');
+    const t0 = wApp.window.document.querySelector('.timer')?.textContent;
+    await sleep(1400);
+    const t1 = wApp.window.document.querySelector('.timer')?.textContent;
+    check(t0 !== t1 && /^\d+:\d\d$/.test(t1 || ''), `the talk timer counts real time (${t0} -> ${t1})`);
+
+    key(wApp.window, 'm');
+    await sleep(300);
+    check(/Muted/.test(wApp.window.document.querySelector('.webrtc-badge')?.textContent || ''),
+      'M mutes the microphone and the badge says so');
+    key(wApp.window, 'm');
+    await sleep(300);
+    check(/Mic Live/.test(wApp.window.document.querySelector('.webrtc-badge')?.textContent || ''),
+      'M again brings the microphone back');
+
+    // The touch-tone pad is a modal: its digits are tones for an IVR, not call results.
+    wApp.drain();
+    key(wApp.window, 'd');
+    await sleep(350);
+    const pad = wApp.window.document.querySelector('.dtmf-pad');
+    check(!!pad, 'D opens the touch-tone pad');
+    check((pad?.querySelectorAll('.dtmf-key') || []).length === 12, `the pad offers 12 tones (${(pad?.querySelectorAll('.dtmf-key') || []).length})`);
+    for (const d of ['1', '2', '#']) key(wApp.window, d);
+    await sleep(400);
+    const log = wApp.window.document.querySelector('.dtmf-log')?.textContent || '';
+    check(/1 2 #/.test(log), `keys pressed in the pad are sent as tones (${log.slice(0, 24)})`);
+    check(count(wApp.drain(), PATCH) === 0, 'the pad swallows the outcome keys instead of classifying the call');
+    key(wApp.window, 'Escape');
+    await sleep(700);   // AnimatePresence removes the node after the exit animation
+    check(!wApp.window.document.querySelector('.dtmf-pad'), 'Escape closes the pad');
+
+    // Hang up: the mic goes cold first, then classification opens — same rhythm as an OS call.
+    key(wApp.window, 'h');
+    await wait(() => wApp.window.document.querySelector('.classify-modal'), 8000, 'classification after hang-up');
+    check(!!wApp.window.document.querySelector('.classify-modal'), 'H hangs up the in-browser call and opens classification');
+    await sleep(700);
+    check(!wApp.window.document.querySelector('.webrtc-badge'), 'hanging up clears the live badge (the microphone is released)');
+    key(wApp.window, 'Escape');
+    await sleep(900);
+    check(wApp.jsErrors.length === 0, `no jsdom errors driving the in-browser softphone (${wApp.jsErrors.join(' | ').slice(0, 150)})`);
+    wApp.dom.window.close();
+
+    // The adapter destructures an exact export surface out of the SIP stack. Pin it: an
+    // upstream rename would otherwise only show up as a failed call in front of a customer.
+    const sipCore = await import('sip.js').catch(() => null);
+    const sipWeb = await import('sip.js/lib/platform/web/index.js').catch(() => null);
+    check(!!sipCore?.UserAgent && !!sipCore?.Registerer && !!sipCore?.Inviter && !!sipCore?.SessionState?.Established,
+      'the SIP stack exports the classes the signalling adapter drives');
+    check(!!(sipCore?.SessionDescriptionHandler || sipWeb?.SessionDescriptionHandler),
+      'a session-description handler is available for the microphone hand-off');
+
+    // --- W2: Settings must reach for audio hardware without throwing when there is none ---
+    const sApp = loadApp(JSDOM, VirtualConsole, '#settings');
+    await wait(() => sApp.window.document.querySelector('.mic-test'), 12000, 'WebRTC settings panel');
+    check(!!sApp.window.document.querySelector('.mic-test'), 'Settings carries the in-browser softphone panel and a microphone test');
+    const startTest = [...sApp.window.document.querySelectorAll('.mic-test button')].find((b) => /Start test/.test(b.textContent));
+    check(!!startTest, 'the microphone test has a start control');
+    if (startTest) startTest.dispatchEvent(new sApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(600);
+    const micText = sApp.window.document.querySelector('.mic-test')?.textContent || '';
+    check(/no microphone API|Could not open/.test(micText),
+      'with no microphone API the test explains itself instead of throwing');
+    check(sApp.jsErrors.length === 0, `no jsdom errors on the WebRTC settings panel (${sApp.jsErrors.join(' | ').slice(0, 140)})`);
+    sApp.dom.window.close();
+    await put('/api/settings', { telephony_mode: 'softphone' });
+
   } catch (e) {
     bad(`dialer race suite aborted: ${e.message}`);
     if (srvErr) console.log(`        server stderr: ${srvErr.slice(-300)}`);

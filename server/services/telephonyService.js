@@ -82,6 +82,76 @@ function buildDialUriFull(phone) {
 
 const sipConfigured = () => !!String(settings.get('voipso_sip_user') || '').trim();
 
+// ---------------------------------------------------------------- in-browser WebRTC softphone
+// The browser registers to the SIP server over a WebSocket gateway. Providers name that
+// endpoint differently, so it is a setting; when it is blank we derive the conventional
+// :8089/ws path from the SIP server rather than refusing to work. Nothing here is guessed
+// silently — `webrtcSession()` reports which of the two it used so the UI can say so.
+const WEBRTC_WS_PORT = 8089;
+const WEBRTC_WS_PATH = '/ws';
+
+function webrtcServer() {
+  return String(settings.get('voipso_sip_server') || '').trim();
+}
+
+function webrtcWsUrl() {
+  const explicit = String(settings.get('webrtc_ws_url') || '').trim();
+  if (explicit) return explicit;
+  const server = webrtcServer();
+  return server ? `wss://${server}:${WEBRTC_WS_PORT}${WEBRTC_WS_PATH}` : '';
+}
+
+// What the browser addresses the call to. transport=ws tells the far end this leg arrives
+// over the WebSocket gateway rather than a UDP/TCP trunk.
+function buildWebRtcUri(phone) {
+  const server = webrtcServer();
+  const clean = String(phone || '').trim();
+  return server ? `sip:${clean}@${server};transport=ws` : `sip:${clean};transport=ws`;
+}
+
+// Is the browser softphone in a state where pressing C could actually connect?
+function webrtcReadiness() {
+  const wsUrl = webrtcWsUrl();
+  const server = webrtcServer();
+  const user = String(settings.get('voipso_sip_user') || '').trim();
+  const hasPassword = !!String(settings.get('voipso_sip_password') || '').trim();
+  const missing = [];
+  if (!server) missing.push('server');
+  if (!user) missing.push('user');
+  if (!hasPassword) missing.push('password');
+  if (!wsUrl) missing.push('wsUrl');
+  return { wsUrl, server, user, hasPassword, missing, configured: missing.length === 0 };
+}
+
+// The descriptor the browser needs to open a session. The SIP password is only included
+// when the agent has explicitly opted into the handoff (Settings → Telephony), because the
+// rest of the app promises this secret never leaves the server; the UI explains the trade-off.
+function webrtcSession() {
+  const r = webrtcReadiness();
+  const handoff = settings.getBool('webrtc_credential_handoff');
+  const password = String(settings.get('voipso_sip_password') || '');
+  return {
+    mode: 'webrtc',
+    configured: r.configured,
+    missing: r.missing,
+    wsUrl: r.wsUrl,
+    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : (r.server ? 'derived' : 'none'),
+    server: r.server,
+    username: r.user,
+    // Normalized like every other caller ID the app shows or sends: the browser puts this
+    // straight into the SIP From header, so '+45 20 12 34 56' would be a malformed one.
+    callerId: normalizePhone(settings.get('caller_id')) || nextCallerId().callerId || '',
+    password: handoff ? password : '',
+    hasPassword: r.hasPassword,
+    credentialHandoff: handoff,
+    // A browser cannot register without the secret, so a closed handoff is a blocking
+    // condition the UI must surface rather than an optional nicety.
+    canRegister: r.configured && handoff,
+    micDevice: String(settings.get('webrtc_mic_device') || ''),
+    speakerDevice: String(settings.get('webrtc_speaker_device') || ''),
+  };
+}
+
 // ---- multi-DID rotation (spam shield) ----
 // Caller IDs are normalized once and rotated round-robin. The cursor is persisted so the
 // rotation keeps its place across restarts.
@@ -270,4 +340,5 @@ module.exports = {
   numberKind, DK_SPECIAL_RANGES,
   callerIdPool, nextCallerId, businessHours, toMinutes, voicemailGreeting, sampleDialUri, VM_FILENAME,
   partsIn, tzOffsetMinutes, zonedTimeToUtc, zonedDate, MIN_DIGITS, MAX_POOL,
+  webrtcWsUrl, webrtcServer, buildWebRtcUri, webrtcReadiness, webrtcSession, WEBRTC_WS_PORT, WEBRTC_WS_PATH,
 };

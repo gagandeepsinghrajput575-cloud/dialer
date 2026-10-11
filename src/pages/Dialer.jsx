@@ -5,10 +5,12 @@ import {
   CalendarCheck, OctagonX, Circle, Phone, PhoneCall, Search,
   ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
-  Headphones, RotateCw, FlaskConical, Wifi, Send
+  Headphones, RotateCw, FlaskConical, Wifi, Send,
+  Mic, MicOff, Radio, Grid3x3
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
+import useWebRtc, { DTMF_KEYS } from '../useWebRtc.js';
 import ProspectCard from '../components/ProspectCard.jsx';
 import EmailComposer, { VerifyBadge } from '../components/EmailComposer.jsx';
 import QueueList from '../components/QueueList.jsx';
@@ -32,16 +34,61 @@ const TABS = [
   { id: 'all', label: 'All', test: () => true },
 ];
 
-function Waveform({ active }) {
+function Waveform({ active, level }) {
+  // With a live microphone the bars follow the actual input level — a quiet agent looks
+  // quiet. Without one (external softphone, or a browser with no audio support) they fall
+  // back to the ambient animation.
+  const live = typeof level === 'number';
   return (
     <div className={`wave ${active ? 'on' : ''}`}>
       {Array.from({ length: 24 }).map((_, i) => (
-        <motion.i
-          key={i}
-          animate={active ? { scaleY: [0.25, 1, 0.35, 0.8, 0.25] } : { scaleY: 0.2 }}
-          transition={active ? { duration: 1.1 + (i % 5) * 0.15, repeat: Infinity, delay: i * 0.04, ease: 'easeInOut' } : { duration: 0.3 }}
-        />
+        live
+          ? (
+            <i
+              key={i}
+              style={{
+                transform: `scaleY(${active
+                  ? Math.max(0.12, Math.min(1, level * (0.55 + (i % 6) * 0.16)))
+                  : 0.2})`,
+                transition: 'transform 90ms linear',
+              }}
+            />
+          )
+          : (
+            <motion.i
+              key={i}
+              animate={active ? { scaleY: [0.25, 1, 0.35, 0.8, 0.25] } : { scaleY: 0.2 }}
+              transition={active ? { duration: 1.1 + (i % 5) * 0.15, repeat: Infinity, delay: i * 0.04, ease: 'easeInOut' } : { duration: 0.3 }}
+            />
+          )
       ))}
+    </div>
+  );
+}
+
+// A softphone keypad. Its only job is to send tones, but showing the last few pressed makes
+// it obvious whether the IVR heard you — silence on a call is otherwise indistinguishable
+// from a dead audio path.
+function DtmfPad({ log, onKey, onClose, muted, onToggleMute }) {
+  return (
+    <div role="dialog" aria-label="Touch tones">
+      <div className="dtmf-head">
+        <b><Grid3x3 size={15} /> Touch tones</b>
+        <button className="icon-btn" onClick={onClose} title="Close (Esc)"><X size={16} /></button>
+      </div>
+      <div className="dtmf-grid">
+        {DTMF_KEYS.map((d) => (
+          <button key={d} className="dtmf-key" onClick={() => onKey(d)} title={`Send ${d}`}>{d}</button>
+        ))}
+      </div>
+      <div className="dtmf-foot">
+        <span className="dtmf-log" title="Tones sent on this call">
+          {log.length ? log.join(' ') : 'No tones sent yet'}
+        </span>
+        <button className={`btn xs ${muted ? 'danger' : ''}`} onClick={onToggleMute}>
+          {muted ? <MicOff size={12} /> : <Mic size={12} />} {muted ? 'Unmute (M)' : 'Mute (M)'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -151,6 +198,42 @@ export default function Dialer() {
     const pending = timersRef.current;
     return () => { for (const id of pending) clearTimeout(id); pending.clear(); };
   }, []);
+
+  // ---- In-browser softphone (telephony_mode = 'webrtc') ---------------------------------
+  // Same cockpit, no external app: the microphone, the media path and the hang-up all live in
+  // the engine; this component only decides what to show and when to classify.
+  const isWebrtc = settings?.telephony_mode === 'webrtc';
+  const isWebrtcRef = useRef(false);
+  isWebrtcRef.current = isWebrtc;
+  const webrtcRef = useRef(null);
+  const sessionRef = useRef(null);        // descriptor from GET /api/telephony/webrtc-session
+  const webrtcLiveRef = useRef(false);    // audio genuinely flowing?
+  const webrtcFinishRef = useRef(null);   // set below; called when the engine ends the call
+  const [dtmfOpen, setDtmfOpen] = useState(false);
+  const dtmfRef = useRef(false);
+  dtmfRef.current = dtmfOpen;
+
+  const webrtc = useWebRtc({
+    enabled: isWebrtc,
+    // Only the engine may promote the callbar to 'active', and it does so when audio really
+    // flows (a live ICE connect, or the dry-run simulator auto-connecting). Everywhere else
+    // the dialer used to go 'active' the instant the server answered, which drew a running
+    // timer over a call that had no audio path at all — the exact bug this replaces.
+    onActive: () => {
+      webrtcLiveRef.current = true;
+      setLaunched(true);
+      setPhaseSafe('active');
+      refreshStats();
+    },
+    // Fires when the engine ends the session. Release the mic first, then classify: nothing
+    // may leave the browser recording after the call, and a hang-up must never need a second
+    // click to reach a result.
+    onEnded: () => {
+      webrtcLiveRef.current = false;
+      if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
+    },
+  });
+  webrtcRef.current = webrtc;
 
   // Server-backed queue: filtering, ranking, and paging live on the server
   const queue = useServerQueue({ tab, q, limit: QUEUE_LIMIT });
@@ -297,6 +380,28 @@ export default function Dialer() {
       setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, phone: r.phone });
       patchLocal(active.id, { call_count: active.call_count + 1, last_called_at: new Date().toISOString() });
       const softphone = softphoneLabel(r.telephonyMode);
+
+      // ---- In-browser call: no OS dispatch and no invented 'active' ----
+      // The server never hands out a sip:/tel: URI for this mode; the media session is built
+      // here. The engine reports back only when the audio path is real (or, in test mode, when
+      // the simulator has auto-connected), so the timer cannot start on a silent call.
+      if (r.inBrowser) {
+        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun });
+        if (!res.ok) {
+          // Nothing ever left the machine, so the record the server just created is a phantom.
+          // Remove it rather than leaving a call in history that no audio ever carried.
+          try { await api.discardCall(r.callId); } catch { /* best effort */ }
+          patchLocal(active.id, { call_count: active.call_count });
+          setCallId(null);
+          setDial(null);
+          setPhaseSafe('idle');
+          return toast(res.reason || 'The in-browser call could not start.', 'error');
+        }
+        if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
+        else toast(`In-browser softphone dialing ${r.phone}…`);
+        return;
+      }
+
       if (r.dryRun) {
         toast(`Test mode: ${r.dialUri} simulated in-browser`);
       } else {
@@ -331,12 +436,14 @@ export default function Dialer() {
     toast(ok ? `Re-launching ${dial.uri} in ${softphone}` : `Could not launch ${softphone} — open it and dial ${dial.phone} manually`, ok ? 'ok' : 'error');
   }, [dial, settings, toast]);
 
-  // When clicking hang up button, open the classification modal
-  const hangUp = useCallback(() => {
-    if (phaseRef.current !== 'active' || !callId || !active) return;
+  // The second half of a hang-up: everything except silencing the audio, which is over.
+  // Split out because the in-browser engine calls it itself once it has released the mic.
+  const openClassification = useCallback(() => {
+    if (!callId || !active) return;
     const dur = secRef.current;
     setPhaseSafe('idle');
     setLaunched(false);
+    setDtmfOpen(false);   // the touch-tone pad must not float over the classification dialog
     setTargetStage(active.stage || 'contacted');
     setCustomNote(quickNoteRef.current.trim());
     setClassifySafe({
@@ -345,6 +452,19 @@ export default function Dialer() {
       prospect: active,
     });
   }, [callId, active, setPhaseSafe, setClassifySafe]);
+  webrtcFinishRef.current = openClassification;
+
+  // When clicking hang up button, open the classification modal
+  const hangUp = useCallback(() => {
+    if (phaseRef.current !== 'active' || !callId || !active) return;
+    // In-browser: hanging up means releasing the microphone, and the engine reports back the
+    // moment it has done that — so classification happens with the mic already cold.
+    if (isWebrtcRef.current) {
+      webrtcRef.current?.hangUp();
+      return;
+    }
+    openClassification();
+  }, [callId, active, openClassification]);
 
   // Discard an active or hung-up call without polluting stats or history
   const handleDiscardCall = useCallback(async () => {
@@ -362,6 +482,9 @@ export default function Dialer() {
     setDial(null);
     setLaunched(false);
     setQuickNote('');
+    setDtmfOpen(false);
+    // Discarding must not leave the microphone open in the in-browser mode.
+    webrtcRef.current?.reset();
     toast('Call discarded');
     await Promise.all([queue.refresh(), refreshProspects(), refreshStats()]);
   }, [callId, queue, setPhaseSafe, setClassifySafe, toast, refreshProspects, refreshStats]);
@@ -517,9 +640,36 @@ export default function Dialer() {
         return;
       }
 
+      // The touch-tone pad is a modal too: while it is open, digits are tones for the
+      // provider's IVR, not call results. Otherwise "press 1 for sales" would classify
+      // the call instead of navigating the menu.
+      if (dtmfRef.current) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setDtmfOpen(false);
+        } else if (DTMF_KEYS.includes(k)) {
+          e.preventDefault();
+          webrtcRef.current?.sendDtmf(k);
+        }
+        return;
+      }
+
       // The composer is a modal: while it is open the dialer must stop listening, or a
       // keystroke aimed at the email also places a call behind the dialog.
       if (mailingRef.current) return;
+
+      // Mute lives on M, like every other softphone. Only meaningful with a live mic.
+      if (k === 'm' && isWebrtcRef.current && webrtcLiveRef.current) {
+        e.preventDefault();
+        const nowMuted = webrtcRef.current?.toggleMute();
+        toast(nowMuted ? 'Microphone muted' : 'Microphone live');
+        return;
+      }
+      if (k === 'd' && isWebrtcRef.current && webrtcLiveRef.current) {
+        e.preventDefault();
+        setDtmfOpen((v) => !v);
+        return;
+      }
 
       // Normal stage shortcuts
       if (k === 'c') {
@@ -552,7 +702,7 @@ export default function Dialer() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer, toast]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -570,11 +720,23 @@ export default function Dialer() {
   const softphone = softphoneLabel(settings?.telephony_mode);
   const cc = ccLabel(settings?.default_country_code);
   const proto = settings?.softphone_protocol === 'tel' ? 'tel' : 'sip';
-  const inflightText = dry
-    ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`}`
-    : launched || phase === 'dialing'
-      ? `Dialing via ${softphone} (${cc})…`
-      : `Waiting on ${softphone} (${cc})`;
+  // In-browser mode reports the engine's own state, so the strip under the callbar says
+  // "Ringing" only while it really is ringing, and shows the engine's error when it fails.
+  const webState = webrtc.state;
+  const inflightText = isWebrtc
+    ? webState === 'registering' ? `Registering with ${softphone}…`
+      : webState === 'ringing' ? `Ringing ${dial?.phone || active?.phone || ''}…`
+        : webState === 'error' ? (webrtc.error || 'The in-browser call failed.')
+          : webState === 'active' ? (dry ? `Test mode: in-browser call simulated` : `In-browser call live with ${dial?.phone || active?.phone || ''}`)
+            : `Dialing ${dial?.phone || active?.phone || ''}…`
+    : dry
+      ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`}`
+      : launched || phase === 'dialing'
+        ? `Dialing via ${softphone} (${cc})…`
+        : `Waiting on ${softphone} (${cc})`;
+  const inflightClass = isWebrtc
+    ? (webrtc.active ? 'live' : webState === 'error' ? 'err' : 'wait')
+    : (dry ? 'dry' : launched ? 'live' : 'wait');
 
   return (
     <div className="dialer">
@@ -687,17 +849,42 @@ export default function Dialer() {
               <AnimatePresence>
                 {calling && (
                   <motion.div
-                    className={`inflight ${dry ? 'dry' : launched ? 'live' : 'wait'}`}
+                    className={`inflight ${inflightClass}`}
                     initial={{ opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8 }}
                     transition={{ duration: 0.22, ease: 'easeOut' }}
                   >
                     <span className="inflight-dot" />
-                    {dry ? <FlaskConical size={14} /> : launched ? <Headphones size={14} /> : <Wifi size={14} />}
+                    {isWebrtc ? <Radio size={14} /> : dry ? <FlaskConical size={14} /> : launched ? <Headphones size={14} /> : <Wifi size={14} />}
                     <span className="inflight-txt">{inflightText}</span>
                     {dial?.uri && <code className="inflight-uri">{dial.uri}</code>}
-                    {!dry && phase === 'active' && (
+                    {isWebrtc && webrtc.active && (
+                      <span className={`webrtc-badge ${webrtc.muted ? 'muted' : ''}`} title={webrtc.micLabel ? `Microphone: ${webrtc.micLabel}` : 'Microphone is live in the browser'}>
+                        {webrtc.muted ? <MicOff size={12} /> : <Mic size={12} />}
+                        {webrtc.muted ? 'WebRTC Active · Muted' : 'WebRTC Active · Mic Live'}
+                      </span>
+                    )}
+                    {isWebrtc && webrtc.active && (
+                      <>
+                        <button
+                          className={`btn xs ${webrtc.muted ? 'danger' : ''}`}
+                          onClick={() => { const m = webrtc.toggleMute(); toast(m ? 'Microphone muted' : 'Microphone live'); }}
+                          title={webrtc.muted ? 'Unmute the microphone (M)' : 'Mute the microphone (M)'}
+                        >
+                          {webrtc.muted ? <MicOff size={12} /> : <Mic size={12} />} {webrtc.muted ? 'Unmute' : 'Mute'}
+                          <kbd className="chip-kbd">M</kbd>
+                        </button>
+                        <button
+                          className="btn xs"
+                          onClick={() => setDtmfOpen((v) => !v)}
+                          title="Touch tones for phone menus (D)"
+                        >
+                          <Grid3x3 size={12} /> Keypad <kbd className="chip-kbd">D</kbd>
+                        </button>
+                      </>
+                    )}
+                    {!isWebrtc && !dry && phase === 'active' && (
                       <button className="btn xs" onClick={relaunchSoftphone} title="Re-launch the softphone (R)">
                         <RotateCw size={12} /> Re-launch
                       </button>
@@ -754,7 +941,7 @@ export default function Dialer() {
                   </div>
                 </div>
               </div>
-              <Waveform active={phase === 'active'} />
+              <Waveform active={phase === 'active'} level={isWebrtc ? webrtc.level : null} />
 
               <div className="outcome-head">
                 <span>{phase === 'active' ? 'Click Hangup (Red) or pick a result below to classify:' : 'Call results unlock when a call starts'}</span>
@@ -776,7 +963,7 @@ export default function Dialer() {
                     <button className="btn danger sm" onClick={hangUp} title={dry ? 'Hang up and classify (H)' : `End the call in ${softphone}, then classify here (H)`}><PhoneOff size={14} /> Hang Up & Classify</button>
                     <button className="link-btn" onClick={handleDiscardCall}><SkipForward size={13} /> Discard without logging</button>
                   </div>
-                  {!dry && dial?.uri && (
+                  {!isWebrtc && !dry && dial?.uri && (
                     <a
                       className="link-btn softphone-link"
                       href={launched ? dial.full || dial.uri : dial.uri}
@@ -833,7 +1020,7 @@ export default function Dialer() {
             {/* FULL DETAILS CARD */}
             <div className="glass card-wrap">
               <ProspectCard p={active} big onSent={() => Promise.all([reload(), queue.refresh()])} />
-              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email · <kbd>R</kbd> re-launch softphone · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
+              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email{isWebrtc ? ' · ' : ' · '}<kbd>M</kbd>{isWebrtc ? ' mute' : ''} · {isWebrtc ? <><kbd>D</kbd> keypad · </> : <><kbd>R</kbd> re-launch softphone · </>}<kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
             </div>
           </>
         ) : (
@@ -863,6 +1050,34 @@ export default function Dialer() {
           </>
         )}
       </section>
+
+      {/* TOUCH-TONE PAD — navigate an IVR without leaving the cockpit */}
+      <AnimatePresence>
+        {isWebrtc && dtmfOpen && (
+          <>
+            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDtmfOpen(false)} />
+            <motion.div
+              className="modal dtmf-pad"
+              initial={{ opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
+              <DtmfPad
+                log={webrtc.dtmfLog}
+                onKey={(d) => webrtc.sendDtmf(d)}
+                onClose={() => setDtmfOpen(false)}
+                muted={webrtc.muted}
+                onToggleMute={() => { const m = webrtc.toggleMute(); toast(m ? 'Microphone muted' : 'Microphone live'); }}
+              />
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Remote audio for the in-browser call. Hidden, but a real <audio> element — WebRTC
+          audio only plays through a media element the document actually holds. */}
+      <audio ref={webrtc.audioRef} autoPlay playsInline className="webrtc-audio" />
 
       {/* CLASSIFICATION MODAL ON HANG UP */}
       <AnimatePresence>

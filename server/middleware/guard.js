@@ -89,9 +89,21 @@ function session(req, res) {
   res.json({ token: TOKEN, tokenHeader: TOKEN_HEADER });
 }
 
+// Demanded by endpoints that return live credentials rather than data. The global guard only
+// requires the token for writes; a GET that hands out SIP credentials is exactly as sensitive
+// as a write, so it asks for the token on its own as well. Scripts can fetch it from
+// /api/session first, which is what the browser client already does on every request.
+function requireToken(req, res, next) {
+  if (req.get(TOKEN_HEADER) !== TOKEN) {
+    return next(ApiError.unauthorized('This endpoint returns credentials and needs the session token — reload the app'));
+  }
+  next();
+}
+
 module.exports = {
   guard,
   session,
+  requireToken,
   sessionToken: () => TOKEN,
   TOKEN_HEADER,
   hostAllowed,

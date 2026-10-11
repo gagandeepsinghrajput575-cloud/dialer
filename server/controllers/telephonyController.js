@@ -10,6 +10,13 @@ const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
 const businessHours = asyncHandler(async (req, res) => res.json(telephony.businessHours()));
 
+// GET /api/telephony/webrtc-session
+// Everything the in-browser softphone needs to register and dial. Guarded by the origin
+// allowlist (middleware/guard) and by an explicit session-token check on the route, because
+// this response is the only place a SIP credential can leave the process — and only when the
+// agent has turned the handoff on. See telephonyService.webrtcSession for that reasoning.
+const webrtcSession = asyncHandler(async (req, res) => res.json(telephony.webrtcSession()));
+
 const callerIds = asyncHandler(async (req, res) => res.json({
   pool: telephony.callerIdPool(),
   primary: settings.get('caller_id') || '',
@@ -47,4 +54,4 @@ const scheduleFollowUp = asyncHandler(async (req, res) => {
   res.json({ ok: true, prospect: followUpService.schedule(req.params.id, req.body.at) });
 });
 
-module.exports = { businessHours, callerIds, greetingMeta, uploadGreeting, greetingFile, followUpEmail, scheduleFollowUp };
+module.exports = { businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting, greetingFile, followUpEmail, scheduleFollowUp };

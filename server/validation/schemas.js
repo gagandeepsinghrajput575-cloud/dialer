@@ -51,9 +51,20 @@ const prospectCreateStrict = prospectCreate.refine(
 // A real 50k-row export must import in one go; the cap exists to keep the request sane.
 const bulkImport = z.object({
   rows: z.array(z.record(z.string(), z.any())).max(50000),
+  // `notes` is a first-class target alongside the prospect fields, so the mapping is a free
+  // record rather than an enum — the import screen decides what it can map to.
   mapping: z.record(z.string(), z.string()).optional().default({}),
   skipDuplicates: z.boolean().optional().default(true),
 });
+
+// Bulk management. The id list is bounded (a select-all on a huge list pages through the table
+// 400 rows at a time) but deduplication happens in the service, not here, so a caller that
+// repeats an id still gets the honest count back.
+const bulkIds = z.array(z.union([z.number().int().positive(), z.string().trim().min(1).max(20)]))
+  .min(1, 'Select at least one prospect')
+  .max(1000, 'Too many prospects in one action — narrow the selection');
+const bulkStage = z.object({ ids: bulkIds, stage: z.enum(STAGES, { message: 'Unknown stage' }) });
+const bulkDelete = z.object({ ids: bulkIds });
 
 const callStart = z.object({ tzOffset: z.coerce.number().optional() });
 
@@ -173,4 +184,5 @@ module.exports = {
   callPatch, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
+  bulkStage, bulkDelete,
 };

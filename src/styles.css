@@ -1042,3 +1042,60 @@ button, a, label, summary, input, select, textarea,
   .outbox-split { grid-template-columns: 1fr; }
   .outbox-list { max-height: 32vh; }
 }
+
+/* ---------- Prospects: multi-select & bulk actions ---------- */
+.sel-col { width: 38px; padding-right: 0; }
+.row-check {
+  width: 16px; height: 16px; cursor: pointer; accent-color: #8b5cf6; vertical-align: middle;
+}
+tr.row-selected { background: rgba(139,92,246,0.13); }
+tr.row-selected:hover { background: rgba(139,92,246,0.18); }
+
+/* Floating, because these actions belong to a *selection* — putting them in the toolbar would
+   invite reading them as actions on the whole list. */
+.bulk-bar {
+  position: fixed; left: 50%; bottom: 22px; translate: -50% 0; z-index: 38;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; border-radius: 16px; box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+  border: 1px solid rgba(139,92,246,0.45);
+}
+.bulk-count { font-size: 13px; font-weight: 700; color: #c4b5fd; white-space: nowrap; }
+.bulk-count b { font-size: 15px; }
+.bulk-stage { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+.bulk-stage select {
+  padding: 6px 9px; border-radius: 10px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--panel-2); border: 1px solid var(--line); cursor: pointer;
+}
+.bulk-bar .link-btn { font-size: 12px; }
+@media (max-width: 700px) { .bulk-bar { left: 12px; right: 12px; translate: 0 0; } }
+
+.confirm-modal { width: min(460px, 94vw); }
+.confirm-modal .modal-head h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.confirm-modal p { line-height: 1.55; }
+
+/* ---------- Dialer: end-of-queue celebration ---------- */
+.queue-done {
+  position: relative; overflow: hidden; text-align: center; padding: 34px 24px 30px;
+  border-radius: 20px; border: 1px solid rgba(139,92,246,0.35);
+}
+.qd-trophy {
+  width: 68px; height: 68px; margin: 0 auto 14px; border-radius: 20px;
+  display: grid; place-items: center; color: #fbbf24;
+  background: radial-gradient(circle at 35% 30%, rgba(251,191,36,0.28), rgba(251,191,36,0.06));
+  border: 1px solid rgba(251,191,36,0.35);
+}
+.queue-done h2 { font-size: 22px; margin-bottom: 8px; }
+.queue-done > p { max-width: 54ch; margin: 0 auto 20px; font-size: 13.5px; line-height: 1.6; }
+.qd-stats {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+  max-width: 620px; margin: 0 auto 22px;
+}
+.qd-stats > div {
+  padding: 12px 8px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.03);
+}
+.qd-stats b { display: block; font-size: 20px; line-height: 1.2; }
+.qd-stats span { font-size: 11px; color: var(--muted); }
+.qd-actions { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.queue-done .confetti { position: absolute; inset: 0; pointer-events: none; }
+.queue-done .confetti i { position: absolute; top: 0; width: 7px; height: 11px; border-radius: 2px; opacity: 0.85; }
+@media (max-width: 620px) { .qd-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

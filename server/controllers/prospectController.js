@@ -20,6 +20,11 @@ const clearAll = asyncHandler(async (req, res) => { prospectService.clearAll(); 
 
 const bulk = asyncHandler(async (req, res) => res.json(await prospectService.bulkImport(req.body)));
 
+// Bulk management from the prospects table. Both are atomic in the service layer, and both
+// report what they actually changed so the UI never claims more than it did.
+const bulkStage = asyncHandler(async (req, res) => res.json(prospectService.bulkUpdateStage(req.body.ids, req.body.stage)));
+const bulkDelete = asyncHandler(async (req, res) => res.json(prospectService.bulkDelete(req.body.ids)));
+
 const search = asyncHandler(async (req, res) => res.json(prospectService.search(req.query.q, req.query.limit)));
 
 const queue = asyncHandler(async (req, res) => res.json(prospectService.rankedQueue({
@@ -47,4 +52,4 @@ const exportData = asyncHandler(async (req, res) => {
   res.send(csv);
 });
 
-module.exports = { list, detail, create, patch, remove, clearAll, bulk, search, queue, followUps, demo, exportData };
+module.exports = { list, detail, create, patch, remove, clearAll, bulk, bulkStage, bulkDelete, search, queue, followUps, demo, exportData };

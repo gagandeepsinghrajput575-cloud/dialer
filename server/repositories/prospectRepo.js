@@ -46,6 +46,41 @@ function update(id, patch) {
 }
 
 const touch = (id) => db.prepare("UPDATE prospects SET updated_at = datetime('now') WHERE id = ?").run(id);
+
+// ---- bulk mutations ----
+// Both run inside ONE transaction: a bulk action that half-applied would leave the agent
+// looking at a list that no longer matches what they selected. The placeholders are built from
+// the id count, which the schema bounds, so the statement is still parameterised.
+const placeholders = (n) => Array.from({ length: n }, () => '?').join(',');
+
+function bulkRemove(ids) {
+  const list = [...ids];
+  if (!list.length) return { prospects: 0, calls: 0, notes: 0, outboxUnlinked: 0 };
+  const ph = placeholders(list.length);
+  const run = db.transaction(() => {
+    // Ordered explicitly rather than relying on ON DELETE CASCADE: the counts are the receipt
+    // the UI reports, and an implicit cascade cannot tell the caller what it removed.
+    const notes = db.prepare(`DELETE FROM notes WHERE prospect_id IN (${ph})`).run(...list).changes;
+    const calls = db.prepare(`DELETE FROM calls WHERE prospect_id IN (${ph})`).run(...list).changes;
+    // Captured mail is a record of what was sent, not a child of the prospect, so it is kept —
+    // only the link is dropped. A dangling id would otherwise make "open prospect" 404.
+    const outboxUnlinked = db.prepare(`UPDATE outbox SET prospect_id = NULL WHERE prospect_id IN (${ph})`).run(...list).changes;
+    const prospects = db.prepare(`DELETE FROM prospects WHERE id IN (${ph})`).run(...list).changes;
+    return { prospects, calls, notes, outboxUnlinked };
+  });
+  return run();
+}
+
+function bulkSetStage(ids, stage) {
+  const list = [...ids];
+  if (!list.length) return { updated: 0 };
+  const ph = placeholders(list.length);
+  // stage is bound, never interpolated — it is validated by the caller as well.
+  const info = db.prepare(
+    `UPDATE prospects SET stage = ?, updated_at = datetime('now') WHERE id IN (${ph})`,
+  ).run(stage, ...list);
+  return { updated: info.changes };
+}
 const remove = (id) => db.prepare('DELETE FROM prospects WHERE id = ?').run(id);
 const clearAll = () => db.prepare('DELETE FROM prospects').run();
 
@@ -87,12 +122,17 @@ function followUpsDue(untilIso) {
 // being all-or-nothing: any failure rolls the whole batch back.
 const BULK_CHUNK = 2000;
 
-function bulkInsert(rows) {
+// `onInserted(id, row)` runs inside the same transaction as the insert that produced the id,
+// so a caller can attach dependent rows (an imported note, say) and have them roll back with
+// the prospect instead of surviving it. Kept as a callback rather than a return value because
+// the chunked transactions below are what make a 50k-row import fast.
+function bulkInsert(rows, onInserted = null) {
   const ins = db.prepare('INSERT INTO prospects(name,phone,email,company,title,location,website,extra) VALUES(?,?,?,?,?,?,?,?)');
   const tx = db.transaction((list) => {
     let n = 0;
     for (const r of list) {
-      ins.run(r.name, r.phone, r.email, r.company, r.title, r.location, r.website, JSON.stringify(r.extra || {}));
+      const info = ins.run(r.name, r.phone, r.email, r.company, r.title, r.location, r.website, JSON.stringify(r.extra || {}));
+      if (onInserted) onInserted(Number(info.lastInsertRowid), r);
       n++;
     }
     return n;
@@ -116,5 +156,6 @@ module.exports = {
   emails,
   toApi, list, get, raw, count, dncCount, insert, update, touch, remove, clearAll,
   markCalled, unmarkCalled, stageCounts, phones, search, followUpsDue, bulkInsert,
+  bulkRemove, bulkSetStage,
   COLUMNS, escapeLike, BULK_CHUNK,
 };

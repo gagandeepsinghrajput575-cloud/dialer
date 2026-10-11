@@ -59,6 +59,10 @@ export const api = {
   clearProspects: () => req('POST', '/api/prospects/clear', {}),
   parseFile: (file) => { const f = new FormData(); f.append('file', file); return req('POST', '/api/import/parse', f, true); },
   bulk: (b) => req('POST', '/api/prospects/bulk', b),
+  // Multi-select actions from the prospects table. Both are atomic server-side, and both
+  // answer with what was actually changed rather than what was asked for.
+  bulkStage: (ids, stage) => req('POST', '/api/prospects/bulk-stage', { ids, stage }),
+  bulkDelete: (ids) => req('POST', '/api/prospects/bulk-delete', { ids }),
   addNote: (id, body) => req('POST', `/api/prospects/${id}/notes`, { body }),
   deleteNote: (id) => req('DELETE', `/api/notes/${id}`),
   call: (id) => req('POST', `/api/prospects/${id}/call`, { tzOffset: new Date().getTimezoneOffset() }),

@@ -873,6 +873,24 @@ async function run() {
   });
   assert.strictEqual(badToken.status, 401, 'a forged token is refused');
 
+  // The multi-select endpoints are writes like any other: a page the agent happens to visit
+  // must not be able to wipe a selection, and the app's own tab still needs its token.
+  const evilBulk = await raw(`${BASE}/api/prospects/bulk-delete`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: evil }, body: JSON.stringify({ ids: [testId] }),
+  });
+  assert.strictEqual(evilBulk.status, 403, 'a cross-site bulk delete is refused');
+  const untokenedBulk = await raw(`${BASE}/api/prospects/bulk-stage`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: localOrigin }, body: JSON.stringify({ ids: [testId], stage: 'lost' }),
+  });
+  assert.strictEqual(untokenedBulk.status, 401, 'a same-origin bulk stage move without the token is refused');
+  const tokenedBulk = await raw(`${BASE}/api/prospects/bulk-stage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: localOrigin, 'x-pulse-token': sessionRes.json.token },
+    body: JSON.stringify({ ids: [2147483000], stage: 'lost' }),
+  });
+  assert.strictEqual(tokenedBulk.status, 200, 'with the token, the real app can use it');
+  assert.strictEqual((await tokenedBulk.json()).updated, 0, 'and a bulk action reports 0 rather than inventing a row');
+
   const stillThere = await req('GET', '/api/prospects');
   assert.ok(stillThere.json.some((p) => p.id === testId), 'the attack attempts destroyed nothing');
   ok('cross-site writes, reads, token theft and DNS rebinding all refused; the app\u2019s own tab still works');
@@ -1165,7 +1183,41 @@ async function run() {
   for (const p of afterMixed.json.filter((x) => ['Good Row', 'Junk Row', 'Blank Row', 'Placeholder Row'].includes(x.name))) {
     await req('DELETE', `/api/prospects/${p.id}`);
   }
-  ok('junk phones rejected on create/patch; imports keep the row and report badPhones');
+  // Bulk actions are the same promise at scale: the prospects go, and their calls and notes go
+  // with them in one transaction, while the count that comes back describes what really happened.
+  const bulkA = await req('POST', '/api/prospects', { name: 'Bulk Cascade A', phone: '+4555990001' });
+  const bulkB = await req('POST', '/api/prospects', { name: 'Bulk Cascade B', phone: '+4555990002' });
+  await req('POST', `/api/prospects/${bulkA.json.id}/notes`, { body: 'note one' });
+  await req('POST', `/api/prospects/${bulkA.json.id}/notes`, { body: 'note two' });
+  await req('POST', `/api/prospects/${bulkA.json.id}/call`, {});
+  const beforeBulk = await req('GET', `/api/prospects/${bulkA.json.id}`);
+  assert.strictEqual(beforeBulk.json.notes.length, 2, 'two notes are attached before the bulk delete');
+  assert.strictEqual(beforeBulk.json.calls.length, 1, 'and one call record');
+
+  const stageAll = await req('POST', '/api/prospects/bulk-stage', { ids: [bulkA.json.id, bulkB.json.id], stage: 'interested' });
+  assert.strictEqual(stageAll.status, 200);
+  assert.strictEqual(stageAll.json.updated, 2, 'both selected prospects moved');
+  assert.strictEqual(stageAll.json.stage, 'interested');
+  assert.strictEqual((await req('GET', `/api/prospects/${bulkB.json.id}`)).json.stage, 'interested', 'the change is on the record, not just in the reply');
+
+  // Every way a bulk write can be nonsense has to bounce before anything is touched.
+  assert.strictEqual((await req('POST', '/api/prospects/bulk-stage', { ids: [bulkA.json.id], stage: 'meeting_booked' })).status, 400, 'an unknown stage is refused');
+  assert.strictEqual((await req('POST', '/api/prospects/bulk-stage', { ids: [], stage: 'interested' })).status, 400, 'an empty selection is refused');
+  assert.strictEqual((await req('POST', '/api/prospects/bulk-delete', { ids: ['junk', -5, 0] })).status, 400, 'junk ids are refused');
+  const stillBoth = await req('GET', `/api/prospects/${bulkA.json.id}`);
+  assert.strictEqual(stillBoth.status, 200, 'and a refused bulk action deleted nothing');
+
+  const bulkDel = await req('POST', '/api/prospects/bulk-delete', { ids: [bulkA.json.id, bulkB.json.id] });
+  assert.strictEqual(bulkDel.status, 200);
+  assert.strictEqual(bulkDel.json.deleted, 2, 'both prospects are gone');
+  assert.strictEqual(bulkDel.json.calls, 1, 'the call record went with its prospect');
+  assert.strictEqual(bulkDel.json.notes, 2, 'and both notes');
+  assert.strictEqual(bulkDel.json.requested, 2, 'the reply reports what was asked for as well');
+  assert.strictEqual((await req('GET', `/api/prospects/${bulkA.json.id}`)).status, 404, 'the detail endpoint agrees');
+  // Nothing may be left pointing at a row that no longer exists.
+  const orphanCheck = await req('GET', '/api/prospects/search?q=Bulk%20Cascade&limit=10');
+  assert.strictEqual(orphanCheck.json.length, 0, 'no orphan row is left behind by the search either');
+  ok('junk phones rejected on create/patch; imports keep the row and report badPhones; bulk stage and bulk delete stay atomic');
 
   // ---------------------------------------------------------------- Danish cost ranges
   step(35, TOTAL, 'Premium / shared-cost / freephone numbers are flagged before dialing');
@@ -1240,10 +1292,57 @@ async function run() {
   });
   assert.strictEqual(caseDedupe.json.dupes, 1, 'email matching is case- and whitespace-insensitive');
 
+  // A Danish list, with the header row exactly as a Danish CRM exports it. The mapping names
+  // the columns (that is what the import page now guesses) and the notes column has to arrive
+  // as each prospect's first note rather than being filed away as "more details".
+  const danish = await req('POST', '/api/prospects/bulk', {
+    rows: [
+      { Navn: 'Freja Nielsen', Telefon: '+45 30 44 55 66', 'E-mail': 'freja@nordisk.dk', Firma: 'Nordisk A/S', Stilling: 'Indkøbschef', Postnr: '2100', Noter: 'Mødt på messe i Herning' },
+      { Navn: 'Søren Bak', Mobil: '+45 30 44 55 67', 'E-mail': 'soeren@bak.dk', Firma: 'Bak & Søn', Stilling: 'Direktør', Postnr: '8000', Noter: 'Henvist af Sofie' },
+    ],
+    mapping: { name: 'Navn', phone: 'Telefon', email: 'E-mail', company: 'Firma', title: 'Stilling', location: 'Postnr', notes: 'Noter' },
+  });
+  assert.strictEqual(danish.status, 200);
+  // The second row's number is under "Mobil", which this mapping does not name — the row must
+  // still arrive (it has a company), and the unmapped column must survive as extra detail.
+  assert.strictEqual(danish.json.added, 2, 'both Danish rows are imported');
+  assert.strictEqual(danish.json.notesCreated, 2, 'and both notes ride along with them');
+
+  const frejaRow = (await req('GET', '/api/prospects/search?q=Freja%20Nielsen&limit=5')).json[0];
+  const soerenRow = (await req('GET', '/api/prospects/search?q=S%C3%B8ren%20Bak&limit=5')).json[0];
+  assert.ok(frejaRow && soerenRow, 'both Danes are searchable by name');
+  const frejaDetail = await req('GET', `/api/prospects/${frejaRow.id}`);
+  assert.strictEqual(frejaDetail.json.company, 'Nordisk A/S', 'the Danish company column is a real field');
+  assert.strictEqual(frejaDetail.json.title, 'Indkøbschef', 'and so is the title');
+  assert.strictEqual(frejaDetail.json.notes.length, 1, 'the notes column became exactly one note');
+  assert.strictEqual(frejaDetail.json.notes[0].body, 'Mødt på messe i Herning', 'with its Danish text intact');
+  assert.ok(!('Noter' in frejaDetail.json.extra), 'and it is not duplicated into the extra details');
+  assert.strictEqual(soerenRow.phone, '', 'an unmapped "Mobil" column leaves the phone empty rather than wrong');
+  const soerenDetail = await req('GET', `/api/prospects/${soerenRow.id}`);
+  assert.strictEqual(soerenDetail.json.extra.Mobil, '+45 30 44 55 67', 'but the column is kept as extra detail');
+
+  // Files come as UTF-8 (web exports) and as cp1252 (Danish Excel). Both must read as Danish
+  // rather than as mojibake — "Mødt" turning into "MÃ¸dt" is data loss that looks like a typo.
+  const parseUpload = async (buf, name) => {
+    const form = new FormData();
+    form.append('file', new Blob([buf], { type: 'text/csv' }), name);
+    const res = await fetch(`${BASE}/api/import/parse`, { method: 'POST', body: form });
+    return { status: res.status, json: await res.json() };
+  };
+  const utf8File = await parseUpload(Buffer.from('Navn,Telefon,Noter\nFreja Nielsen,+4530445566,Mødt på messe i Herning\n', 'utf8'), 'kunder-utf8.csv');
+  assert.strictEqual(utf8File.status, 200, 'a UTF-8 csv parses');
+  assert.strictEqual(utf8File.json.rows[0].Noter, 'Mødt på messe i Herning', 'æøå survive a UTF-8 file');
+  const legacyFile = await parseUpload(Buffer.from('Navn,Telefon,Noter\nSøren Bak,+4530445567,Henvist af Sofie\n', 'latin1'), 'kunder-cp1252.csv');
+  assert.strictEqual(legacyFile.json.rows[0].Noter, 'Henvist af Sofie', 'and so do they in a genuine cp1252 export');
+  const asciiFile = await parseUpload(Buffer.from('Navn,Telefon\nPeter Holm,+4530445568\n', 'utf8'), 'kunder-ascii.csv');
+  assert.strictEqual(asciiFile.json.rows[0].Navn, 'Peter Holm', 'plain ASCII files are unaffected');
+
+  for (const row of [frejaRow, soerenRow]) await req('DELETE', `/api/prospects/${row.id}`);
+
   // Only delete what this group created. The 50k-row scale group runs earlier and leaves its
   // rows behind, so looping over every prospect here means 50,000 sequential DELETEs.
   for (const p of [...mette.json, ...anders.json]) await req('DELETE', `/api/prospects/${p.id}`);
-  ok('email + phone duplicate detection, including within a single file and across case');
+  ok('email + phone duplicate detection, including within a single file and across case; Danish headers, notes and file encoding all survive the import');
 
   await req('DELETE', `/api/prospects/${testId}`);
   console.log('\n  \u2713 test fixtures cleaned up');

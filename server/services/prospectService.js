@@ -94,6 +94,10 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
   for (const row of rows) {
     const v = {};
     for (const f of FIELDS) v[f] = mapping[f] ? cleanStr(row[mapping[f]]) : '';
+    // A notes column is real context ("met at the expo", "referred by Sofie") and used to be
+    // dropped on the floor at import. It rides along on the prepared row and is written as the
+    // prospect's first note inside the same transaction as the insert.
+    const noteText = mapping.notes ? cleanStr(row[mapping.notes]) : '';
     if (mapping.first_name || mapping.last_name) {
       const fn = mapping.first_name ? cleanStr(row[mapping.first_name]) : '';
       const ln = mapping.last_name ? cleanStr(row[mapping.last_name]) : '';
@@ -123,13 +127,58 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
       const cleaned = cleanStr(val);
       if (!mappedCols.has(k) && cleaned !== '') extra[k] = cleaned;
     }
-    prepared.push({ ...v, extra });
+    prepared.push({ ...v, extra, ...(noteText ? { note: noteText } : {}) });
     if (v.phone) existing.add(v.phone);
     if (emailKey) existingEmails.add(emailKey);   // so dupes within the same file are caught too
   }
 
-  const added = prepared.length ? prospects.bulkInsert(prepared) : 0;
-  return { added, dupes, empty, badPhones, backup: backupInfo };
+  let notesCreated = 0;
+  const added = prepared.length
+    ? prospects.bulkInsert(prepared, (id, row) => {
+      if (row.note) { notes.insert(id, row.note); notesCreated++; }
+    })
+    : 0;
+  return { added, dupes, empty, badPhones, notesCreated, backup: backupInfo };
+}
+
+// ---- bulk management ----
+// Both are all-or-nothing: a half-applied bulk action leaves the agent looking at a list that
+// no longer matches what they ticked. The transaction lives here (not in the controller) so
+// every caller gets the same guarantee, and the id list is normalised once — duplicates,
+// strings and junk are removed before a statement is ever built.
+function cleanIds(ids = []) {
+  return [...new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((v) => Number(v))
+      .filter((n) => Number.isInteger(n) && n > 0),
+  )];
+}
+
+function bulkDelete(ids = []) {
+  const list = cleanIds(ids);
+  if (!list.length) return { deleted: 0, calls: 0, notes: 0, outboxUnlinked: 0, requested: 0 };
+  const r = prospects.bulkRemove(list);
+  return {
+    deleted: r.prospects,
+    calls: r.calls,
+    notes: r.notes,
+    outboxUnlinked: r.outboxUnlinked,
+    // What was asked for vs what existed: the UI can tell the agent when some rows were
+    // already gone instead of silently reporting success for a smaller number.
+    requested: list.length,
+  };
+}
+
+function bulkUpdateStage(ids = [], stage = '') {
+  const list = cleanIds(ids);
+  const wanted = String(stage || '').trim();
+  // STAGES is the list of ids at this layer (the UI adds labels and colours of its own).
+  if (!STAGES.includes(wanted)) {
+    throw ApiError.badRequest(`"${wanted || '(empty)'}" is not a stage.`, [{ field: 'stage', issue: 'unknown-stage' }]);
+  }
+  if (!list.length) return { updated: 0, stage: wanted, requested: 0 };
+  const r = prospects.bulkSetStage(list, wanted);
+  return { updated: r.updated, stage: wanted, requested: list.length };
 }
 
 const DEMO = [
@@ -268,5 +317,6 @@ function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
 
 module.exports = {
   list, detail, search, create, update, remove, clearAll, bulkImport, loadDemo,
+  bulkDelete, bulkUpdateStage, cleanIds,
   rankProspect, rankedQueue, QUEUE_TABS, encodeCursor, decodeCursor,
 };

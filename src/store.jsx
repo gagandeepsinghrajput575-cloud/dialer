@@ -116,6 +116,62 @@ export function StoreProvider({ children }) {
 
   const patchLocal = useCallback((id, patch) => setProspects((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p))), []);
 
+  // ---- bulk actions from the prospects table ----
+  // Both optimistically patch what they can and then reconcile with the server's answer: the
+  // response reports what actually changed, so the UI never claims more than it did.
+  const bulkStageProspects = useCallback(async (ids, stage) => {
+    const list = [...ids];
+    if (!list.length) return null;
+    setProspects((rows) => rows.map((p) => (list.includes(p.id) ? { ...p, stage } : p)));
+    try {
+      const r = await api.bulkStage(list, stage);
+      await Promise.all([refreshProspects(), refreshStats()]);
+      if (r && r.updated !== r.requested) toast(`${r.updated} of ${r.requested} prospects moved`, 'error');
+      else toast(`${r?.updated ?? list.length} prospects moved`);
+      return r;
+    } catch (e) {
+      toast(e.message, 'error');
+      refreshProspects();               // put the optimistic patch back the way it was
+      return null;
+    }
+  }, [refreshProspects, refreshStats, toast]);
+
+  const bulkMarkDnc = useCallback(async (ids, dnc) => {
+    const list = [...ids];
+    if (!list.length) return null;
+    setProspects((rows) => rows.map((p) => (list.includes(p.id) ? { ...p, dnc: dnc ? 1 : 0 } : p)));
+    try {
+      // One request per prospect, deliberately: DNC is a per-row PATCH with its own validation,
+      // and a bulk endpoint that bypassed it could put a prospect in a state the UI cannot show.
+      await Promise.all(list.map((id) => api.updateProspect(id, { dnc })));
+      await Promise.all([refreshProspects(), refreshStats()]);
+      toast(dnc ? `${list.length} marked Do Not Call` : `${list.length} cleared for calling`);
+      return { updated: list.length };
+    } catch (e) {
+      toast(e.message, 'error');
+      refreshProspects();
+      return null;
+    }
+  }, [refreshProspects, refreshStats, toast]);
+
+  const bulkDeleteProspects = useCallback(async (ids) => {
+    const list = [...ids];
+    if (!list.length) return null;
+    try {
+      const r = await api.bulkDelete(list);
+      // The drawer and the dialer may be showing something that no longer exists.
+      setDrawerId((cur) => (list.includes(cur) ? null : cur));
+      setActiveId((cur) => (list.includes(cur) ? null : cur));
+      await Promise.all([refreshProspects(), refreshStats()]);
+      for (const fn of listenersRef.current.deleted) { for (const id of list) { try { fn(id); } catch { /* a listener must not break the delete */ } } }
+      toast(`${r?.deleted ?? list.length} prospects deleted${r?.calls ? ` with ${r.calls} call records` : ''}`);
+      return r;
+    } catch (e) {
+      toast(e.message, 'error');
+      return null;
+    }
+  }, [refreshProspects, refreshStats, toast]);
+
   const openInDialer = useCallback((id) => { setActiveId(id); setDrawerId(null); setView('dialer'); }, [setView]);
 
   // The local outbox is reachable from three places (Settings, the composer's "captured"
@@ -142,9 +198,10 @@ export function StoreProvider({ children }) {
   const value = useMemo(() => ({
     prospects, loaded, stats, settings, view, setView, activeId, setActiveId, drawerId, setDrawerId,
     toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect,
+    bulkStageProspects, bulkMarkDnc, bulkDeleteProspects,
     onProspectSaved, onProspectDeleted,
     outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismissToast: dismiss,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss]);
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

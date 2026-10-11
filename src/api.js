@@ -108,6 +108,22 @@ export const api = {
   attachFile: (file) => { const f = new FormData(); f.append('file', file); return req('POST', '/api/email/attachments', f, true); },
   dropAttachment: (id) => req('DELETE', `/api/email/attachments/${id}`),
   sendEmail: (b) => req('POST', '/api/email/send', b),
+  // Local catch-all outbox: the ledger of everything the sandbox sink captured.
+  getOutbox: (opts = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.offset) params.set('offset', String(opts.offset));
+    if (opts.q) params.set('q', String(opts.q));
+    const qs = params.toString();
+    return req('GET', `/api/email/outbox${qs ? `?${qs}` : ''}`);
+  },
+  getOutboxMessage: (id) => req('GET', `/api/email/outbox/${id}`),
+  deleteOutboxMessage: (id) => req('DELETE', `/api/email/outbox/${id}`),
+  clearOutbox: () => req('DELETE', '/api/email/outbox'),
+  // A plain URL, for an <a download> that cannot carry the token header (same pattern as the
+  // voicemail greeting). Reads are same-origin, so this is not a way around the CSRF guard.
+  outboxAttachmentUrl: (id, index) => `/api/email/outbox/${id}/attachments/${index}`,
+  outboxAttachmentDownloadUrl: (id, index) => `/api/email/outbox/${id}/attachments/${index}?download=1`,
   testSmtp: () => req('POST', '/api/email/test', {}),
 
   backups: () => req('GET', '/api/settings/backups'),

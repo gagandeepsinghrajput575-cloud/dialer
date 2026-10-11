@@ -472,6 +472,159 @@ async function run() {
     sApp.dom.window.close();
     await put('/api/settings', { telephony_mode: 'softphone' });
 
+    // --- O1: the local mail sink — email works with no credentials at all ---------
+    // Point SMTP at the sink, then capture a message straight through the API so this check
+    // does not depend on DNS or a live mail server. The agent-facing half (preset button,
+    // previewer, composer feedback) is driven through the real bundle below.
+    await put('/api/settings', { smtp_host: 'local', smtp_port: '1025', smtp_user: 'agent@firma.dk', smtp_secure: '0' });
+    const sinkStatus = await (await fetch(`${BASE}/api/email/status`)).json();
+    check(sinkStatus.configured === true && sinkStatus.localSink === true,
+      'the sink is configured and reports itself as local');
+
+    const fileForm = new FormData();
+    fileForm.append('file', new Blob([new Uint8Array(2048)], { type: 'application/pdf' }), 'Sink-Tilbud.pdf');
+    const stagedUp = await (await fetch(`${BASE}/api/email/attachments`, { method: 'POST', body: fileForm })).json();
+    const captured = await (await post('/api/email/send', {
+      to: 'lead@gmail.com',
+      subject: 'Captured fixture mail',
+      body: 'Plain text body of the capture',
+      html: '<h2>Rendered body of the capture</h2>',
+      attachments: [stagedUp.id],
+      force: true,          // skip the MX probe: this fixture is about capture, not verification
+    })).json();
+    check(captured.local === true && typeof captured.outboxId === 'number' && /^local-/.test(captured.messageId),
+      `a send is captured into the outbox instead of transmitted (${String(captured.messageId).slice(0, 22)}…)`);
+
+    // --- O2: Settings offers the one-click preset and the outbox ------------------
+    const oApp = loadApp(JSDOM, VirtualConsole, '#settings');
+    // The page root, not .mic-test: that panel only exists in WebRTC mode and the fixture is
+    // back on the desktop softphone here.
+    await wait(() => oApp.window.document.querySelector('.settings'), 12000, 'settings page');
+    await sleep(600);   // let the email section and its outbox count settle
+    const buttons = () => [...oApp.window.document.querySelectorAll('button')];
+    const presetBtn = buttons().find((b) => /Use Local Mail Sink/.test(b.textContent));
+    check(!!presetBtn, 'Settings offers the one-click "Use Local Mail Sink" preset');
+
+    const outboxBtn = buttons().find((b) => /View Outbox/.test(b.textContent));
+    check(!!outboxBtn && /View Outbox \(1\)/.test(outboxBtn.textContent),
+      `the outbox button advertises how much is captured (${(outboxBtn?.textContent || '').trim()})`);
+
+    if (presetBtn) {
+      oApp.drain();
+      presetBtn.dispatchEvent(new oApp.window.MouseEvent('click', { bubbles: true }));
+      await sleep(900);
+      const saved = await (await fetch(`${BASE}/api/settings`)).json();
+      // Settings are stored as text (they are edited as text in the form), so compare coerced.
+      check(saved.smtp_host === 'local' && String(saved.smtp_port) === '1025' && saved.smtp_user === 'agent@firma.dk',
+        `the preset writes a working sink configuration (host=${saved.smtp_host}, port=${saved.smtp_port}, user=${saved.smtp_user})`);
+      check(count(oApp.drain(), /PUT \/api\/settings/) >= 1, 'the preset saves immediately — one click, not click-then-save');
+      check(/Local Mail Sink is on/.test(oApp.window.document.body.textContent), 'the agent is told the sink is on');
+    }
+
+    // --- O3: the outbox inspector renders the captured mail ----------------------
+    if (outboxBtn) {
+      outboxBtn.dispatchEvent(new oApp.window.MouseEvent('click', { bubbles: true }));
+      await wait(() => oApp.window.document.querySelector('.outbox-modal'), 8000, 'outbox modal');
+      check(!!oApp.window.document.querySelector('.outbox-modal'), 'View Outbox opens the inspector');
+      await wait(() => oApp.window.document.querySelector('.outbox-row'), 8000, 'captured row');
+      const rows = [...oApp.window.document.querySelectorAll('.outbox-row')];
+      check(rows.length === 1 && /Captured fixture mail/.test(rows[0].textContent),
+        `the capture is listed with its subject (${rows.length} row)`);
+      check(/lead@gmail\.com/.test(rows[0].textContent) && /local/.test(rows[0].textContent),
+        'the row names the recipient and marks the message as captured locally');
+
+      await wait(() => oApp.window.document.querySelector('.outbox-frame'), 8000, 'rendered preview');
+      const frame = oApp.window.document.querySelector('.outbox-frame');
+      const sandbox = frame.getAttribute('sandbox') || '';
+      check(sandbox.includes('allow-same-origin'), 'the preview iframe is sandboxed with allow-same-origin');
+      check(!sandbox.includes('allow-scripts'),
+        'and WITHOUT allow-scripts, so a captured payload can never run code in the dialer');
+      check(/Rendered body of the capture/.test(frame.getAttribute('srcdoc') || ''),
+        'the rendered tab holds the captured HTML');
+
+      const tabs = [...oApp.window.document.querySelectorAll('.outbox-tabs button')];
+      check(tabs.length === 3, `the previewer offers three views (${tabs.length})`);
+      const textTab = tabs.find((t) => /Plain text/.test(t.textContent));
+      if (textTab) {
+        textTab.dispatchEvent(new oApp.window.MouseEvent('click', { bubbles: true }));
+        await sleep(400);
+        check(/Plain text body of the capture/.test(oApp.window.document.querySelector('.outbox-text')?.textContent || ''),
+          'the plain-text tab shows the text part verbatim');
+      }
+      const headTab = tabs.find((t) => /Headers/.test(t.textContent));
+      if (headTab) {
+        headTab.dispatchEvent(new oApp.window.MouseEvent('click', { bubbles: true }));
+        await sleep(400);
+        const headTxt = oApp.window.document.querySelector('.outbox-headers')?.textContent || '';
+        check(/Message-ID/.test(headTxt) && /local-\d+/.test(headTxt) && /local-sink/.test(headTxt),
+          'the headers tab exposes the Message-ID and the local-sink transport marker');
+      }
+
+      const badge = oApp.window.document.querySelector('.attach-badge');
+      const dlLink = badge?.querySelector('a.attach-dl');
+      check(!!badge && /Sink-Tilbud\.pdf/.test(badge.textContent), 'the attachment is listed by name');
+      check(!!dlLink && /\/api\/email\/outbox\/\d+\/attachments\/0$/.test(dlLink.getAttribute('href') || ''),
+        'and carries a one-click download link to the stored bytes');
+      check(oApp.jsErrors.length === 0, `no jsdom errors while driving the outbox (${oApp.jsErrors.join(' | ').slice(0, 140)})`);
+      oApp.dom.window.close();
+    }
+
+    // --- O4: the composer says "captured", not "sent" -----------------------------
+    // A dedicated prospect, filtered for in the queue: by this point the fixture list is long
+    // enough that "find the row by text" is not a safe assumption.
+    await post('/api/prospects', { name: 'Sink Composer', phone: '20999998', email: 'sinktarget@gmail.com' });
+    const cApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    await wait(() => cApp.window.document.querySelector('.q-item'), 15000, 'dialer queue');
+    await ensureListener(cApp);
+    const sbox = cApp.window.document.querySelector('.search input');
+    if (sbox) {
+      const setInput = Object.getOwnPropertyDescriptor(cApp.window.HTMLInputElement.prototype, 'value').set;
+      setInput.call(sbox, 'Sink Composer');
+      sbox.dispatchEvent(new cApp.window.Event('input', { bubbles: true }));
+      await sleep(900);
+      sbox.blur();   // focus must leave the field or E is a keystroke, not a shortcut
+    }
+    const mailItem = [...cApp.window.document.querySelectorAll('.q-item')].find((el) => /Sink Composer/.test(el.textContent));
+    check(!!mailItem, 'the sink composer fixture prospect is in the queue');
+    if (mailItem) mailItem.dispatchEvent(new cApp.window.MouseEvent('click', { bubbles: true }));
+    await wait(() => /sinktarget@gmail\.com/.test(cApp.window.document.body.textContent), 12000, 'the banner email chip');
+    await sleep(400);
+    key(cApp.window, 'e');
+    await wait(() => cApp.window.document.querySelector('.email-modal'), 12000, 'composer');
+    await sleep(700);
+    const localPill = cApp.window.document.querySelector('.banner.local-sink');
+    check(!!localPill && /Local Outbox Mode/.test(localPill.textContent) && /no external email sent/.test(localPill.textContent),
+      'the composer warns that mail is captured locally, not sent');
+
+    const sendBtn = [...cApp.window.document.querySelectorAll('.email-modal button')].find((b) => /Send email/.test(b.textContent));
+    cApp.drain();
+    sendBtn?.dispatchEvent(new cApp.window.MouseEvent('click', { bubbles: true }));
+    await wait(() => [...cApp.window.document.querySelectorAll('.toast')].some((t) => /Captured in Local Outbox/.test(t.textContent)),
+      12000, 'captured toast');
+    const toastNode = [...cApp.window.document.querySelectorAll('.toast')].find((t) => /Captured in Local Outbox/.test(t.textContent));
+    check(!!toastNode, 'sending in sink mode says "Captured in Local Outbox", not "Sent to"');
+    const viewAction = toastNode?.querySelector('.toast-action');
+    check(!!viewAction && /View/.test(viewAction.textContent), 'and the toast carries a one-click way to go look at it');
+    check(count(cApp.drain(), DIAL) === 0, 'a captured send places no call and leaves the dialer alone');
+
+    if (viewAction) {
+      viewAction.dispatchEvent(new cApp.window.MouseEvent('click', { bubbles: true }));
+      await wait(() => cApp.window.document.querySelector('.outbox-modal'), 8000, 'outbox from the toast action');
+      check(!!cApp.window.document.querySelector('.outbox-modal'), 'the toast action opens the outbox');
+      await sleep(700);   // the composer's exit animation, and the action's own dismissal
+      check(!cApp.window.document.querySelector('.toast-action'), 'the toast dismisses itself once its action has been used');
+      check(!cApp.window.document.querySelector('.email-modal'), 'and the composer is gone behind the outbox');
+    }
+    check(cApp.jsErrors.length === 0, `no jsdom errors in the composer's captured flow (${cApp.jsErrors.join(' | ').slice(0, 140)})`);
+    cApp.dom.window.close();
+
+    // Leave the fixture as it was found: no sink, no captured mail, no stale setting.
+    await fetch(`${BASE}/api/email/outbox`, { method: 'DELETE' });
+    await put('/api/settings', { smtp_host: '', smtp_user: '', smtp_port: '587', smtp_from: '' });
+    const cleaned = await (await fetch(`${BASE}/api/email/status`)).json();
+    check(cleaned.configured === false && cleaned.localSink === false && cleaned.outboxCount === 0,
+      'clearing the host after the sink leaves SMTP unconfigured and the outbox empty');
+
   } catch (e) {
     bad(`dialer race suite aborted: ${e.message}`);
     if (srvErr) console.log(`        server stderr: ${srvErr.slice(-300)}`);

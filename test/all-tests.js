@@ -998,6 +998,124 @@ async function run() {
     'CRLF in a header is neutralised, not executed');
 
   await req('DELETE', `/api/email/prospects/${mailProspect.json.id}/draft`, {});
+
+  // ---- local catch-all mail sink ------------------------------------------------------
+  // An EMPTY host must stay an error (asserted above, and it must stay that way). The sink is
+  // the deliberate alternative: host "local" captures mail into the outbox instead of
+  // transmitting it, which is what makes the compose → send → preview loop demonstrable with
+  // no credentials and no network at all.
+  const sinkOn = await req('PUT', '/api/settings', { smtp_host: 'local', smtp_port: '1025', smtp_user: 'agent@firma.dk' });
+  assert.strictEqual(sinkOn.status, 200);
+  const sinkStatus = await req('GET', '/api/email/status');
+  assert.strictEqual(sinkStatus.json.configured, true, 'the sink is configured with no credentials at all');
+  assert.strictEqual(sinkStatus.json.localSink, true, 'and it says which mode it is in');
+  assert.deepStrictEqual(sinkStatus.json.missing, [], 'nothing is missing for the sink');
+  assert.strictEqual(sinkStatus.json.outboxCount, 0, 'the outbox starts empty');
+
+  const sinkTest = await req('POST', '/api/email/test', {});
+  assert.strictEqual(sinkTest.status, 200);
+  assert.strictEqual(sinkTest.json.host, 'local');
+  assert.strictEqual(sinkTest.json.message, 'Local Outbox Sink ready');
+
+  // A real message with a real attachment, linked to a real prospect.
+  const sinkForm = new FormData();
+  sinkForm.append('file', new Blob([Buffer.from('PDF-BYTES')], { type: 'application/pdf' }), 'Sink-Tilbud.pdf');
+  const sinkUp = await fetch(`${BASE}/api/email/attachments`, { method: 'POST', body: sinkForm });
+  const sinkUpJson = await sinkUp.json();
+
+  const captured = await req('POST', '/api/email/send', {
+    to: 'lead@gmail.com',
+    subject: 'Sink capture {{name}}',
+    body: 'Plain text body',
+    html: '<h1>Rendered</h1>',
+    attachments: [sinkUpJson.id],
+    prospectId: mailProspect.json.id,
+  });
+  assert.strictEqual(captured.status, 200);
+  assert.strictEqual(captured.json.local, true, 'a captured send reports itself as local');
+  assert.match(captured.json.messageId, /^local-\d+-[0-9a-f]+@pulse\.dialer$/, 'the synthetic Message-ID is unmistakably local');
+  assert.deepStrictEqual(captured.json.accepted, ['lead@gmail.com']);
+  assert.deepStrictEqual(captured.json.rejected, []);
+  assert.strictEqual(captured.json.loggedAsNote, true, 'a captured send still lands in the prospect history');
+
+  const outboxList = await req('GET', '/api/email/outbox');
+  assert.strictEqual(outboxList.status, 200);
+  assert.strictEqual(outboxList.json.total, 1);
+  const msg = outboxList.json.messages[0];
+  assert.strictEqual(msg.subject, 'Sink capture {{name}}', 'the subject is stored verbatim, placeholders and all');
+  assert.deepStrictEqual(msg.to, ['lead@gmail.com']);
+  assert.strictEqual(msg.prospectId, mailProspect.json.id);
+  assert.strictEqual(msg.prospectName, 'Email Test', 'the captured row links back to its prospect');
+  assert.strictEqual(msg.isLocalSink, true);
+  assert.strictEqual(msg.text, 'Plain text body');
+  assert.strictEqual(msg.html, '<h1>Rendered</h1>');
+  assert.strictEqual(msg.attachments.length, 1);
+  assert.strictEqual(msg.attachments[0].filename, 'Sink-Tilbud.pdf');
+  assert.strictEqual(msg.attachments[0].contentBase64, undefined, 'a listing carries metadata, not payloads');
+
+  // The row is on disk, not just in the process that wrote it.
+  const onDisk = new (require('better-sqlite3'))(path.join(tmpDir, 'dialer.db'), { readonly: true });
+  const diskRow = onDisk.prepare('SELECT subject, html_body, attachments_json FROM outbox WHERE id = ?').get(msg.id);
+  onDisk.close();
+  assert.ok(diskRow, 'the captured message is persisted in SQLite');
+  assert.strictEqual(diskRow.html_body, '<h1>Rendered</h1>');
+
+  // The previewer's three panes, all served from that one row.
+  const detail = await req('GET', `/api/email/outbox/${msg.id}`);
+  assert.strictEqual(detail.status, 200);
+  assert.strictEqual(detail.json.headers['Message-ID'], captured.json.messageId);
+  assert.strictEqual(detail.json.headers.From, 'agent@firma.dk');
+  assert.strictEqual(detail.json.headers.To, 'lead@gmail.com');
+  assert.strictEqual(detail.json.headers['X-Pulse-Transport'], 'local-sink');
+  assert.strictEqual(detail.json.attachments[0].stored, true, 'the detail view can download what the list only describes');
+  assert.match(detail.json.attachments[0].contentBase64, /^[A-Za-z0-9+/=]+$/);
+
+  const attDl = await fetch(`${BASE}/api/email/outbox/${msg.id}/attachments/0`);
+  assert.strictEqual(attDl.status, 200);
+  assert.strictEqual(await attDl.text(), 'PDF-BYTES', 'the stored attachment round-trips byte for byte');
+  const attDl2 = await fetch(`${BASE}/api/email/outbox/${msg.id}/attachments/0?download=1`);
+  assert.match(attDl2.headers.get('content-disposition') || '', /^attachment;/, '?download=1 forces a save');
+  assert.strictEqual((await fetch(`${BASE}/api/email/outbox/${msg.id}/attachments/9`)).status, 404);
+  assert.strictEqual((await req('GET', '/api/email/outbox/999999')).status, 404);
+
+  // The activity ledger line is the same one a live send writes.
+  const withNote = await req('GET', `/api/prospects/${mailProspect.json.id}`);
+  assert.ok((withNote.json.notes || []).some((n) => /Sent email/.test(n.body) && /attachments: 1/.test(n.body)),
+    'the captured send is logged in the prospect feed like any other');
+
+  // Search covers the fields an agent remembers: subject, recipient, and attachment name.
+  assert.strictEqual((await req('GET', '/api/email/outbox?q=Sink-Tilbud')).json.total, 1);
+  assert.strictEqual((await req('GET', '/api/email/outbox?q=Sink%20capture')).json.total, 1);
+  assert.strictEqual((await req('GET', '/api/email/outbox?q=nothing-matches-this')).json.total, 0);
+  const paged = await req('GET', '/api/email/outbox?limit=1&offset=1');
+  assert.strictEqual(paged.json.messages.length, 0, 'offset pages past the end without losing the total');
+  assert.strictEqual(paged.json.total, 1);
+  assert.strictEqual((await req('GET', '/api/email/outbox?limit=0')).status, 400, 'a nonsensical page size is refused');
+  assert.strictEqual((await req('GET', '/api/email/outbox?limit=abc')).status, 400);
+
+  // Pruning: one message, then the whole ledger. A gone id is a 404, not a silent success.
+  const pruned = await req('DELETE', `/api/email/outbox/${msg.id}`);
+  assert.strictEqual(pruned.status, 200);
+  assert.strictEqual(pruned.json.deleted, 1);
+  assert.strictEqual(pruned.json.total, 0);
+  assert.strictEqual((await req('DELETE', `/api/email/outbox/${msg.id}`)).status, 404, 'deleting twice is not silently fine');
+
+  await req('POST', '/api/email/send', { to: 'lead@gmail.com', subject: 'Second capture', body: 'x' });
+  await req('POST', '/api/email/send', { to: 'lead@gmail.com', subject: 'Third capture', body: 'x' });
+  const beforeClear = await req('GET', '/api/email/status');
+  assert.strictEqual(beforeClear.json.outboxCount, 2, 'the status count tracks the ledger');
+  const cleared = await req('DELETE', '/api/email/outbox');
+  assert.strictEqual(cleared.status, 200);
+  assert.strictEqual(cleared.json.deleted, 2);
+  assert.strictEqual((await req('GET', '/api/email/outbox')).json.total, 0);
+
+  // The sink must not have leaked into the *unconfigured* behaviour asserted at the top of
+  // this group: clearing the host takes sending back to a 400.
+  await req('PUT', '/api/settings', { smtp_host: '' });
+  const afterSinkOff = await req('POST', '/api/email/send', { to: 'lead@gmail.com', subject: 'Hej', body: 'x' });
+  assert.strictEqual(afterSinkOff.status, 400, 'turning the sink off restores "not configured"');
+  assert.match(afterSinkOff.json.error, /SMTP is not configured/);
+
   await req('DELETE', `/api/prospects/${mailProspect.json.id}`);
   await req('PUT', '/api/settings', { smtp_host: '', smtp_user: '', smtp_from: '', meet_link: null });
   ok('verify/typo/throwaway/dead-domain verdicts, attachment lifecycle, SMTP guards and password masking all correct');

@@ -22,8 +22,9 @@ export function StoreProvider({ children }) {
     toastTimers.current.delete(id);            // pruned, so the map cannot grow unboundedly
     setToasts((t) => t.filter((x) => x.id !== id));
   }, []);
-  const startTimer = useCallback((id, type) => {
-    toastTimers.current.set(id, setTimeout(() => dismiss(id), type === 'error' ? 6000 : 3200));
+  const startTimer = useCallback((id, type, ms) => {
+    const life = ms || (type === 'error' ? 6000 : 3200);
+    toastTimers.current.set(id, setTimeout(() => dismiss(id), life));
   }, [dismiss]);
   const restartTimer = useCallback((id, type) => {
     const existing = toastTimers.current.get(id);
@@ -36,20 +37,25 @@ export function StoreProvider({ children }) {
   // Toasts are capped so a burst (a mashed shortcut, a failing import) can never pile up
   // hundreds of animated nodes, and an identical message shown twice in a row is merged.
   const MAX_TOASTS = 4;
-  const toast = useCallback((msg, type = 'ok') => {
+  // `action` is an optional { label, onClick } rendered inside the toast — "Captured in Local
+  // Outbox · View" is the case it was added for. A toast with an action is never merged, so a
+  // stale handler cannot be attached to a fresh message.
+  const toast = useCallback((msg, type = 'ok', action = null) => {
     setToasts((t) => {
       const last = t[t.length - 1];
       // Merging a repeat must be pure: the previous version mutated the existing object and
       // reassigned its `id`, which is the React key — that remounted the node mid-animation
       // and, under StrictMode (where updaters run twice), double-counted the repeat.
-      if (last && last.msg === msg && last.type === type) {
+      if (last && last.msg === msg && last.type === type && !action && !last.action) {
         const merged = t.slice(0, -1).concat({ ...last, repeats: (last.repeats || 1) + 1 });
         restartTimer(last.id, type);
         return merged;
       }
       const id = ++toastId.current;
-      startTimer(id, type);
-      const next = [...t, { id, msg, type, repeats: 1 }];
+      // An actionable toast needs to outlive a glance, or the button vanishes before it can
+      // be pressed.
+      startTimer(id, type, action ? 9000 : undefined);
+      const next = [...t, { id, msg, type, repeats: 1, ...(action ? { action } : {}) }];
       return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
     });
   }, []);
@@ -112,6 +118,14 @@ export function StoreProvider({ children }) {
 
   const openInDialer = useCallback((id) => { setActiveId(id); setDrawerId(null); setView('dialer'); }, [setView]);
 
+  // The local outbox is reachable from three places (Settings, the composer's "captured"
+  // toast, and the composer itself), so its open state lives here and the modal is rendered
+  // once at the root rather than re-mounted per page.
+  const [outboxOpen, setOutboxOpen] = useState(false);
+  const [outboxFocusId, setOutboxFocusId] = useState(null);   // message to select on open
+  const openOutbox = useCallback((focusId = null) => { setOutboxFocusId(focusId); setOutboxOpen(true); }, []);
+  const closeOutbox = useCallback(() => { setOutboxOpen(false); setOutboxFocusId(null); }, []);
+
   const deleteProspect = useCallback(async (id) => {
     try {
       await api.deleteProspect(id);
@@ -129,7 +143,8 @@ export function StoreProvider({ children }) {
     prospects, loaded, stats, settings, view, setView, activeId, setActiveId, drawerId, setDrawerId,
     toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect,
     onProspectSaved, onProspectDeleted,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, onProspectSaved, onProspectDeleted]);
+    outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismissToast: dismiss,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

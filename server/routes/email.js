@@ -17,4 +17,12 @@ router.post('/prospects/:id/draft', validate(s.emailDraft), c.draftFor);
 router.post('/send', validate(s.emailSend), c.send);
 router.post('/test', c.testConnection);
 
+// The local catch-all sink's ledger. Reads are same-origin; pruning is a write and is
+// therefore covered by the app's standing CSRF guard like every other mutation.
+router.get('/outbox', validate(s.outboxQuery, 'query'), c.outboxList);
+router.get('/outbox/:id/attachments/:index', c.outboxAttachment);
+router.get('/outbox/:id', c.outboxGet);
+router.delete('/outbox/:id', c.outboxDelete);
+router.delete('/outbox', c.outboxClear);
+
 module.exports = router;

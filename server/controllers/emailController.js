@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const emailService = require('../services/emailService');
 const prospectRepo = require('../repositories/prospectRepo');
 const noteRepo = require('../repositories/noteRepo');
+const outboxRepo = require('../repositories/outboxRepo');
 const settingsRepo = require('../repositories/settingsRepo');
 const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
@@ -28,7 +29,11 @@ const status = asyncHandler(async (req, res) => {
   res.json({
     configured: cfg.configured,
     host: cfg.host, port: cfg.port, secure: cfg.secure, from: cfg.from,
-    missing: ['host', 'user', 'pass'].filter((k) => !cfg[k]),
+    // The composer and Settings both branch on this: "configured" alone cannot distinguish a
+    // real mail account from the on-disk sink, and the two must never be worded the same.
+    localSink: cfg.isLocalSink,
+    outboxCount: outboxRepo.count(),
+    missing: cfg.isLocalSink ? [] : ['host', 'user', 'pass'].filter((k) => !cfg[k]),
     deepVerify: String(settingsRepo.get('email_verify_deep')) === '1',
     meetLink: String(settingsRepo.get('meet_link') || ''),
     stagedAttachments: staged.size,
@@ -142,6 +147,9 @@ const send = asyncHandler(async (req, res) => {
   const result = await emailService.send({
     to, subject: b.subject, text: b.body, html: b.html, attachments,
     replyTo: b.replyTo || settingsRepo.get('smtp_reply_to') || undefined,
+    // In local sink mode this is what links the captured message back to its prospect, so the
+    // previewer can offer "open prospect" instead of showing a bare address.
+    prospectId: b.prospectId ? Number(b.prospectId) : null,
   });
 
   // Sent mail belongs in the prospect's history, next to the call notes.
@@ -161,9 +169,53 @@ const send = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-const testConnection = asyncHandler(async (req, res) => res.json(await emailService.sendTest()));
+const testConnection = asyncHandler(async (req, res) => {
+  const r = await emailService.sendTest();
+  // In sink mode the "connection" that was just verified is the outbox itself, so hand back
+  // how much is in it — that is what the Settings button counts.
+  res.json(r.local ? { ...r, outboxCount: outboxRepo.count() } : r);
+});
+
+// ---------------------------------------------------------------- local outbox
+const outboxList = asyncHandler(async (req, res) => {
+  const { limit, offset, q } = req.query;
+  res.json(outboxRepo.list({ limit, offset, q }));
+});
+
+const outboxGet = asyncHandler(async (req, res) => {
+  const msg = outboxRepo.get(req.params.id);
+  if (!msg) throw ApiError.notFound('No captured message with that id');
+  res.json(msg);
+});
+
+const outboxDelete = asyncHandler(async (req, res) => {
+  const changes = outboxRepo.remove(req.params.id);
+  if (!changes) throw ApiError.notFound('No captured message with that id');
+  res.json({ ok: true, deleted: changes, total: outboxRepo.count() });
+});
+
+const outboxClear = asyncHandler(async (req, res) => {
+  const deleted = outboxRepo.clear();
+  res.json({ ok: true, deleted, total: 0 });
+});
+
+// One attachment, decoded from the ledger. Rendered inline for images (so the previewer can
+// show them) and as a download for everything else.
+const outboxAttachment = asyncHandler(async (req, res) => {
+  const found = outboxRepo.attachmentBuffer(req.params.id, req.params.index);
+  if (!found) throw ApiError.notFound('That attachment is not stored for this message');
+  const safeName = emailService.sanitizeHeader(found.filename, 200).replace(/["\\]/g, '') || 'attachment';
+  // Images render inline so the previewer can show them; ?download=1 forces the browser to
+  // save instead, which is what the badge's download button asks for.
+  const inline = !(req.query?.download === '1') && /^image\//.test(found.contentType || '');
+  res.setHeader('Content-Type', found.contentType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeName}"`);
+  res.setHeader('Content-Length', String(found.content.length));
+  res.send(found.content);
+});
 
 module.exports = {
   status, verifyOne, verifyBatch, stageAttachment, listAttachments, dropAttachment, draftFor, send, testConnection,
+  outboxList, outboxGet, outboxDelete, outboxClear, outboxAttachment,
   _staged: staged, _sweep: sweep, MAX_ATTACHMENTS, MAX_EACH_BYTES,
 };

@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   Save, Loader2, Trash2, ShieldCheck, FlaskConical, PhoneCall, Target,
   Headphones, KeyRound, Radio, Globe, PlayCircle, DatabaseBackup, Download, FileJson, FileSpreadsheet,
-  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle
+  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle, Inbox, ServerOff
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -101,7 +101,7 @@ function MicTester({ deviceId, onGranted }) {
 }
 
 export default function SettingsPage() {
-  const { settings, refreshSettings, toast, refreshProspects, refreshStats } = useStore();
+  const { settings, refreshSettings, toast, refreshProspects, refreshStats, openOutbox } = useStore();
   const [f, setF] = useState(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -110,6 +110,7 @@ export default function SettingsPage() {
   const [snapshotting, setSnapshotting] = useState(false);
   const [smtpTest, setSmtpTest] = useState(null);
   const [devices, setDevices] = useState({ supported: false, inputs: [], outputs: [] });
+  const [outboxCount, setOutboxCount] = useState(null);
   const [testingSmtp, setTestingSmtp] = useState(false);
 
   useEffect(() => {
@@ -126,7 +127,13 @@ export default function SettingsPage() {
     try {
       await api.saveSettings(f);            // save first so we test what is on screen
       const r = await api.testSmtp();
-      setSmtpTest({ ok: true, msg: `Connected to ${r.host}:${r.port} as ${r.from}` });
+      setSmtpTest({
+        ok: true,
+        msg: r.local
+          ? `Local Outbox Sink ready — mail is captured to this machine (${r.outboxCount ?? 0} stored). Nothing is transmitted.`
+          : `Connected to ${r.host}:${r.port} as ${r.from}`,
+      });
+      await loadOutboxCount();
       await refreshSettings();
     } catch (e) { setSmtpTest({ ok: false, msg: e.message }); }
     setTestingSmtp(false);
@@ -140,6 +147,17 @@ export default function SettingsPage() {
     return d;
   }, []);
   useEffect(() => { loadDevices(); }, [loadDevices]);
+
+  // How much captured mail the sink is holding. Cheap (one COUNT) and it is what the
+  // "View Outbox (N)" button advertises.
+  const loadOutboxCount = useCallback(async () => {
+    try {
+      const r = await api.getOutbox({ limit: 1 });
+      setOutboxCount(r.total || 0);
+      return r.total || 0;
+    } catch { return null; }
+  }, []);
+  useEffect(() => { loadOutboxCount(); }, [loadOutboxCount]);
 
   const takeSnapshot = async () => {
     setSnapshotting(true);
@@ -200,6 +218,29 @@ export default function SettingsPage() {
       });
     } catch (e) { setResult({ ok: false, msg: e.message }); }
     setTesting(false);
+  };
+
+  // One click, and email works: the sink needs no account, no password and no network. The
+  // values are chosen to look like a real relay's (a port, a username) so nothing downstream
+  // has to special-case "half configured", while `local` is what actually selects the sink.
+  const useLocalSink = async () => {
+    const next = {
+      ...f,
+      smtp_host: 'local',
+      smtp_port: '1025',
+      smtp_user: 'agent@firma.dk',
+      smtp_secure: '0',
+    };
+    setF(next);
+    setSaving(true);
+    try {
+      await api.saveSettings(next);
+      await refreshSettings();
+      setF((x) => ({ ...x, smtp_pass: '' }));
+      await loadOutboxCount();
+      toast('Local Mail Sink is on — mail is captured, not sent');
+    } catch (e) { toast(e.message, 'error'); }
+    setSaving(false);
   };
 
   const clearAll = async () => {
@@ -392,10 +433,23 @@ export default function SettingsPage() {
           <button className="btn" onClick={testSmtp} disabled={testingSmtp}>
             {testingSmtp ? <Loader2 size={15} className="spin" /> : <Plug size={15} />} Test connection
           </button>
+          <button className="btn" onClick={useLocalSink} title="Capture mail locally instead of sending it — no credentials needed">
+            <ServerOff size={15} /> Use Local Mail Sink
+          </button>
+          <button className="btn" onClick={() => openOutbox(null)} title="Inspect everything the sink captured">
+            <Inbox size={15} /> View Outbox{outboxCount ? ` (${outboxCount})` : ''}
+          </button>
           <span className="btn primary" onClick={save} style={{ cursor: 'pointer' }}><Save size={15} /> Save settings</span>
         </div>
         {smtpTest && (
           <p className={`small ${smtpTest.ok ? 'ok-text' : 'err-text'}`}>{smtpTest.msg}</p>
+        )}
+        {f.smtp_host === 'local' && (
+          <p className="muted small">
+            <Inbox size={12} /> <b>Local Mail Sink is active.</b> Sends are captured into the outbox with their
+            rendered HTML, headers and attachments — ideal for demos and dry runs. Point the host at a real
+            SMTP account when you are ready for mail to leave this machine.
+          </p>
         )}
         <div className="panel-title" style={{ marginTop: 16 }}><Video size={15} /> Google Meet</div>
         <div className="form">

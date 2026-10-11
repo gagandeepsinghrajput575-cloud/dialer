@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
-  X, Send, Paperclip, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion, Video, CheckCircle2,
+  X, Send, Paperclip, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion, Video, CheckCircle2, Inbox,
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -33,7 +33,7 @@ export function VerifyBadge({ result, compact }) {
 // `onSent` lets every host (dialer, drawer, card, table) refresh its own timeline — the
 // composer cannot know which panels are showing this prospect.
 export default function EmailComposer({ prospectId, recipient, initial, noteText, onClose, onSent }) {
-  const { toast, refreshProspects } = useStore();
+  const { toast, refreshProspects, openOutbox } = useStore();
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [smtp, setSmtp] = useState({ configured: false, missing: [] });
@@ -141,7 +141,13 @@ export default function EmailComposer({ prospectId, recipient, initial, noteText
         prospectId,
         force,
       });
-      toast(`Sent to ${r.accepted?.join(', ') || f.to}`);
+      if (r.local) {
+        // The sink captured it: say so plainly, and put the preview one click away — an agent
+        // who believes a real customer received this would be badly misled.
+        toast('Captured in Local Outbox', 'ok', { label: 'View', onClick: () => openOutbox(r.outboxId ?? null) });
+      } else {
+        toast(`Sent to ${r.accepted?.join(', ') || f.to}`);
+      }
       // Refresh the prospect list, then hand off to the host so it can reload the notes and
       // call history the send was just appended to. Order matters: the note exists server-side
       // by the time send() resolves, so both reads see it.
@@ -171,6 +177,19 @@ export default function EmailComposer({ prospectId, recipient, initial, noteText
           <h3>Email{recipient ? ` — ${recipient}` : ''}</h3>
           <button className="icon-btn" onClick={() => onClose?.(false)} title="Close"><X size={16} /></button>
         </div>
+
+        {smtp.localSink && (
+          <div className="banner local-sink">
+            <Inbox size={15} />
+            <span>
+              <b>Local Outbox Mode</b> — captured locally, no external email sent. Everything you send here
+              lands in the Outbox with its rendered HTML, where you can inspect or download it.
+              <button className="link-btn" onClick={() => { openOutbox(null); onClose?.(false); }}>
+                Open the outbox
+              </button>
+            </span>
+          </div>
+        )}
 
         {!smtp.configured && (
           <div className="banner warn">

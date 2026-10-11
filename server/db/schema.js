@@ -51,4 +51,25 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `;
 
-module.exports = { BASELINE_SQL };
+// Captured mail for the local catch-all sink (Settings -> Email -> "Use Local Mail Sink").
+// Bodies are stored verbatim so the outbox can render exactly what the recipient would have
+// seen; attachment payloads are kept as base64 inside attachments_json, bounded by the repo.
+const OUTBOX_SQL = `
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  prospect_id INTEGER,
+  to_address TEXT NOT NULL,
+  from_address TEXT NOT NULL,
+  reply_to TEXT,
+  subject TEXT NOT NULL,
+  text_body TEXT,
+  html_body TEXT,
+  attachments_json TEXT DEFAULT '[]',
+  headers_json TEXT DEFAULT '{}',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_prospect ON outbox(prospect_id);
+CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at);
+`;
+
+module.exports = { BASELINE_SQL, OUTBOX_SQL };

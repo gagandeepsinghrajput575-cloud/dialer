@@ -101,6 +101,8 @@ const settingsUpdate = z.object({
   followup_email_template: nullable(z.string().max(8000)).optional(),
   sound_cues: boolish.optional(),
   // ---- outbound SMTP ----
+  // Deliberately *not* hostname-validated: 'local' is a meaningful value here, not a typo. It
+  // selects the catch-all sink that captures mail into the outbox instead of transmitting it.
   smtp_host: str(253).optional(),
   smtp_port: z.coerce.number().int().min(1).max(65535).optional(),
   smtp_secure: boolish.optional(),
@@ -153,6 +155,12 @@ const emailSend = z.object({
   force: z.boolean().optional(),
 });
 const emailDraft = z.object({ noteText: z.string().max(8000).optional(), at: z.string().max(40).optional() });
+// Pagination + search for the local outbox. Coerced, because query strings are always text.
+const outboxQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).max(100000).optional(),
+  q: z.string().trim().max(120).optional(),
+});
 const queueQuery = z.object({
   tab: z.enum(['new', 'follow', 'all']).optional(),
   q: z.string().max(120).optional(),
@@ -164,5 +172,5 @@ module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,
   callPatch, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
-  emailVerify, emailVerifyBatch, emailSend, emailDraft,
+  emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
 };

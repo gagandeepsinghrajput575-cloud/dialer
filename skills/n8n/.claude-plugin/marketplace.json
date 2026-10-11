@@ -1,0 +1,53 @@
+{
+  "name": "n8n-mcp-skills",
+  "description": "Expert skills for building n8n workflows",
+  "owner": {
+    "name": "Romuald Członkowski",
+    "url": "https://aiadvisors.pl/en"
+  },
+  "plugins": [
+    {
+      "name": "n8n-mcp-skills",
+      "source": "./",
+      "skills": [
+        "./skills/n8n-expression-syntax",
+        "./skills/n8n-mcp-tools-expert",
+        "./skills/n8n-workflow-patterns",
+        "./skills/n8n-validation-expert",
+        "./skills/n8n-node-configuration",
+        "./skills/n8n-code-javascript",
+        "./skills/n8n-code-python",
+        "./skills/n8n-code-tool",
+        "./skills/n8n-error-handling",
+        "./skills/n8n-binary-and-data",
+        "./skills/n8n-subworkflows",
+        "./skills/n8n-agents",
+        "./skills/n8n-multi-instance",
+        "./skills/n8n-self-hosting",
+        "./skills/using-n8n-mcp-skills"
+      ],
+      "description": "Complete bundle: 14 expert skills for building flawless n8n workflows with the n8n-mcp MCP server — and deploying the self-hosted n8n that runs them (expression syntax, MCP tools usage, workflow patterns, validation, node configuration, JavaScript code, Python code, the AI-agent Custom Code Tool, production error handling, binary/file handling, reusable sub-workflows, AI agents, multi-instance targeting, and end-to-end self-hosted deployment), plus an always-on router skill and a hooks enforcement layer that surfaces the right skill at the moment of decision.",
+      "version": "1.35.0",
+      "author": {
+        "name": "Romuald Członkowski",
+        "url": "https://aiadvisors.pl/en"
+      },
+      "category": "automation",
+      "keywords": [
+        "n8n",
+        "workflow",
+        "mcp",
+        "automation",
+        "validation",
+        "expressions",
+        "code",
+        "javascript",
+        "python",
+        "skills"
+      ],
+      "homepage": "https://github.com/czlonkowski/n8n-skills",
+      "repository": "https://github.com/czlonkowski/n8n-skills",
+      "license": "MIT"
+    }
+  ]
+}

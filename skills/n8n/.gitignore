@@ -1,0 +1,5 @@
+.mcp.json
+.DS_Store
+.claude/
+*-workspace/
+dist/

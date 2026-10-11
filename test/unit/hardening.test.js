@@ -48,7 +48,7 @@ async function run() {
     // country code and never stripped of its trunk prefix
     ['07911123456', '07911123456'], ['123456', '123456'],
     // SIP addresses and dial URIs pass straight through
-    ['anders@sip.voip.so', 'anders@sip.voip.so'], ['sip:anders@sip.voip.so', 'sip:anders@sip.voip.so'],
+    ['anders@sip.telnyx.com', 'anders@sip.telnyx.com'], ['sip:anders@sip.telnyx.com', 'sip:anders@sip.telnyx.com'],
   ];
   for (const [input, expected] of table) {
     assert.strictEqual(telephony.normalizePhone(input), expected, `normalizePhone(${JSON.stringify(input)})`);

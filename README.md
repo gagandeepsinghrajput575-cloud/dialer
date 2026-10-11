@@ -1,7 +1,7 @@
-# Pulse Dialer — VOIP.SO + softphone power dialer & mini CRM
+# Pulse Dialer — Telnyx + softphone power dialer & mini CRM
 
 Keyboard-driven cold calling for the Danish market (+45). Press **C** and your desktop softphone
-(**Zoiper**, Linphone, Telephone) dials the prospect **directly** over [VOIP.SO](https://voip.so) — no
+(**Zoiper**, Linphone, Telephone) dials the prospect **directly** over [Telnyx](https://telnyx.com) — no
 callback bridge, no second leg to wait for. The prospect card, live notes, running timer and the
 `1–8` outcome shortcuts stay on screen the whole time.
 
@@ -13,12 +13,14 @@ npm run app        # builds the UI and starts everything on http://localhost:300
 For UI development use `npm run dev` (Vite on :5173 + API on :3001).
 
 ## First-time setup
-1. **VOIP.SO** — create an account, buy a Danish **+45** number (two or more if you want DID
-   rotation) and copy your SIP credentials (server `sip.voip.so`, username/extension, password).
+1. **Telnyx** — in [Mission Control](https://portal.telnyx.com), create a **SIP Connection** with
+   **Credential Auth**, buy Danish **+45** numbers (two or more if you want DID rotation), assign
+   them to that connection and copy the SIP **username** and **secret**. The domain is
+   `sip.telnyx.com`.
 2. **Zoiper** — register a SIP account with those credentials, wait for the green *Registered*
    badge and set your outbound caller ID to your +45 number.
-3. **Pulse Dialer → Settings** — *Telephony & VOIP.SO (Denmark +45)*: calling mode, `sip:`/`tel:`
-   scheme, outbound caller ID, VOIP.SO SIP server/username/password, then press
+3. **Pulse Dialer → Settings** — *Telephony & Telnyx (Denmark +45)*: calling mode, `sip:`/`tel:`
+   scheme, outbound caller ID, Telnyx SIP domain/username/password, then press
    **Test softphone launch** to confirm Zoiper answers a sample `sip:+4520123456`.
 4. Turn **Test mode OFF** when you're ready for real calls. Test mode simulates everything in the
    browser and never dials.
@@ -192,7 +194,7 @@ Pulse Dialer holds your whole lead list, so it does not trust the network it sit
   it as `x-pulse-token` on every write. A page on another origin cannot read the token,
   because reading it is itself a refused cross-origin request. Set `PULSE_REQUIRE_TOKEN=1`
   to demand it from curl and scripts too.
-- The VOIP.SO SIP password is never returned to the browser in plaintext (masked, with
+- The Telnyx SIP password and API key are never returned to the browser in plaintext (masked, with
   `has_password` instead).
 
 Group 32 of the test suite replays all four attacks and asserts they fail.

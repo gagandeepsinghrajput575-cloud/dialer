@@ -73,32 +73,37 @@ const mode = () => {
 // What the OS hands to Zoiper/Linphone/Telephone: sip:+4520123456 or tel:+4520123456
 const buildDialUri = (phone, proto = protocol()) => `${proto}:${phone}`;
 
-// Same number addressed straight at the VOIP.SO domain — handy as a manual fallback.
+// ---- Telnyx ----
+// The carrier is Telnyx (Mission Control Portal): a Credential-Auth SIP Connection dialled
+// either from a desktop softphone (Zoiper/Linphone) over the SIP FQDN, or straight from this
+// browser over Telnyx's WebRTC signalling gateway. Both modes read the same account.
+const TELNYX_SIP_DOMAIN = 'sip.telnyx.com';
+const TELNYX_WEBRTC_WS = 'wss://rtc.telnyx.com';
+
+// The SIP FQDN every URI is addressed to. A saved value wins, so pointing Pulse at your own
+// PBX or a Telnyx regional edge still works; the Telnyx domain is the floor, not a guess.
+const sipServer = () => String(settings.get('telnyx_sip_server') || '').trim() || TELNYX_SIP_DOMAIN;
+
+// Same number addressed straight at the SIP domain — handy as a manual fallback.
 function buildDialUriFull(phone) {
-  const server = String(settings.get('voipso_sip_server') || '').trim();
+  const server = sipServer();
   if (!server || /@/.test(phone)) return buildDialUri(phone);
   return `sip:${phone}@${server}`;
 }
 
-const sipConfigured = () => !!String(settings.get('voipso_sip_user') || '').trim();
+const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim();
 
 // ---------------------------------------------------------------- in-browser WebRTC softphone
-// The browser registers to the SIP server over a WebSocket gateway. Providers name that
-// endpoint differently, so it is a setting; when it is blank we derive the conventional
-// :8089/ws path from the SIP server rather than refusing to work. Nothing here is guessed
-// silently — `webrtcSession()` reports which of the two it used so the UI can say so.
-const WEBRTC_WS_PORT = 8089;
-const WEBRTC_WS_PATH = '/ws';
+// Telnyx's WebRTC endpoint is a single fixed gateway (wss://rtc.telnyx.com) rather than a
+// port/path derived from the SIP server, so there is nothing to compute: the setting is an
+// override for a proxy or a different region, and the Telnyx gateway is the documented default.
+// `webrtcSession()` reports which of the two is in play so the UI never has to guess.
 
-function webrtcServer() {
-  return String(settings.get('voipso_sip_server') || '').trim();
-}
+const webrtcServer = () => sipServer();
 
 function webrtcWsUrl() {
   const explicit = String(settings.get('webrtc_ws_url') || '').trim();
-  if (explicit) return explicit;
-  const server = webrtcServer();
-  return server ? `wss://${server}:${WEBRTC_WS_PORT}${WEBRTC_WS_PATH}` : '';
+  return explicit || TELNYX_WEBRTC_WS;
 }
 
 // What the browser addresses the call to. transport=ws tells the far end this leg arrives
@@ -113,8 +118,8 @@ function buildWebRtcUri(phone) {
 function webrtcReadiness() {
   const wsUrl = webrtcWsUrl();
   const server = webrtcServer();
-  const user = String(settings.get('voipso_sip_user') || '').trim();
-  const hasPassword = !!String(settings.get('voipso_sip_password') || '').trim();
+  const user = String(settings.get('telnyx_sip_user') || '').trim();
+  const hasPassword = !!String(settings.get('telnyx_sip_password') || '').trim();
   const missing = [];
   if (!server) missing.push('server');
   if (!user) missing.push('user');
@@ -129,13 +134,14 @@ function webrtcReadiness() {
 function webrtcSession() {
   const r = webrtcReadiness();
   const handoff = settings.getBool('webrtc_credential_handoff');
-  const password = String(settings.get('voipso_sip_password') || '');
+  const password = String(settings.get('telnyx_sip_password') || '');
   return {
     mode: 'webrtc',
+    provider: 'telnyx',
     configured: r.configured,
     missing: r.missing,
     wsUrl: r.wsUrl,
-    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : (r.server ? 'derived' : 'none'),
+    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : 'telnyx_default',
     server: r.server,
     username: r.user,
     // Normalized like every other caller ID the app shows or sends: the browser puts this
@@ -340,5 +346,6 @@ module.exports = {
   numberKind, DK_SPECIAL_RANGES,
   callerIdPool, nextCallerId, businessHours, toMinutes, voicemailGreeting, sampleDialUri, VM_FILENAME,
   partsIn, tzOffsetMinutes, zonedTimeToUtc, zonedDate, MIN_DIGITS, MAX_POOL,
-  webrtcWsUrl, webrtcServer, buildWebRtcUri, webrtcReadiness, webrtcSession, WEBRTC_WS_PORT, WEBRTC_WS_PATH,
+  webrtcWsUrl, webrtcServer, buildWebRtcUri, webrtcReadiness, webrtcSession,
+  sipServer, TELNYX_SIP_DOMAIN, TELNYX_WEBRTC_WS,
 };

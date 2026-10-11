@@ -260,7 +260,14 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
     try {
       const PC = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
       if (PC) {
-        const pc = new PC({ iceServers: [{ urls: 'stun:stun.voip.so:3478' }] });
+        // Telnyx's STUN first; a public fallback second, so a network that blocks the
+        // carrier's STUN still gathers a candidate set instead of failing to connect.
+        const pc = new PC({
+          iceServers: [
+            { urls: 'stun:stun.telnyx.com:3478' },
+            { urls: 'stun:stun.l.google.com:19302' },
+          ],
+        });
         for (const track of stream.getTracks()) pc.addTrack(track, stream);
         pc.ontrack = (ev) => {
           const [remote] = ev.streams || [];

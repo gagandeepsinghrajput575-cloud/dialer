@@ -5,6 +5,14 @@
 // is independent of it. That boundary exists so the SIP stack can be swapped without touching
 // the cockpit.
 //
+// ## Carrier: Telnyx
+//
+// The descriptor comes from GET /api/telephony/webrtc-session, which points at Telnyx's
+// WebRTC gateway (wss://rtc.telnyx.com) and, for a Credential-Auth SIP Connection, at
+// sip.telnyx.com — so the UserAgent below registers as `sip:<username>@sip.telnyx.com`.
+// Nothing here hard-codes a provider: swapping carriers is a settings change, and the error
+// messages below name whatever the session descriptor actually said.
+//
 // ## Status: wired, not verified against a live PBX
 //
 // The stack is sip.js, bundled lazily (the chunk is only fetched when a live call is placed).

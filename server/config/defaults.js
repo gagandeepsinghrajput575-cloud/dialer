@@ -14,12 +14,14 @@ const DEFAULT_FOLLOWUP_EMAIL = [
 ].join('\n');
 
 const DEFAULTS = {
-  // ---- telephony: VOIP.SO + desktop softphone (Denmark) ----
+  // ---- telephony: Telnyx + desktop softphone (Denmark) ----
   telephony_mode: 'softphone', // 'softphone' (Zoiper/Linphone) or 'webrtc'
   softphone_protocol: 'sip', // 'sip' (sip:...) or 'tel' (tel:...)
-  voipso_sip_server: 'sip.voip.so', // VOIP.SO SIP server domain
-  voipso_sip_user: '', // VOIP.SO SIP account / extension
-  voipso_sip_password: '', // secret — local DB only, never sent to the browser
+  telnyx_sip_server: 'sip.telnyx.com', // Telnyx SIP connection domain (FQDN)
+  telnyx_sip_user: '', // Telnyx SIP connection username
+  telnyx_sip_password: '', // secret — local DB only, never sent to the browser
+  telnyx_api_key: '', // secret — Telnyx v2 API key (KEY...) for carrier management
+  telnyx_connection_id: '', // optional Telnyx SIP Connection ID
   caller_id: '', // primary Danish (+45) virtual number
   caller_id_pool: '', // comma separated DIDs, rotated round-robin per dial
   caller_id_cursor: '0', // index of the next DID to use (survives restarts)
@@ -56,8 +58,9 @@ const DEFAULTS = {
   meet_link: '', // your standing meeting link; {{meet_link}} inserts it into the template
   email_verify_deep: '0', // SMTP RCPT probing — see emailService.js for why it is off
   // ---- in-browser WebRTC softphone (telephony_mode: 'webrtc') ----
-  // The SIP-over-WebSocket gateway the browser registers against. Empty derives a default
-  // from the SIP server below; set it explicitly when your provider uses another port/path.
+  // The SIP-over-WebSocket gateway the browser registers against. Empty means Telnyx's own
+  // gateway (wss://rtc.telnyx.com) — a fixed endpoint, not a port/path derived from the SIP
+  // server. Set it explicitly only to point at a different gateway or a proxy.
   webrtc_ws_url: '',
   // The browser cannot register with a SIP server without the SIP password. That is a real
   // tension with the rule that this secret never reaches the browser, so the handoff is an
@@ -71,7 +74,14 @@ const DEFAULTS = {
 
 const SETTING_KEYS = Object.keys(DEFAULTS);
 // Setting key -> the boolean the API exposes instead of the value.
-const SECRET_KEYS = { voipso_sip_password: 'has_password', ai_api_key: 'has_api_key', smtp_pass: 'has_smtp_pass' };
+// Setting key -> the boolean the API exposes instead of the value. One flag per secret: two
+// secrets sharing a flag would make "do you have one?" answer for the wrong one.
+const SECRET_KEYS = {
+  telnyx_sip_password: 'has_password',
+  telnyx_api_key: 'has_api_key',
+  ai_api_key: 'has_ai_key',
+  smtp_pass: 'has_smtp_pass',
+};
 
 const STAGES = ['new', 'contacted', 'interested', 'followup', 'meeting', 'won', 'lost'];
 const OUTCOMES = ['no_answer', 'voicemail', 'wrong_number', 'gatekeeper', 'hung_up', 'conversation', 'meeting_booked', 'dnc'];
@@ -86,11 +96,13 @@ const NATIONAL_LENGTH = { 45: 8 };
 
 // Env vars that seed an empty setting on first boot (.env.example documents them).
 const ENV_SEEDS = {
-  voipso_sip_server: 'VOIPSO_SIP_SERVER',
-  voipso_sip_user: 'VOIPSO_SIP_USER',
-  voipso_sip_password: 'VOIPSO_SIP_PASSWORD',
-  caller_id: 'VOIPSO_CALLER_ID',
-  caller_id_pool: 'VOIPSO_CALLER_ID_POOL',
+  telnyx_sip_server: 'TELNYX_SIP_SERVER',
+  telnyx_sip_user: 'TELNYX_SIP_USER',
+  telnyx_sip_password: 'TELNYX_SIP_PASSWORD',
+  telnyx_api_key: 'TELNYX_API_KEY',
+  telnyx_connection_id: 'TELNYX_CONNECTION_ID',
+  caller_id: 'TELNYX_CALLER_ID',
+  caller_id_pool: 'TELNYX_CALLER_ID_POOL',
   ai_api_key: 'PULSE_AI_API_KEY',
   ai_provider: 'PULSE_AI_PROVIDER',
   ai_model: 'PULSE_AI_MODEL',

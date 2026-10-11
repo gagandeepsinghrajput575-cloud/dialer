@@ -103,7 +103,7 @@ function start(prospectId, { tzOffset = null } = {}) {
       ? (readiness.configured ? null
         : `The in-browser softphone is missing: ${readiness.missing.join(', ')}. Add it in Settings → Telephony.`)
       : (!dry && !telephony.sipConfigured()
-        ? 'VOIP.SO SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
+        ? 'The Telnyx SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
         : null),
   };
 }

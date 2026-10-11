@@ -1058,7 +1058,7 @@ export default function Dialer() {
               {dry && phase === 'idle' && (
                 <div className="hint-dry">
                   <FlaskConical size={13} /> Test mode is on. Calls are simulated in the browser — nothing is dialed.
-                  Switch to Live mode in Settings once {softphone} is registered with VOIP.SO.
+                  Switch to Live mode in Settings once {softphone} is registered with Telnyx.
                 </div>
               )}
               <AnimatePresence>

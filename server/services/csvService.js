@@ -75,7 +75,7 @@ function toJson() {
     telephony: {
       mode: settings.get('telephony_mode'),
       protocol: settings.get('softphone_protocol'),
-      sip_server: settings.get('voipso_sip_server'),
+      sip_server: settings.get('telnyx_sip_server'),
       caller_id: settings.get('caller_id'),
       caller_id_pool: settings.get('caller_id_pool'),
       default_country_code: settings.get('default_country_code'),

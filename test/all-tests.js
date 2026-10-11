@@ -107,13 +107,30 @@ async function waitForServer(base, ms = 15000) {
   return false;
 }
 
+// A database from the VOIP.SO era, in the directory the server is about to boot against.
+// The fixture is built by the real migration runner with the Telnyx migration removed (see
+// test/helpers/legacy-db.js), so the schema is exactly what the previous release produced —
+// and the boot that follows is the genuine upgrade path, purge included.
+function seedLegacyDatabase() {
+  const helper = path.join(REPO, 'test', 'helpers', 'legacy-db.js');
+  const seeded = spawnSync(process.execPath, [helper, tmpDir], { encoding: 'utf8' });
+  if (seeded.status !== 0) {
+    throw new Error(`could not build the legacy database fixture:\n${seeded.stderr || seeded.stdout}`);
+  }
+  const info = JSON.parse(String(seeded.stdout).trim().split('\n').pop());
+  assert.strictEqual(info.total, 6, 'the fixture carries the six migrations that predate the cutover');
+}
+
 async function bootServer() {
   const port = await freePort();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-dialer-test-'));
   BASE = `http://127.0.0.1:${port}`;
+  // Deliberately *not* seeding from the environment here: a fresh install must land on the
+  // Telnyx defaults on its own, and the seeded legacy database above proves the upgrade path.
+  seedLegacyDatabase();
   child = spawn(process.execPath, [path.join(REPO, 'server', 'index.js')], {
     cwd: REPO,
-    env: { ...process.env, PORT: String(port), DATA_DIR: tmpDir, VOIPSO_SIP_SERVER: 'sip.voip.so', PULSE_TEST: '1' },
+    env: { ...process.env, PORT: String(port), DATA_DIR: tmpDir, PULSE_TEST: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -132,7 +149,7 @@ function shutdown() {
 const TOTAL = 36;
 
 async function run() {
-  console.log('--- Pulse Dialer: VOIP.SO + softphone verification suite ---');
+  console.log('--- Pulse Dialer: Telnyx + softphone verification suite ---');
 
   if (EXTERNAL_BASE) {
     BASE = EXTERNAL_BASE;
@@ -143,44 +160,55 @@ async function run() {
   }
 
   // ---------------------------------------------------------------- settings
-  step(1, TOTAL, 'GET /api/settings — VOIP.SO defaults, no legacy keys, secret masked');
+  step(1, TOTAL, 'GET /api/settings — Telnyx defaults, legacy carrier migrated and purged, secret masked');
   const s1 = await req('GET', '/api/settings');
   assert.strictEqual(s1.status, 200);
   const s = s1.json;
   assert.strictEqual(s.telephony_mode, 'softphone');
   assert.strictEqual(s.softphone_protocol, 'sip');
-  assert.strictEqual(s.voipso_sip_server, 'sip.voip.so');
+  assert.strictEqual(s.telnyx_sip_server, 'sip.telnyx.com');
   assert.strictEqual(s.default_country_code, '45');
   assert.strictEqual(s.dry_run, '1');
   assert.strictEqual(s.daily_goal, '80');
   assert.strictEqual(s.daily_cap, '150');
-  assert.strictEqual(s.voipso_sip_password, '', 'SIP secret must never reach the browser');
+  assert.strictEqual(s.telnyx_sip_password, '', 'SIP secret must never reach the browser');
+  // ---- Migration 7: what the legacy database carried over, and what it lost ----
+  assert.strictEqual(s.telnyx_sip_user, 'old-extension-42', 'the legacy SIP username was carried across');
+  assert.strictEqual(s.has_password, true, 'and so was the legacy SIP secret');
+  assert.strictEqual(s.webrtc_ws_url, '', 'a gateway pointing at the retired carrier was cleared, not kept');
+  assert.strictEqual(s.telnyx_api_key, '', 'no API key is exposed, only the flag');
+  assert.strictEqual(s.has_api_key, false, 'and the flag says so honestly');
+  assert.strictEqual(s.ai_api_key, '', 'the AI key is masked as well');
+  assert.strictEqual(s.has_ai_key, false, 'under its own flag, not the Telnyx one');
+  const legacyKeys = Object.keys(s).filter((k) => /voip/i.test(k));
+  assert.deepStrictEqual(legacyKeys, [], `no legacy carrier key survives in the API: ${legacyKeys.join(', ')}`);
   // Exact key set proves no retired setting (old callback credentials, "ring me first" number) survives.
   assert.deepStrictEqual(Object.keys(s).sort(), [
     'agent_name', 'ai_api_key', 'ai_model', 'ai_provider',
     'business_days', 'business_hours_end', 'business_hours_start', 'business_tz',
     'caller_id', 'caller_id_cursor', 'caller_id_pool',
     'daily_cap', 'daily_goal', 'default_country_code', 'dry_run', 'email_verify_deep',
-    'followup_email_template', 'has_api_key', 'has_password', 'has_smtp_pass', 'meet_link',
+    'followup_email_template', 'has_ai_key', 'has_api_key', 'has_password', 'has_smtp_pass', 'meet_link',
     'queue_smart_sort', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
-    'vm_auto_advance', 'vm_greeting', 'voipso_sip_password', 'voipso_sip_server', 'voipso_sip_user',
+    'telnyx_api_key', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
+    'vm_auto_advance', 'vm_greeting',
     'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
   ]);
   assert.strictEqual(s.ai_provider, 'local', 'copilot defaults to the local summarizer');
   assert.strictEqual(s.business_tz, 'Europe/Copenhagen');
   assert.strictEqual(s.business_hours_start, '08:30');
   assert.strictEqual(s.business_hours_end, '16:30');
-  ok(`defaults are VOIP.SO/softphone (country code +${s.default_country_code}), secrets masked, no retired keys`);
+  ok(`legacy VOIP.SO settings migrated to Telnyx, old keys purged, secrets masked (country code +${s.default_country_code})`);
 
   // ---------------------------------------------------------------- settings write
   step(2, TOTAL, 'PUT /api/settings — telephony config round-trips, blank secret keeps the old one');
   const w1 = await req('PUT', '/api/settings', {
     telephony_mode: 'softphone',
     softphone_protocol: 'sip',
-    voipso_sip_server: 'sip.voip.so',
-    voipso_sip_user: '1001',
-    voipso_sip_password: 'super-secret',
+    telnyx_sip_server: 'sip.telnyx.com',
+    telnyx_sip_user: '1001',
+    telnyx_sip_password: 'super-secret',
     caller_id: '+45 20 12 34 56',
     default_country_code: '45',
     daily_goal: '90',
@@ -189,12 +217,12 @@ async function run() {
   assert.strictEqual(w1.status, 200);
   assert.strictEqual(w1.json.sampleDialUri, `sip:${E164}`);
   const s2 = (await req('GET', '/api/settings')).json;
-  assert.strictEqual(s2.voipso_sip_user, '1001');
+  assert.strictEqual(s2.telnyx_sip_user, '1001');
   assert.strictEqual(s2.caller_id, '+45 20 12 34 56');
   assert.strictEqual(s2.daily_goal, '90');
   assert.strictEqual(s2.has_password, true);
-  assert.strictEqual(s2.voipso_sip_password, '');
-  await req('PUT', '/api/settings', { voipso_sip_password: '' }); // blank = keep
+  assert.strictEqual(s2.telnyx_sip_password, '');
+  await req('PUT', '/api/settings', { telnyx_sip_password: '' }); // blank = keep
   const s3 = (await req('GET', '/api/settings')).json;
   assert.strictEqual(s3.has_password, true, 'blank password must not wipe the stored secret');
 
@@ -223,7 +251,7 @@ async function run() {
   assert.strictEqual(s4.webrtc_mic_device, 'mic-abc', 'the microphone choice persists');
   assert.strictEqual(s4.webrtc_speaker_device, 'spk-xyz', 'the speaker choice persists');
   await req('PUT', '/api/settings', { webrtc_ws_url: '', webrtc_credential_handoff: '0', webrtc_mic_device: '', webrtc_speaker_device: '' });
-  ok('telephony + VOIP.SO keys saved, caller ID kept, secret never echoed back (every setting the schema accepts round-trips)');
+  ok('telephony + Telnyx keys saved, caller ID kept, secret never echoed back (every setting the schema accepts round-trips)');
 
   // ---------------------------------------------------------------- Danish normalization
   step(3, TOTAL, 'POST /api/prospects — Danish number normalization (+45)');
@@ -273,7 +301,7 @@ async function run() {
   assert.strictEqual(callRes.json.dryRun, true);
   assert.strictEqual(callRes.json.protocol, 'sip');
   assert.strictEqual(callRes.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.voip.so`);
+  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.telnyx.com`);
   assert.strictEqual(callRes.json.telephonyMode, 'softphone');
   const testCallId = callRes.json.callId;
   const afterCall = await req('GET', `/api/prospects/${testId}`);
@@ -288,7 +316,7 @@ async function run() {
   assert.strictEqual(live.status, 200);
   assert.strictEqual(live.json.dryRun, false);
   assert.strictEqual(live.json.dialUri, `tel:${E164}`);
-  assert.strictEqual(live.json.warning, null, 'VOIP.SO account is configured, so no warning');
+  assert.strictEqual(live.json.warning, null, 'the Telnyx SIP account is configured, so no warning');
   const liveClassified = await req('PATCH', `/api/calls/${live.json.callId}`, { outcome: 'conversation', duration_sec: 41 });
   assert.strictEqual(liveClassified.json.prospect.last_outcome, 'conversation');
   await req('PUT', '/api/settings', { dry_run: '1', softphone_protocol: 'sip' });
@@ -302,7 +330,7 @@ async function run() {
   assert.strictEqual(t.json.configured, true);
   assert.strictEqual(t.json.sampleNumber, E164);
   assert.strictEqual(t.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(t.json.sipServer, 'sip.voip.so');
+  assert.strictEqual(t.json.sipServer, 'sip.telnyx.com');
   assert.strictEqual(t.json.inBrowser, false, 'a softphone launch is not an in-browser session');
 
   // ------------------------------------------------- in-browser WebRTC session descriptor
@@ -315,7 +343,9 @@ async function run() {
   assert.strictEqual(sess.status, 200);
   assert.strictEqual(sess.json.mode, 'webrtc');
   assert.ok(sess.json.wsUrl.startsWith('wss://'), `the signalling gateway is a wss URL (got ${sess.json.wsUrl})`);
-  assert.strictEqual(sess.json.server, 'sip.voip.so');
+  assert.strictEqual(sess.json.provider, 'telnyx', 'the descriptor names the carrier it is aiming at');
+  assert.strictEqual(sess.json.server, 'sip.telnyx.com');
+  assert.strictEqual(sess.json.wsUrl, 'wss://rtc.telnyx.com', "an unset gateway means Telnyx's own");
   assert.strictEqual(sess.json.username, '1001');
 
   // The SIP secret stays on the server unless the agent explicitly opts into the handoff —
@@ -330,17 +360,17 @@ async function run() {
   const open = await tokened('GET', '/api/telephony/webrtc-session');
   assert.strictEqual(open.json.password, 'super-secret', 'an explicit handoff releases the secret to the same-origin tab');
   assert.strictEqual(open.json.canRegister, true);
-  assert.strictEqual((await req('GET', '/api/settings')).json.voipso_sip_password, '',
+  assert.strictEqual((await req('GET', '/api/settings')).json.telnyx_sip_password, '',
     'even with the handoff on, /api/settings keeps masking the secret');
   await req('PUT', '/api/settings', { webrtc_credential_handoff: '0' });
 
-  // A configured gateway beats the derived one; with none set, the URL is derived and labelled.
+  // A configured gateway beats the default; with none set, the URL is Telnyx's and labelled.
   await req('PUT', '/api/settings', { webrtc_ws_url: 'wss://gw.example.dk:7443/sip' });
   const customGw = await tokened('GET', '/api/telephony/webrtc-session');
-  assert.strictEqual(customGw.json.wsUrl, 'wss://gw.example.dk:7443/sip', 'a configured gateway overrides the derived default');
+  assert.strictEqual(customGw.json.wsUrl, 'wss://gw.example.dk:7443/sip', 'a configured gateway overrides the Telnyx default');
   assert.strictEqual(customGw.json.wsUrlSource, 'settings');
   await req('PUT', '/api/settings', { webrtc_ws_url: '' });
-  assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'derived');
+  assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'telnyx_default');
 
   // A webrtc dial addresses the SIP server over the gateway and never degrades to tel:.
   // Its own prospect, so the shared fixture's call counter stays exactly as later groups
@@ -353,19 +383,19 @@ async function run() {
   assert.strictEqual(webCall.json.telephonyMode, 'webrtc');
   assert.strictEqual(webCall.json.inBrowser, true, 'the client is told to open an in-browser session');
   assert.strictEqual(webCall.json.protocol, 'webrtc');
-  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.voip.so;transport=ws',
+  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws',
     `webrtc dial URI (got ${webCall.json.dialUri})`);
   assert.ok(!/^tel:/.test(webCall.json.dialUri), 'a webrtc dial never degrades to a tel: URI');
   assert.strictEqual(webCall.json.callerId, '+4520123456', 'caller-ID rotation still applies in webrtc mode');
   assert.strictEqual((await req('GET', `/api/prospects/${webrtcProspect.json.id}`)).json.calls[0].dial_uri,
-    'sip:+4520334455@sip.voip.so;transport=ws', 'the gateway URI is what lands in call history');
+    'sip:+4520334455@sip.telnyx.com;transport=ws', 'the gateway URI is what lands in call history');
   await req('DELETE', `/api/prospects/${webrtcProspect.json.id}`);
 
   // The test-launch endpoint used to answer "configured: true" for webrtc unconditionally.
   const wt = await req('POST', '/api/settings/test-softphone', { number: SAMPLE });
   assert.strictEqual(wt.json.inBrowser, true);
   assert.strictEqual(wt.json.protocol, 'webrtc');
-  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.voip.so;transport=ws`, 'the test launch shows the gateway URI');
+  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.telnyx.com;transport=ws`, 'the test launch shows the gateway URI');
   assert.strictEqual(wt.json.configured, false, 'webrtc readiness is not claimed while the handoff is off');
   assert.match(wt.json.message, /handoff|Settings/i);
 
@@ -485,6 +515,16 @@ async function run() {
   assert.strictEqual(badGoal.status, 400);
   const badWindow = await req('PUT', '/api/settings', { business_hours_start: 'half nine' });
   assert.strictEqual(badWindow.status, 400);
+  // A SIP domain with a scheme or a path produces a dial URI no softphone can parse, and the
+  // failure would surface as a silent non-call, so it is refused at the boundary instead.
+  for (const bad of ['https://sip.telnyx.com/', 'sip.telnyx.com/ws', 'localhost', 'not a host']) {
+    const r = await req('PUT', '/api/settings', { telnyx_sip_server: bad });
+    assert.strictEqual(r.status, 400, `"${bad}" must be refused as a SIP domain`);
+    assert.strictEqual(r.json.details[0].field, 'telnyx_sip_server');
+  }
+  assert.strictEqual((await req('PUT', '/api/settings', { telnyx_sip_server: 'sip.telnyx.com:5061' })).status, 200,
+    'a domain with a port is accepted');
+  await req('PUT', '/api/settings', { telnyx_sip_server: 'sip.telnyx.com' });
   assert.strictEqual((await req('GET', '/api/settings')).json.default_country_code, '45', 'rejected writes change nothing');
   assert.strictEqual((await req('POST', '/api/prospects/999999/call', {})).status, 404);
   assert.strictEqual((await req('POST', '/api/nope', {})).status, 404);
@@ -620,7 +660,7 @@ async function run() {
   assert.ok(jsonRes.headers.get('content-type').includes('application/json'));
   const payload = JSON.parse(jsonRes.text);
   assert.ok(payload.exported_at);
-  assert.strictEqual(payload.telephony.sip_server, 'sip.voip.so');
+  assert.strictEqual(payload.telephony.sip_server, 'sip.telnyx.com');
   assert.strictEqual(payload.telephony.protocol, 'sip');
   const exported = payload.prospects.find((p) => p.id === testId);
   assert.ok(exported.calls.length >= 3, `call history included (${exported.calls.length} calls)`);
@@ -829,26 +869,55 @@ async function run() {
   ok(/skipped/.test(ui.stdout) ? 'UI race suite skipped (no dist/ or jsdom)' : 'keyboard race conditions, focus traps and console hygiene verified');
 
   // ---------------------------------------------------------------- repo hygiene
-  step(31, TOTAL, 'Repository hygiene — legacy telephony provider fully purged');
-  const needle = new RegExp('sone' + 'tel', 'i');
+  step(31, TOTAL, 'Repository hygiene — retired providers purged, Telnyx the only carrier');
   const skip = new Set(['node_modules', '.git', 'dist', 'data', '.cache', 'package-lock.json']);
-  const hits = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (skip.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.(js|jsx|mjs|json|md|css|html|txt|example)$/i.test(entry.name) || entry.name.startsWith('.env')) {
-        const body = fs.readFileSync(full, 'utf8');
-        body.split('\n').forEach((line, i) => { if (needle.test(line)) hits.push(`${path.relative(REPO, full)}:${i + 1}`); });
+  const scannable = (name) => /\.(js|jsx|mjs|json|md|css|html|txt|example)$/i.test(name) || name.startsWith('.env');
+  const scan = (needle) => {
+    const found = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (skip.has(entry.name)) continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (scannable(entry.name)) {
+          const body = fs.readFileSync(full, 'utf8');
+          body.split('\n').forEach((line, i) => {
+            if (needle.test(line)) found.push({ file: path.relative(REPO, full), line: i + 1 });
+          });
+        }
       }
-    }
+    };
+    walk(REPO);
+    return found;
   };
-  walk(REPO);
-  assert.deepStrictEqual(hits, [], `legacy provider still referenced in: ${hits.join(', ')}`);
+
+  const legacyClientHits = scan(new RegExp('sone' + 'tel', 'i')).map((h) => `${h.file}:${h.line}`);
+  assert.deepStrictEqual(legacyClientHits, [], `legacy provider still referenced in: ${legacyClientHits.join(', ')}`);
   const legacyModule = path.join(REPO, 'server', `sone${'tel'}.js`); // legacy 2-legged callback client
   assert.ok(!fs.existsSync(legacyModule), 'legacy telephony client module must be deleted');
-  ok('no legacy provider references anywhere in the repo');
+
+  // The VOIP.SO cutover is complete when the retired carrier survives in exactly the places
+  // that must still know about it: the migration that carries the data forward, and the tests
+  // that prove the carry actually happens. Anywhere else — a service, a schema, the UI, the
+  // docs — a leftover reference is a call that lands nowhere.
+  const retiredAllowed = new Set([
+    path.join('server', 'db', 'migrate.js'),          // the migration that reads the old keys
+    path.join('test', 'helpers', 'legacy-db.js'),     // the fixture that recreates an old database
+    'test/all-tests.js',                              // and the assertions about both
+    path.join('test', 'unit', 'repositories.test.js'),
+  ]);
+  const retiredHits = scan(/voip\.so|voip\.ms|voipso/i)
+    .filter((h) => !retiredAllowed.has(h.file))
+    .map((h) => `${h.file}:${h.line}`);
+  assert.deepStrictEqual(retiredHits, [], `retired carrier still referenced in: ${retiredHits.join(', ')}`);
+
+  // …and the carrier that replaced it must actually be named where it matters, so this test
+  // cannot pass by the whole app simply having gone quiet about telephony.
+  for (const file of ['server/config/defaults.js', 'server/services/telephonyService.js', 'src/pages/Settings.jsx']) {
+    const body = fs.readFileSync(path.join(REPO, file), 'utf8');
+    assert.match(body, /telnyx/i, `${file} names the Telnyx carrier`);
+  }
+  ok('no retired provider survives outside the migration and its tests; Telnyx wired end to end');
 
   // ---------------------------------------------------------------- cross-site attack surface
   step(32, TOTAL, 'Cross-site attack surface — a website you visit cannot touch the dialer');

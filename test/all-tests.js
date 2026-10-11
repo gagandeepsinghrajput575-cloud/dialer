@@ -667,7 +667,14 @@ async function run() {
   process.stdout.write(hardening.stdout || '');
   if (hardening.status !== 0) throw new Error(`hardening tests failed:\n${hardening.stderr || hardening.stdout}`);
   assert.match(hardening.stdout, /hardening checks passed/);
-  ok('adversarial input, timezone maths and injection defences verified');
+
+  const propertySuite = spawnSync(process.execPath, [path.join(__dirname, 'unit', 'property.test.js')], {
+    cwd: REPO, env: { ...process.env, PULSE_TEST: '1' }, encoding: 'utf8',
+  });
+  process.stdout.write(propertySuite.stdout || '');
+  if (propertySuite.status !== 0) throw new Error(`property tests failed:\n${propertySuite.stderr || propertySuite.stdout}`);
+  assert.match(propertySuite.stdout, /property suites passed/);
+  ok('adversarial input, timezone maths, injection defences and generative property invariants verified');
 
   // ---------------------------------------------------------------- UI race layer
   step(30, TOTAL, 'Dialer UI race suite (real bundle driven in jsdom)');

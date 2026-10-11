@@ -91,8 +91,33 @@ export function stepIndex(count, idx, dir) {
 
 /** Merge freshly fetched page into loaded window, deduplicating by id. */
 export function appendPage(current, incoming) {
-  const list = Array.isArray(current) ? current : [];
-  const seen = new Set(list.map((p) => p.id));
-  const add = (Array.isArray(incoming) ? incoming : []).filter((p) => p && !seen.has(p.id));
+  const curArr = Array.isArray(current) ? current : [];
+  const incArr = Array.isArray(incoming) ? incoming : [];
+  const seen = new Set();
+  const list = [];
+  let curHadDuplicatesOrNulls = false;
+
+  for (const p of curArr) {
+    if (p && p.id != null) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        list.push(p);
+      } else {
+        curHadDuplicatesOrNulls = true;
+      }
+    } else {
+      curHadDuplicatesOrNulls = true;
+    }
+  }
+
+  const add = [];
+  for (const p of incArr) {
+    if (p && p.id != null && !seen.has(p.id)) {
+      seen.add(p.id);
+      add.push(p);
+    }
+  }
+
+  if (!add.length && !curHadDuplicatesOrNulls) return curArr;
   return add.length ? [...list, ...add] : list;
 }

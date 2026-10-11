@@ -190,12 +190,24 @@ const QUEUE_TABS = {
 };
 
 function encodeCursor(row, index) {
-  return Buffer.from(JSON.stringify({ id: row.id, idx: index }), 'utf8').toString('base64url');
+  if (!row || typeof row !== 'object' || !row.id) return null;
+  const payload = { id: row.id };
+  if (index !== undefined && Number.isSafeInteger(Number(index))) {
+    payload.idx = Number(index);
+  }
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
 
 function decodeCursor(raw) {
+  if (raw === null || raw === undefined) return null;
   try {
-    return JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
+    const v = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
+    if (!v || typeof v !== 'object') return null;
+    const id = Number(v.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const idx = v.idx !== undefined ? Number(v.idx) : undefined;
+    if (idx !== undefined && (!Number.isSafeInteger(idx) || idx < 0)) return null;
+    return { id, ...(idx !== undefined ? { idx } : {}) };
   } catch {
     return null;
   }
@@ -256,5 +268,5 @@ function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
 
 module.exports = {
   list, detail, search, create, update, remove, clearAll, bulkImport, loadDemo,
-  rankProspect, rankedQueue, QUEUE_TABS,
+  rankProspect, rankedQueue, QUEUE_TABS, encodeCursor, decodeCursor,
 };

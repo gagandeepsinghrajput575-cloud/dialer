@@ -22,13 +22,29 @@ function summarize(rows) {
   return s;
 }
 
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// The label on a day bucket has to be the *client's* calendar date. Deriving it from the UTC
+// instant of local midnight captioned every bar one day early for anyone east of Greenwich —
+// a Danish agent (UTC+1/+2) saw today's bar labelled with yesterday's date. The bucket
+// boundaries were always right; only the label lied.
+function dayLabel(offsetDays, tzOffsetMin) {
+  const start = getStartOfDay(offsetDays, tzOffsetMin);
+  if (tzOffsetMin !== null && Number.isFinite(tzOffsetMin)) {
+    // Shift the instant onto the client's wall clock and read the date off in UTC.
+    const wall = new Date(start.getTime() - tzOffsetMin * 60000);
+    return `${wall.getUTCFullYear()}-${pad2(wall.getUTCMonth() + 1)}-${pad2(wall.getUTCDate())}`;
+  }
+  return `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`;
+}
+
 function stats({ tzOffset = null } = {}) {
   const filter = statsFilter();
   const since7 = sqlTime(getStartOfDay(-6, tzOffset));
   const rows = calls.since(since7, filter);
 
   const byDay = {};
-  for (let i = 6; i >= 0; i--) byDay[getStartOfDay(-i, tzOffset).toISOString().slice(0, 10)] = [];
+  for (let i = 6; i >= 0; i--) byDay[dayLabel(-i, tzOffset)] = [];
   const todayStart = getStartOfDay(0, tzOffset).getTime();
   const todayRows = [];
 
@@ -36,12 +52,14 @@ function stats({ tzOffset = null } = {}) {
     const t = new Date(String(r.started_at).replace(' ', 'T') + 'Z').getTime();
     for (let i = 6; i >= 0; i--) {
       const start = getStartOfDay(-i, tzOffset).getTime();
-      if (t >= start && t < start + 86400000) { byDay[getStartOfDay(-i, tzOffset).toISOString().slice(0, 10)].push(r); break; }
+      if (t >= start && t < start + 86400000) { byDay[dayLabel(-i, tzOffset)].push(r); break; }
     }
     if (t >= todayStart) todayRows.push(r);
   }
 
-  const week = Object.entries(byDay).map(([date, dayRows]) => ({ date: `${date}T00:00:00.000Z`, ...summarize(dayRows) }));
+  // A plain calendar date, not a fabricated UTC midnight: the client renders it as a weekday
+  // and re-parsing it into an instant is what would shift the caption again in the browser.
+  const week = Object.entries(byDay).map(([date, dayRows]) => ({ date, ...summarize(dayRows) }));
 
   return {
     today: summarize(todayRows),

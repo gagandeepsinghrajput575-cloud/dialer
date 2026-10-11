@@ -451,6 +451,23 @@ async function run() {
   assert.strictEqual(statsRes.json.today.avgTalkSec, 33, 'avg of the 25s and 41s conversations');
   assert.strictEqual(statsRes.json.week.length, 7);
   assert.strictEqual(statsRes.json.goal, 90);
+
+  // The day labels are the *client's* calendar dates. Deriving them from the UTC instant of
+  // local midnight captioned every bar one day early for anyone east of Greenwich — which is
+  // every Danish user this app is built for. tzOffset=-330 (IST) is the discriminating case:
+  // there the local date and the UTC date of that instant never agree.
+  const localDate = (tz) => new Date(Date.now() - tz * 60000).toISOString().slice(0, 10);
+  for (const tz of [-330, -120, 0, 300]) {
+    const s = (await req('GET', `/api/stats?tzOffset=${tz}`)).json;
+    const last = s.week[6];
+    assert.match(last.date, /^\d{4}-\d{2}-\d{2}$/, `week[6].date is a plain calendar date, got "${last.date}"`);
+    assert.strictEqual(last.date, localDate(tz), `week[6] is labelled in the client's calendar for tzOffset=${tz}`);
+    assert.strictEqual(last.dials, s.today.dials, `the last week bucket and "today" agree for tzOffset=${tz}`);
+  }
+  // Every bucket must also be a distinct, ascending day — a shift would collapse two of them.
+  const weekSeries = (await req('GET', '/api/stats?tzOffset=-330')).json.week;
+  assert.strictEqual(new Set(weekSeries.map((d) => d.date)).size, 7, 'seven distinct days');
+  assert.deepStrictEqual([...weekSeries.map((d) => d.date)].sort(), weekSeries.map((d) => d.date), 'and they run oldest to newest');
   assert.strictEqual(statsRes.json.cap, 160);
   assert.strictEqual(statsRes.json.recent.length, 2);
   ok(`stats: 2 dials / 2 pickups / 2 conversations / 1 meeting, avg talk ${statsRes.json.today.avgTalkSec}s, goal 90 / cap 160`);
@@ -671,6 +688,17 @@ async function run() {
   const badFollowUp = await req('PATCH', `/api/prospects/${testId}`, { follow_up_at: 'not-a-date!!' });
   assert.strictEqual(badFollowUp.status, 400, 'junk follow-up dates are rejected');
   assert.strictEqual(badFollowUp.json.details[0].field, 'follow_up_at');
+  // …but an *empty* value is how the UI says "no follow-up any more": the date input posts ''
+  // when it is cleared, and rejecting that made a scheduled follow-up impossible to un-schedule
+  // (it kept re-ranking to the top of the queue at score 95 forever).
+  const scheduledFu = await req('PATCH', `/api/prospects/${testId}`, { follow_up_at: '2026-11-02' });
+  assert.strictEqual(scheduledFu.json.follow_up_at, '2026-11-02', 'a follow-up can be scheduled');
+  const unScheduled = await req('PATCH', `/api/prospects/${testId}`, { follow_up_at: '' });
+  assert.strictEqual(unScheduled.status, 200, "clearing with '' is accepted");
+  assert.strictEqual(unScheduled.json.follow_up_at, null, 'and it stores as null, not as an invalid date');
+  const clearedNull = await req('PATCH', `/api/prospects/${testId}`, { follow_up_at: null });
+  assert.strictEqual(clearedNull.json.follow_up_at, null, 'null means the same thing');
+  assert.strictEqual((await req('GET', `/api/prospects/${testId}`)).json.follow_up_at, null, 'and it persists');
   const badSchedule = await req('POST', `/api/telephony/prospects/${testId}/follow-up`, { at: 'garbage!!' });
   assert.strictEqual(badSchedule.status, 400);
   const badTab = await req('GET', '/api/queue?tab=bogus');

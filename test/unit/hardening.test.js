@@ -227,6 +227,46 @@ async function run() {
   assert.strictEqual(rateLimit.size(), 0);
   ok('rate limiter refuses bursts and reclaims expired buckets instead of leaking one per IP');
 
+  // ---- static: no JSX tag may be unbound ------------------------------------------------
+  // A component referenced in JSX but never imported builds fine and dies at render time, in
+  // the browser, on the one screen nobody opened in CI. That happened: a new "fix the leads
+  // without a number" button used <Users/>, which was not imported, and no gate noticed.
+  {
+    const path = require('path');
+    const srcRoot = path.join(__dirname, '..', '..', 'src');
+    const files = [];
+    const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).forEach((e) => {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.jsx?$/.test(e.name)) files.push(full);
+    });
+    walk(srcRoot);
+    assert.ok(files.length > 10, `the scan actually found the app source (${files.length} files)`);
+    const unbound = [];
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const bound = new Set();
+      for (const m of src.matchAll(/import\s+(?:([A-Za-z0-9_$]+)\s*,?\s*)?(?:\{([\s\S]*?)\})?\s*from\s*['"][^'"]+['"]/g)) {
+        if (m[1]) bound.add(m[1]);
+        if (m[2]) m[2].split(',').forEach((raw) => {
+          const name = raw.trim().split(/\s+as\s+/).pop().trim();
+          if (name) bound.add(name);
+        });
+      }
+      // Locally defined components and destructuring aliases: function Foo(), const Foo =,
+      // and { icon: Icon } in a parameter list.
+      for (const m of src.matchAll(/(?:function\s+([A-Z][A-Za-z0-9]*)|const\s+([A-Z][A-Za-z0-9]*)\s*=|([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9]*)\s*[,}]\s*[,)]?\s*=>)/g)) {
+        bound.add(m[1] || m[2] || m[4]);
+      }
+      for (const m of src.matchAll(/([A-Za-z0-9_$]+)\s*:\s*([A-Z][A-Za-z0-9]*)/g)) bound.add(m[2]);
+      for (const tag of new Set([...src.matchAll(/<([A-Z][A-Za-z0-9]*)[\s/>]/g)].map((m) => m[1]))) {
+        if (!bound.has(tag)) unbound.push(`${path.relative(srcRoot, file)} <${tag}>`);
+      }
+    }
+    assert.deepStrictEqual(unbound, [], `every JSX tag in src/ is imported or defined (${unbound.join(', ')})`);
+    ok(`static scan: all ${files.length} source files render only bound JSX tags`);
+  }
+
   console.log(`  [hardening] ${passed} hardening checks passed`);
 }
 

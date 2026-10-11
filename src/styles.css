@@ -1099,3 +1099,12 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
 .queue-done .confetti { position: absolute; inset: 0; pointer-events: none; }
 .queue-done .confetti i { position: absolute; top: 0; width: 7px; height: 11px; border-radius: 2px; opacity: 0.85; }
 @media (max-width: 620px) { .qd-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* A lead that is in the queue but cannot be dialled: visible on the row and counted in the
+   meta line, so "no phone number" is a fixable to-do rather than a wall you hit with C. */
+.q-nonum {
+  flex: 0 0 auto; margin-left: auto; margin-right: 6px; padding: 2px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
+  color: #fbbf24; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.3);
+}
+.meta-warn { color: #fbbf24; }

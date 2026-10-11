@@ -329,6 +329,19 @@ export default function Dialer() {
     setActiveId(null);
   }, [toast]);
 
+  // Walk forward from the current lead to the next one that actually has a number, wrapping at
+  // the end of the loaded window. Used when C is pressed on a phoneless lead.
+  const nextDiallableId = (list, currentId) => {
+    const arr = Array.isArray(list) ? list : [];
+    if (!arr.length) return null;
+    const start = Math.max(0, arr.findIndex((p) => p.id === currentId));
+    for (let step = 1; step <= arr.length; step++) {
+      const cand = arr[(start + step) % arr.length];
+      if (cand && cand.id !== currentId && cand.phone && !cand.dnc) return cand.id;
+    }
+    return null;
+  };
+
   // Candidate calculation for the next prospect in queue
   const getNextProspectId = useCallback((currentQueue, currentProspectId) => {
     const list = Array.isArray(currentQueue) ? currentQueue : (items || []);
@@ -363,7 +376,16 @@ export default function Dialer() {
     if (dialLockRef.current) return;
     if (!active || phaseRef.current !== 'idle' || classifyRef.current) return;
     if (active.dnc) return toast('This prospect is marked Do Not Call.', 'error');
-    if (!active.phone) return toast('No phone number for this prospect.', 'error');
+    if (!active.phone) {
+      // A lead with no number cannot be dialled, and refusing in place left the agent pressing
+      // C against the same wall (the queue ranks phoneless leads last, but it does queue them).
+      // Say why, then walk to the next lead that *can* be dialled.
+      const next = nextDiallableId(items, active.id);
+      if (!next) return toast('No phone number for this prospect.', 'error');
+      toast(`No phone number for ${active.name || 'this prospect'} — skipped to the next lead.`, 'error');
+      setActiveId(next);
+      return;
+    }
     // Danish 70/90 ranges cost real money. Ask first, because the call is logged and the
     // softphone is handed the number the moment this function continues.
     const nk = active.number_kind;
@@ -425,7 +447,7 @@ export default function Dialer() {
     } finally {
       dialLockRef.current = false;
     }
-  }, [active, setPhaseSafe, toast, patchLocal, refreshStats]);
+  }, [active, items, setActiveId, setPhaseSafe, toast, patchLocal, refreshStats]);
 
   // Re-dispatch the same URI when the OS prompt was dismissed or the softphone was closed.
   const relaunchSoftphone = useCallback(() => {
@@ -754,10 +776,19 @@ export default function Dialer() {
 
   const calling = phase !== 'idle';
   const dry = settings?.dry_run === '1';
-  // "Finished" has to mean finished, not filtered-to-nothing: the queue must be empty *and*
-  // the agent must have actually dialled today, or this is just an empty search wearing a trophy.
+  // "Finished" has to mean finished, not filtered-to-nothing: the tab itself must hold nothing
+  // (not merely have nothing matching the current search) and the agent must have dialled
+  // today — a fresh morning is not an achievement. A search that matches nothing while leads
+  // remain is still just "Nobody matches".
+  //
+  // Leads with no phone number do *not* count as finished work. They cannot be dialled, and
+  // the honest place to fix one is the row itself (the banner chip and the queue both offer
+  // it), so the counter below keeps them visible instead of quietly declaring victory over
+  // them. Pressing C on one skips to the next lead that can actually be dialled.
   const today = stats?.today || null;
-  const doneToday = Boolean(today && today.dials > 0 && !items.length && !loading);
+  const tabEmpty = (counts?.[tab] ?? 0) === 0;
+  const doneToday = Boolean(today && today.dials > 0 && !loading && tabEmpty);
+  const phonelessLeft = items.filter((p) => !p.phone).length;
   // Tab labels are chips ("To call"), not prose — spelling them into a sentence produced
   // "Every lead in to call has been called". These are the same three queues, said out loud.
   const tabProse = { new: 'the call list', follow: 'the follow-up list', all: 'the list' }[tab] || 'this queue';
@@ -801,6 +832,11 @@ export default function Dialer() {
         </div>
         <div className="queue-meta">
           <span>{total || items.length} in queue</span>
+          {phonelessLeft > 0 && (
+            <span className="meta-warn" title="These leads are in the queue but cannot be dialled until a number is added">
+              {phonelessLeft} without a number
+            </span>
+          )}
           <span>{done.size} dialed</span>
           <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
         </div>
@@ -1077,9 +1113,7 @@ export default function Dialer() {
             </motion.div>
             <h2>Queue completed! 🎉</h2>
             <p className="muted">
-              {q
-                ? `Nothing in ${tabProse} matches “${q}” — and everything else in it is dialed.`
-                : `Every lead in ${tabProse} has been called. Take the win, then decide what is next.`}
+              Every lead in {tabProse} has been called. Take the win, then decide what is next.
             </p>
 
             <div className="qd-stats">

@@ -760,6 +760,81 @@ async function run() {
     check(bApp.jsErrors.length === 0, `no jsdom errors while driving bulk actions (${bApp.jsErrors.join(' | ').slice(0, 140)})`);
     bApp.dom.window.close();
 
+    // --- C1: Escape cancels an inline edit instead of saving it -------------------
+    // The blur handler used to run with the pre-Escape render's state, so abandoning a field
+    // with Escape saved the very value the agent was trying to throw away.
+    // The fixture has to exist *before* the app loads: the store fetches the list once at
+    // mount, so a prospect created afterwards is invisible to this window.
+    const editToken = (await (await fetch(`${BASE}/api/session`)).json()).token;
+    const editTarget = await (await fetch(`${BASE}/api/prospects`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-pulse-token': editToken },
+      body: JSON.stringify({ name: 'Escape Edit Probe', phone: '20334455' }),
+    })).json();
+    await fetch(`${BASE}/api/prospects/${editTarget.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', 'x-pulse-token': editToken },
+      body: JSON.stringify({ follow_up_at: '2026-12-01' }),
+    });
+    const editApp = loadApp(JSDOM, VirtualConsole, '#prospects');
+    await wait(() => editApp.window.document.querySelector('.table tbody tr'), 15000, 'prospects table');
+    const editBox = editApp.window.document.querySelector('.search input');
+    setB.call(editBox, 'Escape Edit Probe');
+    editBox.dispatchEvent(new editApp.window.Event('input', { bubbles: true }));
+    await sleep(900);
+    const probeRow = [...editApp.window.document.querySelectorAll('.table tbody tr')].find((tr) => /Escape Edit Probe/.test(tr.textContent));
+    check(!!probeRow, 'the edit probe is in the table');
+    probeRow.dispatchEvent(new editApp.window.MouseEvent('click', { bubbles: true }));
+    await wait(() => editApp.window.document.querySelector('.drawer'), 8000, 'prospect drawer');
+
+    const setInput = (el, val) => {
+      const desc = Object.getOwnPropertyDescriptor(editApp.window.HTMLInputElement.prototype, 'value');
+      desc.set.call(el, val);
+      el.dispatchEvent(new editApp.window.Event('input', { bubbles: true }));
+    };
+    const drawerInput = (sel) => editApp.window.document.querySelector(`.drawer ${sel}`);
+    editApp.drain();
+    const phoneField = drawerInput('.phone-big');
+    check(!!phoneField, 'the drawer has an editable phone field');
+    phoneField.focus();
+    setInput(phoneField, '+45 99 88 77 66');
+    await sleep(200);
+    phoneField.dispatchEvent(new editApp.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await sleep(900);
+    const escapedPatches = editApp.drain().filter((c) => /PATCH \/api\/prospects\/\d+$/.test(`${c.method} ${c.path}`));
+    check(escapedPatches.length === 0, `Escape after typing sends no save (${escapedPatches.length} PATCH requests)`);
+    const afterEscape = (await (await fetch(`${BASE}/api/prospects/${editTarget.id}`)).json()).phone;
+    check(afterEscape === '+4520334455', `and the stored number is untouched ("${afterEscape}")`);
+    check(drawerInput('.phone-big').value.replace(/\s/g, '') === '+4520334455', 'the field shows the original value again');
+
+    // Enter still saves — cancelling must not break committing.
+    drawerInput('.phone-big').focus();
+    setInput(drawerInput('.phone-big'), '+45 99 88 77 66');
+    await sleep(200);
+    drawerInput('.phone-big').dispatchEvent(new editApp.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await sleep(1200);
+    const savedPhone = (await (await fetch(`${BASE}/api/prospects/${editTarget.id}`)).json()).phone;
+    check(savedPhone === '+4599887766', `Enter still commits the edit ("${savedPhone}")`);
+
+    // --- C2: a follow-up date can be cleared --------------------------------------
+    // The date input posts '' when it is emptied, and the API used to answer 400 — so a
+    // follow-up could be scheduled but never un-scheduled.
+    check((await (await fetch(`${BASE}/api/prospects/${editTarget.id}`)).json()).follow_up_at === '2026-12-01',
+      'the probe starts with a follow-up scheduled');
+    editApp.drain();
+    const dateField = drawerInput('input[type="date"]');
+    check(!!dateField, 'the drawer has a follow-up date field');
+    dateField.focus();
+    setInput(dateField, '');
+    await sleep(200);
+    dateField.dispatchEvent(new editApp.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await sleep(1200);
+    const clearedFollowUp = await (await fetch(`${BASE}/api/prospects/${editTarget.id}`)).json();
+    check(clearedFollowUp.follow_up_at === null, `clearing the date removes the follow-up (${JSON.stringify(clearedFollowUp.follow_up_at)})`);
+    const errorToasts = [...editApp.window.document.querySelectorAll('.toast.error')].map((t) => t.textContent);
+    check(errorToasts.length === 0, `and no error toast is left behind (${errorToasts.join(' | ').slice(0, 60)})`);
+    check(editApp.jsErrors.length === 0, `no jsdom errors while editing inline (${editApp.jsErrors.join(' | ').slice(0, 140)})`);
+    editApp.dom.window.close();
+    await fetch(`${BASE}/api/prospects/${editTarget.id}`, { method: 'DELETE', headers: { 'x-pulse-token': editToken } });
+
     // --- B5: a Danish export imports without anyone renaming a header -------------
     // The whole point of the widening is that the operator drops the file the CRM gave them.
     // So this drives the real page: drop a Danish CSV, read back what the mapping picked, and
@@ -820,57 +895,84 @@ async function run() {
       if (row) await fetch(`${BASE}/api/prospects/${row.id}`, { method: 'DELETE', headers: { 'x-pulse-token': token } });
     }
 
-    // --- B4: an empty queue after a real session celebrates, it does not scold ----
-    // "Nobody matches" is an error screen; a finished queue is not. The whole difference is
-    // whether the agent actually dialled today, so this block controls that one number.
+    // --- B4: the completion card tells the truth ----------------------------------
+    // "Nobody matches" is an error state; a finished queue is not. Three cases have to be
+    // told apart, and only one of them is a trophy:
+    //   a search that matches nothing, leads remain -> "Nobody matches"
+    //   leads left that cannot be dialled           -> still not finished, but they say so
+    //   the tab genuinely empty                     -> "Queue completed"
     const doneApp = loadApp(JSDOM, VirtualConsole, '#dialer');
-
-    // Earlier blocks already placed calls, so "today" is not empty any more. Zeroing it in the
-    // stats response is how the fresh-morning case gets tested on a warm fixture — installed
-    // here, synchronously, because the app asks for stats the moment it mounts.
-    let zeroToday = true;
-    const doneFetch = doneApp.window.fetch;
-    doneApp.window.fetch = async (input, init) => {
-      const res = await doneFetch(input, init);
-      const url = typeof input === 'string' ? input : String(input?.url || '');
-      if (zeroToday && /\/api\/stats/.test(url)) {
-        const data = await res.json();
-        return { ok: true, status: 200, json: async () => ({ ...data, today: { ...data.today, dials: 0, pickups: 0, conversations: 0, meetings: 0, talkSec: 0 } }) };
-      }
-      return res;
-    };
-
     await wait(() => doneApp.window.document.querySelector('.q-item'), 15000, 'dialer queue');
     await ensureListener(doneApp);
     const dbox = doneApp.window.document.querySelector('.search input');
-    setB.call(dbox, 'zzz-nothing-matches-this-filter-zzz');
-    dbox.dispatchEvent(new doneApp.window.Event('input', { bubbles: true }));
-    await sleep(1400);
-    check(!doneApp.window.document.querySelector('.queue-done'),
-      'an empty result with no dials on the clock stays the plain empty state');
-    check(/Nobody matches/.test(doneApp.window.document.body.textContent), 'and it still says exactly that');
+    const token4 = (await (await fetch(`${BASE}/api/session`)).json()).token;
+    const clearAll = () => fetch(`${BASE}/api/prospects/clear`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-pulse-token': token4 } });
+    const seed = (name, phone) => fetch(`${BASE}/api/prospects`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-pulse-token': token4 },
+      body: JSON.stringify(phone === undefined ? { name } : { name, phone }),
+    }).then((r) => r.json());
+    const applySearch = async (needle) => { setB.call(dbox, needle); dbox.dispatchEvent(new doneApp.window.Event('input', { bubbles: true })); await sleep(1300); };
+    const bannerName = () => (doneApp.window.document.querySelector('.banner-name')?.textContent || '').trim();
 
-    // Same empty queue, but now the day has work in it: filter to one real lead, dial it, and
-    // classify it off the tab.
-    await post('/api/prospects', { name: 'Queue Finish Fixture', phone: '20998877' });
-    setB.call(dbox, 'Queue Finish Fixture');
-    dbox.dispatchEvent(new doneApp.window.Event('input', { bubbles: true }));
-    await sleep(1400);
-    check(/Queue Finish Fixture/.test(doneApp.window.document.body.textContent), 'the fixture is on screen');
+    // Earlier blocks have already dialled today, so the day has work on the clock.
+    await clearAll();
+    await seed('Skip Target', '20334466');
+    const phoneless = await seed('No Number Lead');
+
+    // (a) A search that matches nothing, with leads still in the tab, is NOT a completed queue.
+    await applySearch('zzz-nothing-matches-this-filter-zzz');
+    check(!doneApp.window.document.querySelector('.queue-done'),
+      'a search that matches nothing is not celebrated as a completed queue');
+    check(/Nobody matches/.test(doneApp.window.document.body.textContent), 'it is still the plain empty state');
+    check(!/Queue completed/.test(doneApp.window.document.body.textContent), 'and nothing claims the queue is done');
+
+    // (b) A lead with no number is visible and fixable, never a wall you hit with C.
+    await applySearch('');
+    await wait(() => doneApp.window.document.querySelectorAll('.q-item').length >= 2, 10000, 'both fixture leads in the queue');
+    const queueText = doneApp.window.document.body.textContent;
+    check(/no number/i.test(queueText), 'the phoneless lead is marked as undiallable in the queue');
+    check(/without a number/.test(doneApp.window.document.querySelector('.queue-meta')?.textContent || ''),
+      `the meta line counts them ("${(doneApp.window.document.querySelector('.queue-meta')?.textContent || '').trim().slice(0, 60)}")`);
+    const phonelessItem = [...doneApp.window.document.querySelectorAll('.q-item')].find((el) => /No Number Lead/.test(el.textContent));
+    check(!!phonelessItem, 'the phoneless lead is queued (it is just ranked last)');
+    phonelessItem.dispatchEvent(new doneApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(600);
+    check(/No Number Lead/.test(bannerName()), `and it can be selected ("${bannerName()}")`);
+    check(!!doneApp.window.document.querySelector('.banner-phone-chip.missing'),
+      'the banner offers the missing number as a field to fill in');
+    doneApp.drain();
+    key(doneApp.window, 'c');
+    await sleep(1500);
+    const callsPlaced = doneApp.drain().filter((c) => /^POST \/api\/prospects\/\d+\/call$/.test(`${c.method} ${c.path}`));
+    check(callsPlaced.length === 0, `no call is logged for a lead with no number (${callsPlaced.length})`);
+    check(/Skip Target/.test(bannerName()), `C skips to the next diallable lead ("${bannerName()}")`);
+    check(/no phone number/i.test(doneApp.window.document.body.textContent), 'and says why it skipped');
+
+    // (c) Work the diallable lead off the tab. The one that is left cannot be dialled, so this
+    //     is *not* completion — the queue still holds a lead, and the UI says exactly that.
     doneApp.drain();
     key(doneApp.window, 'c'); await sleep(1800);
-    check(count(doneApp.drain(), DIAL) === 1, 'C places the call for the completion flow');
+    check(count(doneApp.drain(), DIAL) === 1, 'the diallable lead is dialled');
     key(doneApp.window, 'h'); await sleep(900);
-    check(!!doneApp.window.document.querySelector('.classify-modal'), 'H opens the classification modal');
-    zeroToday = false;
     key(doneApp.window, '6'); // conversation: moves the lead to "contacted", off the "new" tab
-    await sleep(2200);
-    await wait(() => doneApp.window.document.querySelector('.queue-done'), 12000, 'queue completion card');
+    await sleep(2400);
+    check(!doneApp.window.document.querySelector('.queue-done'),
+      'a queue whose only remainder cannot be dialled is not silently declared complete');
+    check(/no number/i.test(doneApp.window.document.body.textContent), 'the undiallable lead is still on screen, marked');
 
+    // (d) Move it out of the tab and the tab really is empty — now, and only now, the trophy.
+    await fetch(`${BASE}/api/prospects/${phoneless.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', 'x-pulse-token': token4 },
+      body: JSON.stringify({ stage: 'lost' }),
+    });
+    // The window has no idea an out-of-band PATCH happened, so poke the queue: assigning the
+    // same value to a controlled input fires no React change event, so it takes two steps.
+    await applySearch('zzz-refresh');
+    await applySearch('');
+    await wait(() => doneApp.window.document.querySelector('.queue-done'), 12000, 'completion card');
     const doneCard = doneApp.window.document.querySelector('.queue-done');
-    const txt = doneCard ? doneCard.textContent || '' : '';
-    check(/Queue completed/.test(txt), `the card congratulates rather than reporting an error ("${txt.slice(0, 42).replace(/\s+/g, ' ')}…")`);
-    check(!/Nobody matches/.test(doneApp.window.document.body.textContent), 'and the error-flavoured empty state is gone');
+    const txt = doneCard.textContent || '';
+    check(/Queue completed/.test(txt), `the empty tab is celebrated ("${txt.slice(0, 60).replace(/\s+/g, ' ')}…")`);
     check(/dials today/.test(txt) && /conversations/.test(txt) && /meetings booked/.test(txt),
       'it summarises the session: dials, conversations and meetings');
     const dialsShown = Number((txt.match(/(\d+)\s*dials today/) || [])[1]);
@@ -880,7 +982,6 @@ async function run() {
     check(acts.some((a) => /Import more leads/i.test(a)), 'it offers importing more leads');
     check(acts.some((a) => /Switch to all prospects/i.test(a)), 'it offers the wider queue');
 
-    // The dashboard action has to actually navigate, not just be decorative.
     const dBtn = [...doneCard.querySelectorAll('button')].find((b) => /dashboard/i.test(b.textContent));
     dBtn.dispatchEvent(new doneApp.window.MouseEvent('click', { bubbles: true }));
     await sleep(1400);
@@ -888,6 +989,28 @@ async function run() {
       `Review today's dashboard leaves the dialer (${doneApp.window.location.hash})`);
     check(doneApp.jsErrors.length === 0, `no jsdom errors on the completion screen (${doneApp.jsErrors.join(' | ').slice(0, 140)})`);
     doneApp.dom.window.close();
+
+    // (e) A brand-new day: an empty queue with nothing dialled yet is not an achievement.
+    {
+      const freshApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+      const freshFetch = freshApp.window.fetch;
+      freshApp.window.fetch = async (input, init) => {
+        const res = await freshFetch(input, init);
+        const url = typeof input === 'string' ? input : String(input?.url || '');
+        if (/\/api\/stats/.test(url)) {
+          const data = await res.json();
+          return { ok: true, status: 200, json: async () => ({ ...data, today: { ...data.today, dials: 0, pickups: 0, conversations: 0, meetings: 0, talkSec: 0 } }) };
+        }
+        return res;
+      };
+      await wait(() => freshApp.window.document.querySelector('.empty-state, .queue-done, .q-item, .queue-list'), 15000, 'the dialer to settle');
+      await sleep(1200);
+      check(!freshApp.window.document.querySelector('.queue-done'),
+        'a fresh morning with no dials yet is not shown as a completed queue');
+      check(!/Queue completed/.test(freshApp.window.document.body.textContent), 'and nothing claims the queue is done');
+      check(freshApp.jsErrors.length === 0, `no jsdom errors on the fresh-morning state (${freshApp.jsErrors.join(' | ').slice(0, 120)})`);
+      freshApp.dom.window.close();
+    }
 
     // Leave the fixture as it was found: no sink, no captured mail, no stale setting.
     await fetch(`${BASE}/api/email/outbox`, { method: 'DELETE' });

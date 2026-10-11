@@ -2,7 +2,18 @@
 // Verifies safety properties (idempotency, invertibility, boundaries, prototype pollution invariance)
 // across 10,000+ seeded pseudo-random iterations.
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+// The telephony service resolves its defaults (default_country_code, caller_id_pool, …) from
+// the settings table, so this suite needs a migrated throwaway database exactly like the unit
+// and hardening layers do. Without this bootstrap the suite silently depends on an ambient
+// data/dialer.db and crashes with "no such table: settings" on a fresh checkout.
+const tmp = process.env.DATA_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-prop-'));
+process.env.DATA_DIR = tmp;
+require('../../server/db/migrate').run();
+
 const telephony = require('../../server/services/telephonyService');
 const { encodeCursor, decodeCursor } = require('../../server/services/prospectService');
 const { escapeCsv, neutralizeFormula } = require('../../server/services/csvService');

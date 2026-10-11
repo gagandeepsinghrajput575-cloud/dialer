@@ -24,7 +24,9 @@ const ok = (msg) => { passed++; console.log(`    \u2713 ${msg}`); };
 const bad = (msg) => { failures++; console.log(`    \u274C ${msg}`); };
 const check = (cond, msg) => (cond ? ok(msg) : bad(msg));
 
-function loadApp(JSDOM, VirtualConsole, hash) {
+// opts.nodeFormData swaps jsdom's FormData/File for node's before the bundle runs, which is the
+// only way a FormData upload made *inside* the app can reach node's fetch (two different realms).
+function loadApp(JSDOM, VirtualConsole, hash, opts = {}) {
   const assets = path.join(REPO, 'dist', 'assets');
   const html = fs.readFileSync(path.join(REPO, 'dist', 'index.html'), 'utf8')
     .replace(/<script type="module"[^>]*><\/script>/, '');
@@ -54,7 +56,11 @@ function loadApp(JSDOM, VirtualConsole, hash) {
   const calls = [];
   window.fetch = (input, init = {}) => {
     const url = typeof input === 'string' ? new URL(input, BASE).href : String(input);
-    if (url.startsWith(`${BASE}/api`)) calls.push({ method: (init.method || 'GET').toUpperCase(), path: url.slice(BASE.length) });
+    if (url.startsWith(`${BASE}/api`)) {
+      // The body matters for the import/bulk checks — the mapping and the id list are the
+      // whole point of those requests, and asserting on status codes alone would miss them.
+      calls.push({ method: (init.method || 'GET').toUpperCase(), path: url.slice(BASE.length), body: typeof init.body === 'string' ? init.body : null });
+    }
     return fetch(url, init);
   };
   window.matchMedia = window.matchMedia || ((q) => ({ matches: false, media: q, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }));
@@ -63,6 +69,7 @@ function loadApp(JSDOM, VirtualConsole, hash) {
   window.Element.prototype.scrollIntoView = function () {};
   window.__pulseImportMeta = { url: `${BASE}/assets/${entry}`, resolve: () => '' };
   window.confirm = () => true;
+  if (opts.nodeFormData) { window.FormData = FormData; window.File = File; window.Blob = Blob; }
   window.eval(bundle);
   return { dom, window, jsErrors, consoleErrors, drain: () => calls.splice(0) };
 }
@@ -133,7 +140,14 @@ async function run() {
     check(mashed === 1, `three C presses in one tick place exactly 1 call (got ${mashed})`);
 
     // --- A1b: a held key (OS auto-repeat) must not stack calls --------------------
-    key(app.window, 'h'); await sleep(700); key(app.window, 'Escape'); await sleep(900);
+    // Escape no longer wipes the call by itself — it opens the discard confirmation. That is
+    // the point of the guard, so the flow confirms before moving on.
+    key(app.window, 'h'); await sleep(700);
+    key(app.window, 'Escape'); await sleep(500);
+    check(!!app.window.document.querySelector('.confirm-modal'), 'Escape on a call asks before discarding it');
+    key(app.window, 'Enter');
+    await sleep(1100);
+    check(!app.window.document.querySelector('.confirm-modal'), 'confirming the discard closes the prompt');
     app.drain();
     key(app.window, 'c'); key(app.window, 'c', { repeat: true }); key(app.window, 'c', { repeat: true });
     await sleep(1500);
@@ -176,8 +190,27 @@ async function run() {
     await sleep(1200);
     check(!!app.window.document.querySelector('.classify-modal'), 'H opens the classification modal');
     check(who() === nameBefore, `arrows pressed with H do not skip the prospect while classifying ("${nameBefore}" -> "${who()}")`);
+
+    // --- A2c: a stray Escape must not throw away a finished call -------------------
+    // This is the regression the guard exists for: Escape used to delete the call (and its talk
+    // time) with no prompt at all. Keeping it must leave the record intact.
+    app.drain();
     key(app.window, 'Escape');
-    await sleep(900);
+    await sleep(500);
+    const confirmOpen = !!app.window.document.querySelector('.confirm-modal');
+    check(confirmOpen, 'Escape while classifying opens the discard confirmation instead of deleting the call');
+    const keepBtn = [...app.window.document.querySelectorAll('.confirm-modal button')].find((b) => /Keep/i.test(b.textContent));
+    check(!!keepBtn, 'the confirmation offers a way to keep the call');
+    if (keepBtn) keepBtn.dispatchEvent(new app.window.MouseEvent('click', { bubbles: true }));
+    await sleep(600);
+    check(!app.window.document.querySelector('.confirm-modal'), 'Keep Call dismisses the confirmation');
+    check(!!app.window.document.querySelector('.classify-modal'), 'and the call is still there, waiting to be classified');
+    const strayDiscards = app.drain().filter((c) => /^POST \/api\/calls\/\d+\/discard$/.test(`${c.method} ${c.path}`)).length;
+    check(strayDiscards === 0, `nothing was discarded behind the agent\u2019s back (got ${strayDiscards})`);
+
+    // Now really discard it, so the fixture moves on with no call left open.
+    key(app.window, 'Escape'); await sleep(400);
+    key(app.window, 'Enter'); await sleep(1000);
 
     // --- A3b: typing in a field must never trigger a shortcut ---------------------
     const search = app.window.document.querySelector('.search input');
@@ -443,8 +476,13 @@ async function run() {
     check(!!wApp.window.document.querySelector('.classify-modal'), 'H hangs up the in-browser call and opens classification');
     await sleep(700);
     check(!wApp.window.document.querySelector('.webrtc-badge'), 'hanging up clears the live badge (the microphone is released)');
-    key(wApp.window, 'Escape');
-    await sleep(900);
+    // Discarding is confirmed now, by design — the in-browser call ends on the same terms.
+    wApp.drain();
+    key(wApp.window, 'Escape'); await sleep(400);
+    check(!!wApp.window.document.querySelector('.confirm-modal'), 'the in-browser hang-up also confirms before discarding');
+    key(wApp.window, 'Enter'); await sleep(1000);
+    const confirmedDiscards = wApp.drain().filter((c) => /^POST \/api\/calls\/\d+\/discard$/.test(`${c.method} ${c.path}`)).length;
+    check(confirmedDiscards === 1, `confirming discards the call exactly once (got ${confirmedDiscards})`);
     check(wApp.jsErrors.length === 0, `no jsdom errors driving the in-browser softphone (${wApp.jsErrors.join(' | ').slice(0, 150)})`);
     wApp.dom.window.close();
 
@@ -617,6 +655,239 @@ async function run() {
     }
     check(cApp.jsErrors.length === 0, `no jsdom errors in the composer's captured flow (${cApp.jsErrors.join(' | ').slice(0, 140)})`);
     cApp.dom.window.close();
+
+    // --- B1: multi-select and the bulk action bar --------------------------------
+    // The fixture list is long by now, so the filter narrows it to the rows this block owns.
+    await put('/api/settings', { dry_run: '1', telephony_mode: 'softphone' });
+    for (const n of ['Bulk Alpha', 'Bulk Beta', 'Bulk Gamma']) {
+      await post('/api/prospects', { name: n, phone: `20${Math.floor(100000 + Math.random() * 899999)}`, company: 'Bulk Co' });
+    }
+    const bApp = loadApp(JSDOM, VirtualConsole, '#prospects');
+    await wait(() => bApp.window.document.querySelector('.table tbody tr'), 15000, 'prospects table');
+    const bbox = bApp.window.document.querySelector('.search input');
+    const setB = Object.getOwnPropertyDescriptor(bApp.window.HTMLInputElement.prototype, 'value').set;
+    setB.call(bbox, 'Bulk ');
+    bbox.dispatchEvent(new bApp.window.Event('input', { bubbles: true }));
+    await sleep(900);
+    const rowsNow = () => [...bApp.window.document.querySelectorAll('.table tbody tr')];
+    check(rowsNow().length === 3, `the three bulk fixtures are visible (${rowsNow().length} rows)`);
+
+    const checks = () => [...bApp.window.document.querySelectorAll('.row-check')];
+    check(checks().length === 4, `each row has a checkbox, plus the header select-all (${checks().length})`);
+    check(!bApp.window.document.querySelector('.bulk-bar'), 'no bulk bar while nothing is selected');
+
+    const boxFor = (name) => {
+      const row = rowsNow().find((tr) => new RegExp(name).test(tr.textContent));
+      return row?.querySelector('.row-check');
+    };
+    const alpha = boxFor('Bulk Alpha');
+    check(!!alpha, 'the first bulk fixture has a selectable checkbox');
+    alpha.click();
+    await sleep(400);
+    check(!!bApp.window.document.querySelector('.bulk-bar'), 'ticking one row reveals the bulk action bar');
+    check(/\b1\b\s*selected/.test(bApp.window.document.querySelector('.bulk-count')?.textContent || ''),
+      `the bar shows how many are selected ("${(bApp.window.document.querySelector('.bulk-count')?.textContent || '').trim()}")`);
+
+    // Selecting a row must not also open the drawer — the checkbox is not the row.
+    check(!bApp.window.document.querySelector('.drawer'), 'ticking a checkbox does not open the prospect drawer');
+
+    boxFor('Bulk Beta')?.click();
+    await sleep(300);
+    check(/\b2\b\s*selected/.test(bApp.window.document.querySelector('.bulk-count')?.textContent || ''),
+      'ticking a second row updates the count');
+
+    // Header checkbox = every visible row.
+    checks()[0].click();
+    await sleep(400);
+    check(/\b3\b\s*selected/.test(bApp.window.document.querySelector('.bulk-count')?.textContent || ''),
+      'the header checkbox selects every visible row');
+    checks()[0].click();
+    await sleep(1000);
+    check(!bApp.window.document.querySelector('.bulk-bar'), 'un-ticking the header clears the selection and hides the bar');
+
+    // --- B2: bulk stage move ------------------------------------------------------
+    boxFor('Bulk Alpha')?.click();
+    boxFor('Bulk Beta')?.click();
+    await sleep(400);
+    const stageSelect = bApp.window.document.querySelector('.bulk-stage select');
+    check(!!stageSelect, 'the bar carries a Move to stage control');
+    const wanted = 'meeting';
+    stageSelect.value = wanted;
+    stageSelect.dispatchEvent(new bApp.window.Event('change', { bubbles: true }));
+    await sleep(1500);
+    // GET /api/prospects answers with the array itself, not an envelope.
+    const allProspects = () => fetch(`${BASE}/api/prospects`).then((r) => r.json());
+    const moved = (await allProspects()).filter((p) => /Bulk (Alpha|Beta)/.test(p.name));
+    check(moved.length === 2 && moved.every((p) => p.stage === wanted),
+      `both selected prospects moved to "${wanted}" (${moved.map((p) => p.stage).join(', ')})`);
+    check(!bApp.window.document.querySelector('.bulk-bar'), 'the selection clears once the action lands');
+
+    // --- B3: delete selected requires a confirmation -----------------------------
+    boxFor('Bulk Gamma')?.click();
+    await sleep(400);
+    const delBtn = [...bApp.window.document.querySelectorAll('.bulk-bar button')].find((b) => /Delete selected/.test(b.textContent));
+    check(!!delBtn, 'the bar carries a Delete selected action');
+    bApp.drain();
+    delBtn.dispatchEvent(new bApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(500);
+    const confirmModal = bApp.window.document.querySelector('.confirm-modal');
+    check(!!confirmModal, 'Delete selected asks for confirmation first');
+    check(/Delete 1 prospect/i.test(confirmModal?.textContent || ''), `the prompt names how many ("${(confirmModal?.textContent || '').slice(0, 60).replace(/\s+/g, ' ')}…")`);
+    check(/cannot be undone/i.test(confirmModal?.textContent || ''), 'and says it cannot be undone');
+    const beforeCount = (await allProspects()).length;
+
+    const cancelBtn = [...confirmModal.querySelectorAll('button')].find((b) => /Keep them/i.test(b.textContent));
+    check(!!cancelBtn, 'the confirmation can be cancelled');
+    cancelBtn.dispatchEvent(new bApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(700);
+    check(!bApp.window.document.querySelector('.confirm-modal'), 'cancelling closes the prompt');
+    const afterCancel = (await allProspects()).length;
+    check(afterCancel === beforeCount, `cancelling deletes nothing (${beforeCount} -> ${afterCancel})`);
+
+    const delBtn2 = [...bApp.window.document.querySelectorAll('.bulk-bar button')].find((b) => /Delete selected/.test(b.textContent));
+    delBtn2.dispatchEvent(new bApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(500);
+    const confirmBtn = [...bApp.window.document.querySelectorAll('.confirm-modal button')].find((b) => /^Delete \d+$/.test(b.textContent.trim()));
+    check(!!confirmBtn, 'confirming is a separate, deliberate button');
+    confirmBtn.dispatchEvent(new bApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(1800);
+    const afterDelete = await allProspects();
+    check(afterDelete.length === beforeCount - 1, `the selected prospect is gone (${beforeCount} -> ${afterDelete.length})`);
+    check(!afterDelete.some((p) => p.name === 'Bulk Gamma'), 'and it is the one that was selected');
+    check(afterDelete.some((p) => p.name === 'Bulk Alpha'), 'the unselected rows are untouched');
+    await sleep(900);
+    check(!bApp.window.document.querySelector('.bulk-bar'), 'the bulk bar goes away when the selection empties');
+    check(bApp.jsErrors.length === 0, `no jsdom errors while driving bulk actions (${bApp.jsErrors.join(' | ').slice(0, 140)})`);
+    bApp.dom.window.close();
+
+    // --- B5: a Danish export imports without anyone renaming a header -------------
+    // The whole point of the widening is that the operator drops the file the CRM gave them.
+    // So this drives the real page: drop a Danish CSV, read back what the mapping picked, and
+    // import it — notes included.
+    const impApp = loadApp(JSDOM, VirtualConsole, '#import', { nodeFormData: true });
+    await wait(() => impApp.window.document.querySelector('.dropzone'), 15000, 'import dropzone');
+    const dansk = 'Navn,Kontaktperson,Telefon,Firma,Stilling,Postnr,Noter\n'
+      + 'Freja Nielsen,,+45 30 44 55 66,Nordisk A/S,Indkøbschef,2100,Mødt på messe i Herning\n'
+      + 'Søren Bak,,+45 30 44 55 67,Bak & Søn,Direktør,8000,Henvist af Sofie\n';
+    const drop = new impApp.window.Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [new File([dansk], 'kunder.csv', { type: 'text/csv' })] } });
+    impApp.window.document.querySelector('.dropzone').dispatchEvent(drop);
+    await wait(() => impApp.window.document.querySelector('.map-row'), 15000, 'column mapping step');
+
+    const mapRows = [...impApp.window.document.querySelectorAll('.map-row')];
+    const picked = {};
+    for (const row of mapRows) picked[row.querySelector('span').textContent.trim()] = row.querySelector('select').value;
+    check(picked['Full name'] === 'Navn', `Navn maps to Full name ("${picked['Full name']}")`);
+    check(picked['Phone number'] === 'Telefon', `Telefon maps to Phone number ("${picked['Phone number']}")`);
+    check(picked['Company'] === 'Firma', `Firma maps to Company ("${picked['Company']}")`);
+    check(picked['Job title'] === 'Stilling', `Stilling maps to Job title ("${picked['Job title']}")`);
+    check(picked['Location'] === 'Postnr', `Postnr maps to Location ("${picked['Location']}")`);
+    check(picked.Notes === 'Noter', `Noter maps to Notes ("${picked.Notes}")`);
+    check(!picked['Email'], 'the file has no email column, so Email is left unmapped rather than guessed at');
+
+    impApp.drain();
+    const runBtn = [...impApp.window.document.querySelectorAll('button')].find((b) => /Import \d+ prospects/.test(b.textContent));
+    check(!!runBtn, 'the import button counts the rows it is about to add');
+    runBtn.dispatchEvent(new impApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(2500);
+    const bulkCall = impApp.drain().find((c) => c.path === '/api/prospects/bulk');
+    check(!!bulkCall, 'the page posts the parsed rows to the bulk endpoint');
+    const sent = bulkCall?.body ? JSON.parse(bulkCall.body) : {};
+    check(sent.mapping?.notes === 'Noter', `the Notes column is part of the mapping ("${sent.mapping?.notes}")`);
+    check(sent.mapping?.phone === 'Telefon' && sent.mapping?.name === 'Navn', 'and so are the Danish name and phone columns');
+    check(Array.isArray(sent.rows) && sent.rows.length === 2, `both rows travel with it (${sent.rows?.length})`);
+    await wait(() => impApp.window.document.querySelector('.done-card'), 12000, 'import done screen');
+    const doneTxt = impApp.window.document.querySelector('.done-card').textContent || '';
+    check(/2 prospects imported/.test(doneTxt), `the done screen reports the import ("${doneTxt.slice(0, 46).replace(/\s+/g, ' ')}…")`);
+    check(/2 notes carried over/.test(doneTxt), 'and that the notes came with them');
+    check(impApp.jsErrors.length === 0, `no jsdom errors while importing a Danish file (${impApp.jsErrors.join(' | ').slice(0, 140)})`);
+    impApp.dom.window.close();
+
+    // The imported Danes are real rows now — check the notes landed on the right people, then
+    // remove them so the rest of the run starts where it would have.
+    const token = (await (await fetch(`${BASE}/api/session`)).json()).token;
+    const frejaRow = (await (await fetch(`${BASE}/api/prospects/search?q=Freja%20Nielsen&limit=5`)).json())[0];
+    check(!!frejaRow, 'the Danish row exists in the app');
+    if (frejaRow) {
+      const detail = await (await fetch(`${BASE}/api/prospects/${frejaRow.id}`)).json();
+      check(detail.notes.length === 1 && /Herning/.test(detail.notes[0].body), `the Noter cell became the first note ("${detail.notes[0]?.body}")`);
+      check(detail.extra === '' || !/Herning/.test(String(detail.extra)), 'and it is not also duplicated into the extra details blob');
+      check(detail.company === 'Nordisk A/S' && detail.title === 'Indkøbschef', 'the company and title columns landed too');
+      await fetch(`${BASE}/api/prospects/${frejaRow.id}`, { method: 'DELETE', headers: { 'x-pulse-token': token } });
+    }
+    for (const name of ['Søren Bak']) {
+      const row = (await (await fetch(`${BASE}/api/prospects/search?q=${encodeURIComponent(name)}&limit=5`)).json())[0];
+      if (row) await fetch(`${BASE}/api/prospects/${row.id}`, { method: 'DELETE', headers: { 'x-pulse-token': token } });
+    }
+
+    // --- B4: an empty queue after a real session celebrates, it does not scold ----
+    // "Nobody matches" is an error screen; a finished queue is not. The whole difference is
+    // whether the agent actually dialled today, so this block controls that one number.
+    const doneApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+
+    // Earlier blocks already placed calls, so "today" is not empty any more. Zeroing it in the
+    // stats response is how the fresh-morning case gets tested on a warm fixture — installed
+    // here, synchronously, because the app asks for stats the moment it mounts.
+    let zeroToday = true;
+    const doneFetch = doneApp.window.fetch;
+    doneApp.window.fetch = async (input, init) => {
+      const res = await doneFetch(input, init);
+      const url = typeof input === 'string' ? input : String(input?.url || '');
+      if (zeroToday && /\/api\/stats/.test(url)) {
+        const data = await res.json();
+        return { ok: true, status: 200, json: async () => ({ ...data, today: { ...data.today, dials: 0, pickups: 0, conversations: 0, meetings: 0, talkSec: 0 } }) };
+      }
+      return res;
+    };
+
+    await wait(() => doneApp.window.document.querySelector('.q-item'), 15000, 'dialer queue');
+    await ensureListener(doneApp);
+    const dbox = doneApp.window.document.querySelector('.search input');
+    setB.call(dbox, 'zzz-nothing-matches-this-filter-zzz');
+    dbox.dispatchEvent(new doneApp.window.Event('input', { bubbles: true }));
+    await sleep(1400);
+    check(!doneApp.window.document.querySelector('.queue-done'),
+      'an empty result with no dials on the clock stays the plain empty state');
+    check(/Nobody matches/.test(doneApp.window.document.body.textContent), 'and it still says exactly that');
+
+    // Same empty queue, but now the day has work in it: filter to one real lead, dial it, and
+    // classify it off the tab.
+    await post('/api/prospects', { name: 'Queue Finish Fixture', phone: '20998877' });
+    setB.call(dbox, 'Queue Finish Fixture');
+    dbox.dispatchEvent(new doneApp.window.Event('input', { bubbles: true }));
+    await sleep(1400);
+    check(/Queue Finish Fixture/.test(doneApp.window.document.body.textContent), 'the fixture is on screen');
+    doneApp.drain();
+    key(doneApp.window, 'c'); await sleep(1800);
+    check(count(doneApp.drain(), DIAL) === 1, 'C places the call for the completion flow');
+    key(doneApp.window, 'h'); await sleep(900);
+    check(!!doneApp.window.document.querySelector('.classify-modal'), 'H opens the classification modal');
+    zeroToday = false;
+    key(doneApp.window, '6'); // conversation: moves the lead to "contacted", off the "new" tab
+    await sleep(2200);
+    await wait(() => doneApp.window.document.querySelector('.queue-done'), 12000, 'queue completion card');
+
+    const doneCard = doneApp.window.document.querySelector('.queue-done');
+    const txt = doneCard ? doneCard.textContent || '' : '';
+    check(/Queue completed/.test(txt), `the card congratulates rather than reporting an error ("${txt.slice(0, 42).replace(/\s+/g, ' ')}…")`);
+    check(!/Nobody matches/.test(doneApp.window.document.body.textContent), 'and the error-flavoured empty state is gone');
+    check(/dials today/.test(txt) && /conversations/.test(txt) && /meetings booked/.test(txt),
+      'it summarises the session: dials, conversations and meetings');
+    const dialsShown = Number((txt.match(/(\d+)\s*dials today/) || [])[1]);
+    check(dialsShown >= 1, `the dial count is the real number for today (${dialsShown})`);
+    const acts = [...doneCard.querySelectorAll('button')].map((b) => b.textContent.trim());
+    check(acts.some((a) => /dashboard/i.test(a)), `it offers the dashboard (${acts.slice(0, 5).join(' | ')})`);
+    check(acts.some((a) => /Import more leads/i.test(a)), 'it offers importing more leads');
+    check(acts.some((a) => /Switch to all prospects/i.test(a)), 'it offers the wider queue');
+
+    // The dashboard action has to actually navigate, not just be decorative.
+    const dBtn = [...doneCard.querySelectorAll('button')].find((b) => /dashboard/i.test(b.textContent));
+    dBtn.dispatchEvent(new doneApp.window.MouseEvent('click', { bubbles: true }));
+    await sleep(1400);
+    check(/dashboard/i.test(doneApp.window.location.hash) || !doneApp.window.document.querySelector('.queue-done'),
+      `Review today's dashboard leaves the dialer (${doneApp.window.location.hash})`);
+    check(doneApp.jsErrors.length === 0, `no jsdom errors on the completion screen (${doneApp.jsErrors.join(' | ').slice(0, 140)})`);
+    doneApp.dom.window.close();
 
     // Leave the fixture as it was found: no sink, no captured mail, no stale setting.
     await fetch(`${BASE}/api/email/outbox`, { method: 'DELETE' });

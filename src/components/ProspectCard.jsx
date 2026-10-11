@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock } from 'lucide-react';
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
-import { outcomeMeta, timeAgo } from '../utils.js';
+import { outcomeMeta, phoneIssue, emailIssue, timeAgo } from '../utils.js';
 import EmailComposer from './EmailComposer.jsx';
 
 function CopyBtn({ text }) {
@@ -32,10 +32,24 @@ function Row({ icon: Icon, label, children, extra }) {
 // `onSent` is optional: the card is rendered by the dialer, the drawer and the prospects
 // table, and each of those owns a different timeline to refresh.
 export default function ProspectCard({ p, big = false, onSent }) {
-  const { updateProspect } = useStore();
+  const { updateProspect, toast, settings } = useStore();
   const [mailing, setMailing] = useState(false);
   if (!p) return null;
   const save = (field) => (val) => updateProspect(p.id, { [field]: val });
+
+  // Phone and email are the two fields the dialer actually acts on, so a typo there is not a
+  // cosmetic problem: it is a call that never connects, or a follow-up that bounces. Both are
+  // checked before the round-trip; everything else is free text and saves as typed.
+  const savePhone = (val) => {
+    const issue = phoneIssue(val, settings?.default_country_code);
+    if (issue) return toast(issue, 'error');
+    return updateProspect(p.id, { phone: String(val ?? '').trim() });
+  };
+  const saveEmail = (val) => {
+    const issue = emailIssue(val);
+    if (issue) return toast(issue, 'error');
+    return updateProspect(p.id, { email: String(val ?? '').trim() });
+  };
   const extra = p.extra || {};
   const extraKeys = Object.keys(extra);
   const lastOut = outcomeMeta(p.last_outcome);
@@ -59,7 +73,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
 
       <div className="info-grid">
         <Row icon={Phone} label="Phone" extra={<CopyBtn text={p.phone} />}>
-          <Editable className="phone-big" value={p.phone} placeholder="+45 20 12 34 56" onSave={save('phone')} />
+          <Editable className="phone-big" value={p.phone} placeholder="+45 20 12 34 56" onSave={savePhone} />
         </Row>
         <Row
           icon={Mail}
@@ -75,7 +89,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
             </>
           }
         >
-          <Editable value={p.email} placeholder="name@company.com" onSave={save('email')} />
+          <Editable value={p.email} placeholder="name@company.com" onSave={saveEmail} />
         </Row>
         <Row icon={Building2} label="Company"><Editable value={p.company} placeholder="Company" onSave={save('company')} /></Row>
         <Row icon={MapPin} label="Location"><Editable value={p.location} placeholder="City, Country" onSave={save('location')} /></Row>

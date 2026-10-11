@@ -144,3 +144,73 @@ export function dispatchDialUri(uri) {
     try { window.location.href = uri; return true; } catch { return false; }
   }
 }
+
+// ---- client-side field validation --------------------------------------------------------
+// The server is the authority (it normalizes and rejects), but a rejection that only arrives
+// after a round-trip reads as "the app lost my edit". These mirror the server's rules closely
+// enough to catch the mistake at the keystroke, and they live here so the hero banner, the
+// prospect card and any future inline editor can never disagree about what is valid.
+
+// Same placeholders the server treats as "no value at all", so typing "N/A" clears the field
+// instead of being stored as a phone number.
+const PLACEHOLDERS = new Set(['null', 'undefined', 'n/a', 'na', 'none', '-', '--', 'nil']);
+export function cleanStr(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val).trim();
+  return PLACEHOLDERS.has(s.toLowerCase()) ? '' : s;
+}
+
+// National subscriber length (digits after the country code, no trunk prefix). Denmark only
+// for now, matching the server's NATIONAL_LENGTH table.
+export const NATIONAL_LENGTH = { 45: 8 };
+export const MIN_PHONE_DIGITS = 5;
+
+// A faithful client-side mirror of telephonyService.normalizePhone. It exists so the inline
+// editors can answer "would the server refuse this?" *before* the round-trip; the server stays
+// the authority. Mirroring it exactly — rather than approximating with a digit count — is what
+// stops the UI from blocking an edit the server would happily have stored.
+export function normalizePhoneClient(raw, countryCode = '45') {
+  const s = cleanStr(raw);
+  if (!s) return '';
+  if (/@/.test(s) || /^(sip|tel):/i.test(s)) return s;     // SIP address / dial URI — kept as-is
+  const hasPlus = s.startsWith('+');
+  const digits = s.replace(/\D/g, '');
+  if (!digits || digits.length < MIN_PHONE_DIGITS) return '';
+  const cc = String(countryCode ?? '').replace(/\D/g, '');
+  const len = cc ? NATIONAL_LENGTH[Number(cc)] : undefined;
+
+  if (hasPlus || digits.startsWith('00')) {
+    const intl = digits.startsWith('00') ? digits.slice(2) : digits;
+    if (len && intl.startsWith(cc)) return intl.length === cc.length + len ? `+${intl}` : '';
+    return intl.length >= MIN_PHONE_DIGITS + 1 ? `+${intl}` : '';
+  }
+  if (!cc) return `+${digits}`;
+  const national = digits.replace(/^0+/, '');
+  if (national.startsWith(cc)) {
+    if (len && national.length === cc.length + len) return `+${national}`;
+    if (!len && national.length > 10) return `+${national}`;
+  }
+  if (len && national.length === len) return `+${cc}${national}`;
+  if (!len && national.length <= 10) return `+${cc}${national}`;
+  return digits;
+}
+
+// Returns a human message when the value would be refused (or normalizes to nothing while
+// still looking like a number), and null when it is fine. Clearing a phone is allowed: plenty
+// of leads genuinely have no number yet.
+export function phoneIssue(raw, countryCode = '45') {
+  const given = cleanStr(raw);
+  if (!given) return null;
+  if (/@/.test(given) || /^(sip|tel):/i.test(given)) return null;
+  if (normalizePhoneClient(given, countryCode)) return null;
+  return 'Please enter a valid phone number (e.g. +45 20 12 34 56)';
+}
+
+// Deliberately loose: the point is to catch "name@gmail" and "hello world@x" before they are
+// saved, not to re-implement RFC 5322. Anything with an @ and a dotted domain passes.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/;
+export function emailIssue(raw) {
+  const s = cleanStr(raw);
+  if (!s) return null;                       // clearing an address is allowed
+  return EMAIL_RE.test(s) ? null : 'Please enter a valid email address (e.g. name@company.dk)';
+}

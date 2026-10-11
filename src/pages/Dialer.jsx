@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
   Headphones, RotateCw, FlaskConical, Wifi, Send,
-  Mic, MicOff, Radio, Grid3x3
+  Mic, MicOff, Radio, Grid3x3, Trophy, LayoutDashboard, Repeat, Trash2
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -18,7 +18,7 @@ import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import useServerQueue from '../useServerQueue.js';
 import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex, tabForProspect } from '../queue.js';
-import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
+import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
 
@@ -138,7 +138,7 @@ function QuickAddModal({ onClose, onAdded }) {
 }
 
 export default function Dialer() {
-  const { prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect } = useStore();
+  const { prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect, stats } = useStore();
   const [tab, setTab] = useState('new');
   const [q, setQ] = useState('');
   const [phase, setPhase] = useState('idle'); // idle | dialing | active
@@ -212,6 +212,11 @@ export default function Dialer() {
   const [dtmfOpen, setDtmfOpen] = useState(false);
   const dtmfRef = useRef(false);
   dtmfRef.current = dtmfOpen;
+  // "Discard without logging" throws away the talk time and anything typed during the call, so
+  // it asks first. Confirming is a deliberate second click, never a stray one.
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const confirmDiscardRef = useRef(false);
+  confirmDiscardRef.current = confirmDiscard;
 
   const webrtc = useWebRtc({
     enabled: isWebrtc,
@@ -466,7 +471,24 @@ export default function Dialer() {
     openClassification();
   }, [callId, active, openClassification]);
 
-  // Discard an active or hung-up call without polluting stats or history
+  // Inline edits in the hero banner. The server normalizes anyway, but a rejection that only
+  // arrives after the round-trip reads as "the app ate my edit", so an obviously wrong value
+  // is refused here with the reason, and the field keeps what the agent typed.
+  const savePhone = useCallback((raw) => {
+    const issue = phoneIssue(raw, settings?.default_country_code);
+    if (issue) { toast(issue, 'error'); return null; }
+    return updateProspect(active?.id, { phone: String(raw ?? '').trim() });
+  }, [active?.id, settings?.default_country_code, toast, updateProspect]);
+
+  // The guard in front of the discard. Also the Escape path out of the classification modal,
+  // which is exactly the case that used to wipe a call with one keystroke.
+  const requestDiscard = useCallback(() => {
+    // Nothing logged yet means nothing to lose, and the modal was cancelled before it opened.
+    if (!callId && !classifyRef.current) return;
+    setConfirmDiscard(true);
+  }, [callId]);
+
+  // The actual discard. Only ever reached from the confirmation.
   const handleDiscardCall = useCallback(async () => {
     const idToDiscard = classifyRef.current ? classifyRef.current.callId : callId;
     if (idToDiscard) {
@@ -483,6 +505,7 @@ export default function Dialer() {
     setLaunched(false);
     setQuickNote('');
     setDtmfOpen(false);
+    setConfirmDiscard(false);
     // Discarding must not leave the microphone open in the in-browser mode.
     webrtcRef.current?.reset();
     toast('Call discarded');
@@ -626,10 +649,24 @@ export default function Dialer() {
       const k = typeof e.key === 'string' && e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
       // Modal keyboard handling
+      // The discard confirmation owns the keyboard while it is up.
+      if (confirmDiscardRef.current) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setConfirmDiscard(false);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          handleDiscardCall();
+        }
+        return;
+      }
+
       if (classifyRef.current || classifyModal) {
         if (e.key === 'Escape') {
           e.preventDefault();
-          handleDiscardCall();
+          // Escape backs out of classifying; it must not be the keystroke that throws the call
+          // away, so it opens the same confirmation the button does.
+          requestDiscard();
         } else if (e.key === 'Enter') {
           e.preventDefault();
           commitClassification('conversation', targetStage, customNote);
@@ -702,7 +739,7 @@ export default function Dialer() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer, toast]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, requestDiscard, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer, toast, setDtmfOpen]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -717,6 +754,13 @@ export default function Dialer() {
 
   const calling = phase !== 'idle';
   const dry = settings?.dry_run === '1';
+  // "Finished" has to mean finished, not filtered-to-nothing: the queue must be empty *and*
+  // the agent must have actually dialled today, or this is just an empty search wearing a trophy.
+  const today = stats?.today || null;
+  const doneToday = Boolean(today && today.dials > 0 && !items.length && !loading);
+  // Tab labels are chips ("To call"), not prose — spelling them into a sentence produced
+  // "Every lead in to call has been called". These are the same three queues, said out loud.
+  const tabProse = { new: 'the call list', follow: 'the follow-up list', all: 'the list' }[tab] || 'this queue';
   const softphone = softphoneLabel(settings?.telephony_mode);
   const cc = ccLabel(settings?.default_country_code);
   const proto = settings?.softphone_protocol === 'tel' ? 'tel' : 'sip';
@@ -794,11 +838,11 @@ export default function Dialer() {
                   <div className="banner-contacts">
                     {active.phone ? (
                       <span className="banner-phone-chip">
-                        <Phone size={14} /> <Editable className="banner-phone-edit" value={active.phone} placeholder="+45 20 12 34 56" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value={active.phone} placeholder="+45 20 12 34 56" onSave={savePhone} />
                       </span>
                     ) : (
                       <span className="banner-phone-chip missing">
-                        <Phone size={14} /> <Editable className="banner-phone-edit" value="" placeholder="Click to add phone (+45 20 12 34 56)" onSave={(v) => updateProspect(active.id, { phone: v })} />
+                        <Phone size={14} /> <Editable className="banner-phone-edit" value="" placeholder="Click to add phone (+45 20 12 34 56)" onSave={savePhone} />
                       </span>
                     )}
                     {active.email ? (
@@ -961,7 +1005,7 @@ export default function Dialer() {
                 <div className="row gap justify-between call-actions">
                   <div className="row gap">
                     <button className="btn danger sm" onClick={hangUp} title={dry ? 'Hang up and classify (H)' : `End the call in ${softphone}, then classify here (H)`}><PhoneOff size={14} /> Hang Up & Classify</button>
-                    <button className="link-btn" onClick={handleDiscardCall}><SkipForward size={13} /> Discard without logging</button>
+                    <button className="link-btn" onClick={requestDiscard}><SkipForward size={13} /> Discard without logging</button>
                   </div>
                   {!isWebrtc && !dry && dial?.uri && (
                     <a
@@ -1023,6 +1067,57 @@ export default function Dialer() {
               <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email{isWebrtc ? ' · ' : ' · '}<kbd>M</kbd>{isWebrtc ? ' mute' : ''} · {isWebrtc ? <><kbd>D</kbd> keypad · </> : <><kbd>R</kbd> re-launch softphone · </>}<kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
             </div>
           </>
+        ) : doneToday ? (
+          /* END OF QUEUE — not an empty search. Every lead in this tab is finished, and the
+             agent has actually dialled today, so this is the reward screen rather than an
+             error screen. */
+          <motion.div className="glass queue-done" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} transition={{ type: 'spring', stiffness: 260, damping: 24 }}>
+            <motion.div className="qd-trophy" initial={{ scale: 0, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: 'spring', stiffness: 300, damping: 12, delay: 0.08 }}>
+              <Trophy size={34} strokeWidth={2.4} />
+            </motion.div>
+            <h2>Queue completed! 🎉</h2>
+            <p className="muted">
+              {q
+                ? `Nothing in ${tabProse} matches “${q}” — and everything else in it is dialed.`
+                : `Every lead in ${tabProse} has been called. Take the win, then decide what is next.`}
+            </p>
+
+            <div className="qd-stats">
+              <div><b>{today.dials}</b><span>dials today</span></div>
+              <div><b>{today.conversations}</b><span>conversations</span></div>
+              <div><b>{today.meetings}</b><span>meetings booked</span></div>
+              <div><b>{fmtDur(today.talkSec || 0)}</b><span>talk time</span></div>
+            </div>
+
+            <div className="qd-actions">
+              <button className="btn primary glow" onClick={() => setView('dashboard')}>
+                <LayoutDashboard size={15} /> Review today&apos;s dashboard
+              </button>
+              {tab !== 'all' && (
+                <button className="btn" onClick={() => handleTabChange('all')}>
+                  <Repeat size={15} /> Switch to all prospects
+                </button>
+              )}
+              <button className="btn" onClick={() => setView('import')}>
+                <Upload size={15} /> Import more leads
+              </button>
+              {q && (
+                <button className="link-btn" onClick={() => setQ('')}>Clear the search “{q}”</button>
+              )}
+            </div>
+
+            <div className="confetti" aria-hidden>
+              {Array.from({ length: 22 }).map((_, i) => (
+                <motion.i
+                  key={i}
+                  style={{ left: `${(i * 41) % 100}%`, background: ['#8b5cf6', '#22d3ee', '#34d399', '#f472b6', '#fbbf24'][i % 5] }}
+                  initial={{ y: -16, opacity: 1, rotate: 0 }}
+                  animate={{ y: 300, opacity: 0, rotate: 300 + i * 18 }}
+                  transition={{ duration: 1.7 + (i % 5) * 0.2, delay: 0.2 + (i % 8) * 0.05, ease: 'easeIn' }}
+                />
+              ))}
+            </div>
+          </motion.div>
         ) : (
           <Empty icon={<Search size={30} />} title="Nobody matches" sub="Change the tab, clear the search, or add a prospect to start calling.">
             <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={16} /> Add a prospect</button>
@@ -1075,6 +1170,38 @@ export default function Dialer() {
         )}
       </AnimatePresence>
 
+      {/* DISCARD CONFIRMATION — the one screen between a stray click and a lost call */}
+      <AnimatePresence>
+        {confirmDiscard && (
+          <>
+            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setConfirmDiscard(false)} />
+            <motion.div
+              className="modal glass confirm-modal"
+              initial={{ opacity: 0, scale: 0.95, y: -12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: -8 }}
+              role="dialog"
+              aria-label="Confirm discard"
+            >
+              <div className="modal-head">
+                <h3><SkipForward size={16} /> Discard this call?</h3>
+                <button className="icon-btn" onClick={() => setConfirmDiscard(false)} title="Keep the call (Esc)"><X size={16} /></button>
+              </div>
+              <p className="muted small">
+                Talk time and any notes typed during this call will not be saved.
+                {sec > 0 ? ` You have ${fmtDur(sec)} on the clock.` : ''}
+              </p>
+              <div className="modal-foot">
+                <button className="btn" onClick={() => setConfirmDiscard(false)} autoFocus>Keep Call</button>
+                <button className="btn danger" onClick={handleDiscardCall}>
+                  <Trash2 size={14} /> Discard Call
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
       {/* Remote audio for the in-browser call. Hidden, but a real <audio> element — WebRTC
           audio only plays through a media element the document actually holds. */}
       <audio ref={webrtc.audioRef} autoPlay playsInline className="webrtc-audio" />
@@ -1083,14 +1210,14 @@ export default function Dialer() {
       <AnimatePresence>
         {classifyModal && (
           <>
-            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={handleDiscardCall} />
+            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={requestDiscard} />
             <motion.div className="modal classify-modal" initial={{ opacity: 0, scale: 0.95, y: -20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: -20 }}>
               <div className="modal-head">
                 <div>
                   <div className="eyebrow" style={{ color: '#38bdf8' }}>Call Finished ({fmtDur(classifyModal.duration)})</div>
                   <h3 style={{ fontSize: '20px', fontWeight: 800 }}>How would you classify {classifyModal.prospect.name || 'this prospect'}?</h3>
                 </div>
-                <button className="icon-btn" onClick={handleDiscardCall} title="Discard call"><X size={16} /></button>
+                <button className="icon-btn" onClick={requestDiscard} title="Discard call"><X size={16} /></button>
               </div>
 
               <div className="classify-content">
@@ -1144,7 +1271,7 @@ export default function Dialer() {
               </div>
 
               <div className="modal-foot">
-                <button className="btn danger" onClick={handleDiscardCall} title="Delete this call record without logging">Discard call</button>
+                <button className="btn danger" onClick={requestDiscard} title="Delete this call record without logging">Discard call</button>
                 <button
                   className="btn primary"
                   onClick={() => commitClassification('conversation', targetStage, customNote)}

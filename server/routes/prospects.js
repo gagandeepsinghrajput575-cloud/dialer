@@ -12,6 +12,10 @@ router.get('/search', validate(s.searchQuery, 'query'), c.search);
 router.get('/follow-ups', c.followUps);
 router.post('/', validate(s.prospectCreateStrict), c.create);
 router.post('/bulk', validate(s.bulkImport), c.bulk);
+// Multi-select actions from the prospects table. Writes, so the standing session-token guard
+// covers them exactly like every other mutation.
+router.post('/bulk-stage', validate(s.bulkStage), c.bulkStage);
+router.post('/bulk-delete', validate(s.bulkDelete), c.bulkDelete);
 router.post('/clear', c.clearAll);
 
 router.get('/:id', c.detail);

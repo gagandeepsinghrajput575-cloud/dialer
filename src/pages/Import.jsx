@@ -4,18 +4,27 @@ import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, Ph
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 
+// Every header a Danish sales list actually arrives with. The English patterns stay first
+// because they are the common case, but Navn/Telefon/Firma/Stilling/By used to fall through to
+// "skip" and had to be matched by hand on every single import.
 const TARGETS = [
-  { id: 'name', label: 'Full name', re: /^(full[\s_-]*)?name$|contact[\s_-]*name|prospect/i },
-  { id: 'first_name', label: 'First name', re: /first[\s_-]*name|fname|given/i },
-  { id: 'last_name', label: 'Last name', re: /last[\s_-]*name|lname|surname|family/i },
-  { id: 'phone', label: 'Phone number', re: /phone|mobile|cell|number|contact[\s_-]*no|tel|whatsapp/i },
-  { id: 'email', label: 'Email', re: /e-?mail/i },
-  { id: 'company', label: 'Company', re: /company|organi[sz]ation|business|employer|firm/i },
-  { id: 'title', label: 'Job title', re: /title|designation|role|position/i },
-  { id: 'location', label: 'Location', re: /location|city|address|country|region|state/i },
-  { id: 'website', label: 'Website', re: /website|url|web|domain|linkedin/i },
+  { id: 'name', label: 'Full name', re: /^(full[\s_-]*)?name$|contact[\s_-]*name|prospect|navn|kontaktperson|kunde/i },
+  { id: 'first_name', label: 'First name', re: /first[\s_-]*name|fname|given|fornavn/i },
+  { id: 'last_name', label: 'Last name', re: /last[\s_-]*name|lname|surname|family|efternavn/i },
+  { id: 'phone', label: 'Phone number', re: /phone|mobile|cell|number|contact[\s_-]*no|tel|whatsapp|telefon|tlf|mobil|mobilnummer|hovednummer/i },
+  { id: 'email', label: 'Email', re: /e-?mail|mailadresse/i },
+  { id: 'company', label: 'Company', re: /company|organi[sz]ation|business|employer|firm|firma|virksomhed|selskab/i },
+  { id: 'title', label: 'Job title', re: /title|designation|role|position|stilling|titel|rolle/i },
+  { id: 'location', label: 'Location', re: /location|city|address|country|region|state|by|postnr|postnummer|adresse|kommune/i },
+  { id: 'website', label: 'Website', re: /website|url|web|domain|linkedin|hjemmeside|webadresse|domæne/i },
+  // Notes are a real field now: the text is written to the prospect's note feed at import
+  // instead of being dumped into "More details" and forgotten.
+  { id: 'notes', label: 'Notes', re: /note|notes|comment|comments|noter|bemærkning|bemærkninger|kommentar/i },
 ];
 
+// Two passes. The first is strict: a header only wins if it matches nothing earlier in the
+// list better. The second pass catches the leftovers with a looser "contains the word" test,
+// so a column called "Telefonnummer (mobil)" is not silently skipped while "Navn" is taken.
 function guess(headers) {
   const m = {};
   const used = new Set();
@@ -26,7 +35,32 @@ function guess(headers) {
   return m;
 }
 
-const SAMPLE = 'Name,Phone,Email,Company,Title,City,Notes from list\nMette Jensen,20123456,mette@nordiclogistik.dk,Nordic Logistik,Driftschef,København,Met at expo\nAnders Nielsen,+4522345678,anders@brightlab.dk,BrightLab ApS,Founder,Aarhus,Referred by Sofie\n';
+// The looser patterns used by the fallback pass, in priority order. Deliberately conservative:
+// 'by' is a location word but also appears inside many English headers, so it is anchored.
+const LOOSE = [
+  ['phone', /(telefon|tlf|mobil|phone|tel)[\s_-]?(nr|nummer|number|no)?/i],
+  ['email', /(e-?mail|mail)/i],
+  ['company', /(firma|virksomhed|selskab|company|organisation|organization)/i],
+  ['name', /(navn|name)/i],
+  ['title', /(stilling|titel|rolle|title|position)/i],
+  ['location', /^(by|city|adresse|address|postnr|postnummer|kommune|location)$/i],
+  ['notes', /(noter?|bemærkning|kommentar|notes?|comment)/i],
+];
+
+function guessLoose(headers, alreadyMapped) {
+  const m = { ...alreadyMapped };
+  const used = new Set(Object.values(m).filter(Boolean));
+  for (const [id, re] of LOOSE) {
+    if (m[id]) continue;
+    const h = headers.find((x) => !used.has(x) && re.test(x));
+    if (h) { m[id] = h; used.add(h); }
+  }
+  return m;
+}
+
+// The sample is in Danish on purpose: this is a Danish dialer, and the file you export from a
+// Danish CRM is what the mapper has to cope with.
+const SAMPLE = 'Navn,Telefon,E-mail,Firma,Stilling,By,Noter\nMette Jensen,20123456,mette@nordiclogistik.dk,Nordic Logistik,Driftschef,København,Mødt på messe i Herning\nAnders Nielsen,+4522345678,anders@brightlab.dk,BrightLab ApS,Stifter,Aarhus,Henvist af Sofie\n';
 
 export default function ImportPage() {
   const { refreshProspects, refreshStats, setView, toast } = useStore();
@@ -45,7 +79,8 @@ export default function ImportPage() {
     try {
       const d = await api.parseFile(file);
       if (!d.rows.length) throw new Error('That file has no rows.');
-      setData(d); setMapping(guess(d.headers)); setStep(1);
+      const first = guess(d.headers);
+      setData(d); setMapping(guessLoose(d.headers, first)); setStep(1);
     } catch (e) { toast(e.message, 'error'); }
     setBusy(false);
   }, [toast]);
@@ -95,7 +130,11 @@ export default function ImportPage() {
           <motion.div key="s1" className="map-grid" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
             <div className="glass pad-lg">
               <div className="panel-title"><FileSpreadsheet size={16} /> {data.filename} <em>{data.rows.length} rows</em></div>
-              <p className="muted small">We matched what we could. Check each field and fix anything that's off.</p>
+              <p className="muted small">
+                We matched what we could. Check each field and fix anything that's off.
+                A <b>Notes</b> column becomes each prospect's first note, so the context you
+                exported with the list arrives with it.
+              </p>
               <div className="map-list">
                 {TARGETS.map((t, i) => (
                   <motion.div key={t.id} className="map-row" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.03 }}>
@@ -130,7 +169,10 @@ export default function ImportPage() {
           <motion.div key="s2" className="glass done-card" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }}>
             <motion.div className="done-ico" initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 260, damping: 14, delay: 0.1 }}><Check size={38} strokeWidth={3} /></motion.div>
             <h2>{result.added} prospects imported</h2>
-            <p className="muted">{result.dupes} duplicates skipped · {result.empty} empty rows ignored</p>
+            <p className="muted">
+              {result.dupes} duplicates skipped · {result.empty} empty rows ignored
+              {result.notesCreated ? ` · ${result.notesCreated} notes carried over` : ''}
+            </p>
             <div className="row gap center-row">
               <button className="btn" onClick={() => { setStep(0); setData(null); }}>Import another</button>
               <button className="btn primary glow" onClick={() => setView('dialer')}><PhoneCall size={16} /> Start dialing</button>

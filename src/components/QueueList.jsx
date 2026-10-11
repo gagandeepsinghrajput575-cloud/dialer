@@ -86,6 +86,9 @@ export default function QueueList({
               <b>{p.name || '(no name)'}</b>
               <span>{p.company || p.phone}</span>
             </div>
+            {/* A lead with no number cannot be dialled, so say so on the row rather than
+                letting the agent discover it by pressing C. */}
+            {!p.phone && <span className="q-nonum" title="No phone number yet — add one to dial this lead">no number</span>}
             {isDone ? <Check size={16} className="q-check" /> : <i className="dot" style={{ background: stageMeta(p.stage).color }} />}
           </button>
         );

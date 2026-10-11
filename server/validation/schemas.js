@@ -23,7 +23,12 @@ const phoneish = nullable(z.union([z.string().max(64), z.number()]));
 // else used to be stored verbatim and then quietly turned into Invalid Date downstream.
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 const datetime = (max = 40) => z.string().max(max).regex(DATETIME_RE, 'Use YYYY-MM-DD or YYYY-MM-DD HH:MM');
-const nullableDatetime = (max = 40) => z.union([datetime(max), z.null()]);
+// Clearing a date is a real action: the follow-up field posts '' when the agent empties it, and
+// before this the API answered 400, so a scheduled follow-up could never be un-scheduled from
+// the UI — it just kept re-ranking to the top of the queue at score 95. An empty string now
+// means the same thing as null: no follow-up.
+const nullableDatetime = (max = 40) => z.union([datetime(max), z.literal(''), z.null()])
+  .transform((v) => (v === '' ? null : v));
 
 const prospectCreate = z.object({
   name: maybeStr(200),

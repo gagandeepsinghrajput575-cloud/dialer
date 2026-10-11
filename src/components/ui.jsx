@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { initials, gradFor, stageMeta, STAGES } from '../utils.js';
 
@@ -36,7 +36,15 @@ export function StagePicker({ value, onChange }) {
 export function Editable({ value, onSave, placeholder, className = '', type = 'text', ...rest }) {
   const [v, setV] = useState(value ?? '');
   useEffect(() => setV(value ?? ''), [value]);
-  const commit = () => { if ((v ?? '') !== (value ?? '')) onSave(v); };
+  // Escape used to call setV(old) and then blur() in the same tick — and because the blur
+  // handler was the closure from the *current* render, it still saw the typed text and saved
+  // it. The field looked reverted for a moment and then came back saved. The flag makes the
+  // cancellation reach the commit.
+  const cancelled = useRef(false);
+  const commit = () => {
+    if (cancelled.current) { cancelled.current = false; setV(value ?? ''); return; }
+    if ((v ?? '') !== (value ?? '')) onSave(v);
+  };
   return (
     <input
       {...rest}
@@ -44,9 +52,12 @@ export function Editable({ value, onSave, placeholder, className = '', type = 't
       className={`inline-edit ${className}`}
       value={v}
       placeholder={placeholder}
-      onChange={(e) => setV(e.target.value)}
+      onChange={(e) => { cancelled.current = false; setV(e.target.value); }}
       onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setV(value ?? ''); e.currentTarget.blur(); } }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') { cancelled.current = true; setV(value ?? ''); e.currentTarget.blur(); }
+      }}
     />
   );
 }

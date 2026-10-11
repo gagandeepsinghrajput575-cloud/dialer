@@ -102,7 +102,11 @@ export default function Dashboard() {
           <div className="panel-title">Last 7 days</div>
           <div className="bars">
             {stats.week.map((d, i) => {
-              const day = new Date(d.date).toLocaleDateString(undefined, { weekday: 'short' });
+              // 'YYYY-MM-DD' is a calendar date, so build a local Date from its parts.
+              // new Date('…Z') would re-interpret it as an instant and shift the weekday back
+              // a day for anyone west of Greenwich.
+              const [dy, dm, dd] = String(d.date).split('-').map(Number);
+              const day = new Date(dy, (dm || 1) - 1, dd || 1).toLocaleDateString(undefined, { weekday: 'short' });
               return (
                 <div key={d.date} className="bar-col" title={`${d.dials} dials, ${d.conversations} conversations`}>
                   <div className="bar-stack">

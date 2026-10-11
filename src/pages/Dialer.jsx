@@ -5,11 +5,12 @@ import {
   CalendarCheck, OctagonX, Circle, Phone, PhoneCall, Search,
   ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
-  Headphones, RotateCw, FlaskConical, Wifi
+  Headphones, RotateCw, FlaskConical, Wifi, Send
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
+import EmailComposer, { VerifyBadge } from '../components/EmailComposer.jsx';
 import QueueList from '../components/QueueList.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
@@ -18,6 +19,13 @@ import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex,
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
+
+// A call that ended well is exactly the moment a follow-up email is worth sending, so the
+// dialer offers it in one click instead of making the agent find the prospect again.
+// Outcomes are call results; stages are pipeline moves — the agent can land in either.
+const FOLLOWUP_OUTCOMES = new Set(['conversation', 'meeting_booked']);
+const FOLLOWUP_STAGES = new Set(['interested', 'followup', 'meeting']);
+const shouldOfferFollowUp = (outcomeId, stage) => FOLLOWUP_OUTCOMES.has(outcomeId) || FOLLOWUP_STAGES.has(stage);
 const TABS = [
   { id: 'new', label: 'To call', test: (p) => p.stage === 'new' },
   { id: 'follow', label: 'Follow-ups', test: (p) => ['contacted', 'interested', 'followup'].includes(p.stage) },
@@ -99,6 +107,16 @@ export default function Dialer() {
   const [targetStage, setTargetStage] = useState('');
   const [customNote, setCustomNote] = useState('');
   const [showAdd, setShowAdd] = useState(false);
+  // { id, name, noteText } of the prospect being emailed, or null. Holding the target rather
+  // than a bare boolean means the follow-up prompt can still address a prospect the agent has
+  // already navigated away from.
+  const [mailing, setMailing] = useState(null);
+  const [verdict, setVerdict] = useState(null);    // email verdict for the banner chip
+  const [followUp, setFollowUp] = useState(null);  // { id, name, noteText } — one-click follow-up
+  // Mirrored like phaseRef/classifyRef: the composer's open state is read inside the keydown
+  // handler, which must not act on a stale value.
+  const mailingRef = useRef(false);
+  mailingRef.current = mailing;
 
   const sec = useTimer(phase === 'active');
   const secRef = useRef(0);
@@ -180,6 +198,22 @@ export default function Dialer() {
   const { detail, reload } = useDetail(active?.id);
   const idx = active ? items.findIndex((p) => p.id === active.id) : -1;
 
+  // The banner chip shows the live verdict for the active address, so the agent knows whether
+  // a follow-up can even arrive before opening the composer. A verdict is cached per address —
+  // it costs a DNS lookup and the answer does not change mid-session.
+  const verdictCache = useRef(new Map());
+  useEffect(() => {
+    const addr = String(active?.email || '').trim();
+    if (!addr) { setVerdict(null); return undefined; }
+    if (verdictCache.current.has(addr)) { setVerdict(verdictCache.current.get(addr)); return undefined; }
+    if (verdictCache.current.size > 200) verdictCache.current.clear();   // bounded
+    let cancelled = false;
+    api.verifyEmail(addr)
+      .then((v) => { verdictCache.current.set(addr, v); if (!cancelled) setVerdict(v); })
+      .catch(() => { if (!cancelled) setVerdict(null); });
+    return () => { cancelled = true; };
+  }, [active?.email]);
+
   // Auto-scroll the active queue item into view smoothly
   useEffect(() => {
     if (activeItemRef.current) {
@@ -249,6 +283,7 @@ export default function Dialer() {
     dialLockRef.current = true;
     setPhaseSafe('dialing');
     setLaunched(false);
+    setFollowUp(null);   // a stale "send a follow-up" prompt must not outlive the next call
     try {
       // Hold a cross-tab mutex around the server call only. Two open tabs used to be able to
       // dial the same prospect and log two calls; now the second tab is refused instead.
@@ -356,6 +391,13 @@ export default function Dialer() {
       setCallId(null);
       setDial(null);
       setLaunched(false);
+      // A good call is the one moment the follow-up email writes itself. Offer it while the
+      // details are still fresh, carrying the note the agent just typed into the draft.
+      if (shouldOfferFollowUp(outcomeId, chosenStage) && modal.prospect.email) {
+        // Carry the address with the prompt: the agent may have auto-advanced to the next
+        // prospect by the time they click, so the prompt cannot re-derive it from `active`.
+        setFollowUp({ id: pid, name: modal.prospect.name, email: modal.prospect.email, noteText: noteToSave });
+      }
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
@@ -396,6 +438,9 @@ export default function Dialer() {
       setDial(null);
       setLaunched(false);
       clearQuickNote();
+      if (shouldOfferFollowUp(outcome, null) && active.email) {
+        setFollowUp({ id: finished, name: active.name, email: active.email, noteText: noteToSave });
+      }
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcome !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
@@ -421,6 +466,14 @@ export default function Dialer() {
       toast(e.message, 'error');
     }
   };
+
+  // Opens the in-app composer for whatever prospect is on screen — the banner chip, the E
+  // shortcut and the post-call follow-up prompt all funnel through here so they cannot drift.
+  const openComposer = useCallback((target, noteText) => {
+    const p = target || active;
+    if (!p?.email) { toast('This prospect has no email address yet', 'error'); return; }
+    setMailing({ id: p.id, name: p.name, noteText });
+  }, [active, toast]);
 
   // Quick add from dialer queue
   const handleQuickAdd = async (newProspectData) => {
@@ -464,6 +517,10 @@ export default function Dialer() {
         return;
       }
 
+      // The composer is a modal: while it is open the dialer must stop listening, or a
+      // keystroke aimed at the email also places a call behind the dialog.
+      if (mailingRef.current) return;
+
       // Normal stage shortcuts
       if (k === 'c') {
         e.preventDefault();
@@ -482,13 +539,20 @@ export default function Dialer() {
       } else if (k === 'r' && phaseRef.current === 'active') {
         e.preventDefault();
         relaunchSoftphone();
+      } else if (k === 'e') {
+        // Email the active prospect. Shift/CapsLock work for free — `k` is already lowered,
+        // and the input/textarea guard above keeps this out of the search and notes boxes.
+        if (active?.email) {
+          e.preventDefault();
+          openComposer(active);
+        }
       } else if (/^[1-8]$/.test(k) && phaseRef.current === 'active') {
         logOutcome(OUTCOMES[Number(k) - 1].id);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -576,9 +640,16 @@ export default function Dialer() {
                       </span>
                     )}
                     {active.email ? (
-                      <a href={`mailto:${active.email}`} className="banner-email-chip" title="Click to email">
+                      <button
+                        type="button"
+                        className="banner-email-chip"
+                        title={`Email ${active.email} in the app (E)`}
+                        onClick={() => openComposer(active)}
+                      >
                         <Mail size={14} /> <span>{active.email}</span>
-                      </a>
+                        {verdict && <VerifyBadge result={verdict} compact />}
+                        <kbd className="chip-kbd">E</kbd>
+                      </button>
                     ) : (
                       <span className="banner-email-chip muted"><Mail size={14} /> <span>No email listed</span></span>
                     )}
@@ -732,10 +803,37 @@ export default function Dialer() {
               </AnimatePresence>
             </div>
 
+            {/* POST-CALL FOLLOW-UP PROMPT — one click from a good call to a written email */}
+            <AnimatePresence>
+              {followUp && !mailing && (
+                <motion.div
+                  className="glass followup-prompt"
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                >
+                  <Mail size={17} />
+                  <div className="followup-txt">
+                    <b>Send {followUp.name || 'this prospect'} a follow-up email?</b>
+                    <small>The draft already carries the call outcome, your notes and the meeting link.</small>
+                  </div>
+                  <div className="row gap">
+                    <button
+                      className="btn primary sm"
+                      onClick={() => openComposer({ id: followUp.id, name: followUp.name, email: followUp.email }, followUp.noteText)}
+                    >
+                      <Send size={14} /> Send follow-up email
+                    </button>
+                    <button className="btn sm" onClick={() => setFollowUp(null)}>Not now</button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* FULL DETAILS CARD */}
             <div className="glass card-wrap">
-              <ProspectCard p={active} big />
-              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>R</kbd> re-launch softphone · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
+              <ProspectCard p={active} big onSent={() => Promise.all([reload(), queue.refresh()])} />
+              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email · <kbd>R</kbd> re-launch softphone · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
             </div>
           </>
         ) : (
@@ -841,6 +939,24 @@ export default function Dialer() {
               </div>
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* IN-APP EMAIL COMPOSER — no mailto: hand-off, the send stays inside the cockpit */}
+      <AnimatePresence>
+        {mailing && (
+          <EmailComposer
+            key={mailing.id}
+            prospectId={mailing.id}
+            recipient={mailing.name}
+            noteText={mailing.noteText}
+            onSent={async () => {
+              // The send appended a note server-side; pull the timeline and the queue back so
+              // the email is visible immediately instead of after a reload.
+              await Promise.all([reload(), queue.refresh()]);
+            }}
+            onClose={() => setMailing(null)}
+          />
         )}
       </AnimatePresence>
 

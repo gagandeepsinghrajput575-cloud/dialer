@@ -16,6 +16,7 @@ function renderEmail(prospectId, { noteText = '', at = null } = {}) {
   const note = String(noteText || '').trim() || notes.listByProspect(prospectId).slice(0, 1).map((n) => n.body).join('\n');
 
   const when = at || prospect.follow_up_at || callService.suggestFollowUp(call.outcome || 'conversation');
+  const agentName = settings.get('agent_name') || '[dit navn]';
   const values = {
     name: (prospect.name || '').split(' ')[0] || 'der',
     full_name: prospect.name || '',
@@ -26,7 +27,13 @@ function renderEmail(prospectId, { noteText = '', at = null } = {}) {
     notes: note || 'Som aftalt finder du det korte oplæg vedhæftet.',
     outcome: callService.OUTCOME_LABEL[call.outcome] || 'snakken',
     follow_up: String(when).slice(0, 16),
-    agent: settings.get('agent_name') || '[dit navn]',
+    // `agent` is what the shipped default template uses; `agent_name` is the explicit alias
+    // so a hand-written template can say either without a surprise blank line.
+    agent: agentName,
+    agent_name: agentName,
+    // The meeting link used to be appended after rendering, so `{{meet_link}}` inside a
+    // custom template came out literally. It is a real placeholder now.
+    meet_link: settings.get('meet_link') || '',
   };
 
   // Only real own properties are substituted — `{{constructor}}`/`{{toString}}` are left

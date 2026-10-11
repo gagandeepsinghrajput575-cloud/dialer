@@ -850,6 +850,39 @@ async function run() {
   assert.strictEqual(st1.json.configured, true, 'SMTP is configured once credentials exist');
   assert.strictEqual(st1.json.host, 'smtp.gmail.com');
 
+  // The standing meeting link is injected once — not twice when the template already places it.
+  const draftWithMeet = await req('POST', `/api/email/prospects/${mailProspect.json.id}/draft`, {});
+  assert.strictEqual(draftWithMeet.status, 200);
+  const meetOccurrences = draftWithMeet.json.body.split('https://meet.google.com/abc-defg-hij').length - 1;
+  assert.strictEqual(meetOccurrences, 1, `the meet link appears exactly once (got ${meetOccurrences})`);
+  assert.ok(draftWithMeet.json.placeholders.includes('meet_link'), 'meet_link is an advertised placeholder');
+  assert.ok(draftWithMeet.json.placeholders.includes('agent_name'), 'agent_name is an advertised placeholder');
+
+  // A custom template that places {{meet_link}} itself must still not duplicate it, and no
+  // placeholder may survive into the body.
+  await req('PUT', '/api/settings', {
+    agent_name: 'Gagan',
+    followup_email_template: 'Hej {{name}} fra {{company}} ({{title}})\nMøde: {{meet_link}}\n/ {{agent_name}}',
+  });
+  const custom = await req('POST', `/api/email/prospects/${mailProspect.json.id}/draft`, { noteText: 'Snakkede om priser' });
+  assert.strictEqual(custom.status, 200);
+  assert.ok(custom.json.body.includes('Gagan'), '{{agent_name}} is substituted end-to-end');
+  assert.strictEqual(custom.json.body.split('https://meet.google.com/abc-defg-hij').length - 1, 1,
+    'a template that places {{meet_link}} does not get a second copy appended');
+  assert.ok(!/\{\{/.test(custom.json.body), 'no placeholder is left literal in the draft body');
+  // Put the shipped template back — the settings PUT stores exactly what it is given, so a
+  // null here would leave an empty template behind for every later group.
+  await req('PUT', '/api/settings', {
+    agent_name: '',
+    followup_email_template: require('../server/config/defaults').DEFAULT_FOLLOWUP_EMAIL,
+  });
+
+  // A subject carrying CRLF is inert — it must not become a header. (send() refuses before
+  // the network when SMTP is unconfigured, so the sanitizer is asserted directly here.)
+  const headerProbe = require('../server/services/emailService');
+  assert.strictEqual(headerProbe.sanitizeHeader('Hej\r\nBcc: attacker@evil.dk'), 'Hej Bcc: attacker@evil.dk',
+    'CRLF in a header is neutralised, not executed');
+
   await req('DELETE', `/api/email/prospects/${mailProspect.json.id}/draft`, {});
   await req('DELETE', `/api/prospects/${mailProspect.json.id}`);
   await req('PUT', '/api/settings', { smtp_host: '', smtp_user: '', smtp_from: '', meet_link: null });

@@ -1,5 +1,6 @@
 const settings = require('../repositories/settingsRepo');
 const telephony = require('../services/telephonyService');
+const emailService = require('../services/emailService');
 const backup = require('../db/backup');
 const path = require('path');
 const { backupDir } = require('../config/env');
@@ -10,12 +11,17 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const get = asyncHandler(async (req, res) => res.json(settings.publicView()));
 
 const put = asyncHandler(async (req, res) => {
+  // The SMTP transport is pooled and cached, so editing the credentials has to tear it down
+  // or a corrected password would never be tried until the next restart.
+  let smtpTouched = false;
   for (const key of SETTING_KEYS) {
     if (!(key in req.body)) continue;
     // A blank secret means "keep what is already stored".
     if (SECRET_KEYS[key] && !String(req.body[key] ?? '').trim()) continue;
+    if (key.startsWith('smtp_')) smtpTouched = true;
     settings.set(key, typeof req.body[key] === 'boolean' ? (req.body[key] ? '1' : '0') : req.body[key]);
   }
+  if (smtpTouched) emailService.invalidateTransport();
   res.json({ ok: true, settings: settings.publicView(), sampleDialUri: telephony.sampleDialUri() });
 });
 

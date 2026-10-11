@@ -37,9 +37,18 @@ function Inner({ id }) {
           </button>
         </div>
       )}
-      {mailing && <EmailComposer prospectId={id} recipient={p.name} onClose={() => setMailing(false)} />}
+      {mailing && (
+        <EmailComposer
+          prospectId={id}
+          recipient={p.name}
+          // The send logs a note; pull it in so the timeline below the composer is already
+          // up to date when the modal closes.
+          onSent={() => reload()}
+          onClose={() => setMailing(false)}
+        />
+      )}
       <div className="drawer-body">
-        <ProspectCard p={p} />
+        <ProspectCard p={p} onSent={() => reload()} />
         <Notes pid={id} notes={detail?.notes || []} reload={reload} />
         <CallHistory calls={detail?.calls || []} />
       </div>

@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2, Loader2 } from 'lucide-react';
+import { Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2, Loader2, Mail } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { Avatar, Empty, StageBadge } from '../components/ui.jsx';
+import EmailComposer from '../components/EmailComposer.jsx';
 import { STAGES, timeAgo } from '../utils.js';
 
 function AddModal({ onClose }) {
@@ -46,6 +47,7 @@ export default function Prospects() {
   const [q, setQ] = useState('');
   const [stage, setStage] = useState('all');
   const [adding, setAdding] = useState(false);
+  const [mailTo, setMailTo] = useState(null);   // { id, name } being emailed straight from the row
 
   const rows = useMemo(() => {
     const n = q.trim().toLowerCase();
@@ -98,6 +100,15 @@ export default function Prospects() {
                     <td>
                       <div className="row gap sm" style={{ justifyContent: 'flex-end' }}>
                         <button className="btn sm primary" disabled={p.dnc || !p.phone} onClick={(e) => { e.stopPropagation(); openInDialer(p.id); }} title="Dial in active queue"><Phone size={13} /> Call</button>
+                        {p.email && (
+                          <button
+                            className="icon-btn sm"
+                            title={`Email ${p.email} in the app`}
+                            onClick={(e) => { e.stopPropagation(); setMailTo({ id: p.id, name: p.name }); }}
+                          >
+                            <Mail size={13} />
+                          </button>
+                        )}
                         <button className="icon-btn sm danger" title="Delete prospect" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete ${p.name || 'this prospect'}?`)) deleteProspect(p.id); }}><Trash2 size={13} /></button>
                       </div>
                     </td>
@@ -111,6 +122,19 @@ export default function Prospects() {
         </div>
       )}
       <AnimatePresence>{adding && <AddModal onClose={() => setAdding(false)} />}</AnimatePresence>
+
+      {/* 1-click email from the row, without leaving the table */}
+      <AnimatePresence>
+        {mailTo && (
+          <EmailComposer
+            key={mailTo.id}
+            prospectId={mailTo.id}
+            recipient={mailTo.name}
+            onSent={refreshProspects}
+            onClose={() => setMailTo(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -538,6 +538,51 @@ input[type='date'].inline-edit { color-scheme: dark; }
   background: rgba(255, 255, 255, 0.05);
   border-color: var(--line);
 }
+/* The chip is a button now (it opens the in-app composer) — keep it looking like the anchor
+   it replaced, and give it the focus ring the anchor never needed. */
+button.banner-email-chip {
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.banner-email-chip:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+button.banner-email-chip:disabled { cursor: not-allowed; }
+.banner-email-chip .verify-badge { margin-left: 2px; }
+.chip-kbd {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(2, 6, 23, 0.35);
+  color: #bae6fd;
+  margin-left: 4px;
+}
+
+/* Post-call follow-up prompt: offered right after a good call, dismissed in one click. */
+.followup-prompt {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  margin-top: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.08);
+  color: #bae6fd;
+}
+.followup-prompt .followup-txt { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.followup-prompt .followup-txt b { color: #e0f2fe; font-size: 14px; }
+.followup-prompt .followup-txt small { color: var(--muted); font-size: 12.5px; }
+.followup-prompt .row { flex: none; }
+@media (max-width: 720px) {
+  .followup-prompt { flex-direction: column; align-items: stretch; }
+  .followup-prompt .row { justify-content: flex-end; }
+}
 .banner-phone-chip {
   display: inline-flex;
   align-items: center;

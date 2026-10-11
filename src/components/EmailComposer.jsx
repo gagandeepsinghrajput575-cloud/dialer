@@ -28,7 +28,11 @@ export function VerifyBadge({ result, compact }) {
   );
 }
 
-export default function EmailComposer({ prospectId, recipient, initial, onClose }) {
+// `noteText` seeds the server-side template with the call the agent just finished, so the
+// draft arrives already carrying the outcome, the notes summary and the meeting link.
+// `onSent` lets every host (dialer, drawer, card, table) refresh its own timeline — the
+// composer cannot know which panels are showing this prospect.
+export default function EmailComposer({ prospectId, recipient, initial, noteText, onClose, onSent }) {
   const { toast, refreshProspects } = useStore();
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -47,7 +51,7 @@ export default function EmailComposer({ prospectId, recipient, initial, onClose 
     (async () => {
       try {
         const [draft, status] = await Promise.all([
-          prospectId ? api.emailDraft(prospectId, {}) : Promise.resolve(null),
+          prospectId ? api.emailDraft(prospectId, noteText ? { noteText } : {}) : Promise.resolve(null),
           api.emailStatus(),
         ]);
         if (!alive) return;
@@ -65,7 +69,7 @@ export default function EmailComposer({ prospectId, recipient, initial, onClose 
       if (alive) setLoading(false);
     })();
     return () => { alive = false; };
-  }, [prospectId, initial, toast]);
+  }, [prospectId, initial, noteText, toast]);
 
   // Verify as they type, but only once they stop — a DNS lookup per keystroke is wasteful.
   const scheduleCheck = useCallback((email) => {
@@ -138,7 +142,11 @@ export default function EmailComposer({ prospectId, recipient, initial, onClose 
         force,
       });
       toast(`Sent to ${r.accepted?.join(', ') || f.to}`);
-      if (prospectId) refreshProspects();
+      // Refresh the prospect list, then hand off to the host so it can reload the notes and
+      // call history the send was just appended to. Order matters: the note exists server-side
+      // by the time send() resolves, so both reads see it.
+      if (prospectId) await refreshProspects();
+      try { await onSent?.(r); } catch { /* a host refresh must never break the send path */ }
       onClose?.(true);
     } catch (e) {
       toast(e.message, 'error');

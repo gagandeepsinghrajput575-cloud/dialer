@@ -4,6 +4,7 @@ import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, Shie
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
 import { outcomeMeta, timeAgo } from '../utils.js';
+import EmailComposer from './EmailComposer.jsx';
 
 function CopyBtn({ text }) {
   const [ok, setOk] = useState(false);
@@ -28,8 +29,11 @@ function Row({ icon: Icon, label, children, extra }) {
   );
 }
 
-export default function ProspectCard({ p, big = false }) {
+// `onSent` is optional: the card is rendered by the dialer, the drawer and the prospects
+// table, and each of those owns a different timeline to refresh.
+export default function ProspectCard({ p, big = false, onSent }) {
   const { updateProspect } = useStore();
+  const [mailing, setMailing] = useState(false);
   if (!p) return null;
   const save = (field) => (val) => updateProspect(p.id, { [field]: val });
   const extra = p.extra || {};
@@ -57,7 +61,20 @@ export default function ProspectCard({ p, big = false }) {
         <Row icon={Phone} label="Phone" extra={<CopyBtn text={p.phone} />}>
           <Editable className="phone-big" value={p.phone} placeholder="+45 20 12 34 56" onSave={save('phone')} />
         </Row>
-        <Row icon={Mail} label="Email" extra={<><CopyBtn text={p.email} />{p.email && <a className="icon-btn sm" href={`mailto:${p.email}`} title="Send email"><Mail size={14} /></a>}</>}>
+        <Row
+          icon={Mail}
+          label="Email"
+          extra={
+            <>
+              <CopyBtn text={p.email} />
+              {p.email && (
+                <button type="button" className="icon-btn sm" title={`Email ${p.email} in the app`} onClick={() => setMailing(true)}>
+                  <Mail size={14} />
+                </button>
+              )}
+            </>
+          }
+        >
           <Editable value={p.email} placeholder="name@company.com" onSave={save('email')} />
         </Row>
         <Row icon={Building2} label="Company"><Editable value={p.company} placeholder="Company" onSave={save('company')} /></Row>
@@ -89,6 +106,15 @@ export default function ProspectCard({ p, big = false }) {
         <input type="checkbox" checked={!!p.dnc} onChange={(e) => updateProspect(p.id, { dnc: e.target.checked })} />
         <span>Mark as Do Not Call (blocks the Call button)</span>
       </label>
+
+      {mailing && (
+        <EmailComposer
+          prospectId={p.id}
+          recipient={p.name}
+          onSent={onSent}
+          onClose={() => setMailing(false)}
+        />
+      )}
     </motion.div>
   );
 }

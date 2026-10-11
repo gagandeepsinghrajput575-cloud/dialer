@@ -269,61 +269,140 @@ function smtpConfig() {
   };
 }
 
+// Strip CR/LF and control characters out of anything that becomes a mail header. Without
+// this a subject containing "\r\nBcc: attacker@evil.dk" injects its own headers, which is
+// how a contact form becomes an open relay.
+function sanitizeHeader(value, max = 300) {
+  return String(value ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+// ---------------------------------------------------------------- transport reuse
+// Building a transport per send re-does TCP + TLS + AUTH every time, which is slow and gets
+// aggressive providers rate-limiting an agent who sends a burst of follow-ups. Keep one
+// pooled transport and rebuild it only when the SMTP settings actually change.
+let cachedTransport = null;
+let cachedFingerprint = '';
+
+const fingerprintOf = (cfg) => [cfg.host, cfg.port, cfg.secure ? 1 : 0, cfg.user, cfg.pass, cfg.from].join('\u0000');
+
 function buildTransport(cfg) {
   return nodemailer.createTransport({
     host: cfg.host, port: cfg.port, secure: cfg.secure,
     auth: { user: cfg.user, pass: cfg.pass },
+    pool: true,                 // reuse connections across sends
+    maxConnections: 3,          // a desktop agent never needs more
+    maxMessages: 50,            // recycle a connection before the provider drops it
     // Fail fast rather than leaving the agent staring at a spinner.
     connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000,
   });
 }
 
+// The one place that decides whether an existing transport can be reused.
+function transportFor(cfg) {
+  const fingerprint = fingerprintOf(cfg);
+  if (cachedTransport && cachedFingerprint === fingerprint) return cachedTransport;
+  dropTransport();                                  // settings changed — the old auth is stale
+  cachedTransport = buildTransport(cfg);
+  cachedFingerprint = fingerprint;
+  return cachedTransport;
+}
+
+function dropTransport() {
+  if (!cachedTransport) return;
+  try { cachedTransport.close(); } catch { /* already dead — nothing to reclaim */ }
+  cachedTransport = null;
+  cachedFingerprint = '';
+}
+
+// Called when settings change so the next send cannot reuse credentials that were edited
+// out from under it (a corrected typo in the password would otherwise never take effect).
+const invalidateTransport = dropTransport;
+
+// Nodemailer surfaces server responses verbatim, and an AUTH failure often echoes the
+// username. Never let a credential reach the client or the log.
+function redact(message, cfg) {
+  let out = String(message ?? '');
+  for (const secret of [cfg?.pass, cfg?.user]) {
+    if (secret && secret.length >= 3) out = out.split(secret).join('•••');
+  }
+  return out.slice(0, 300);
+}
+
+// Send failures must stay inside the request: a rejected promise nobody awaited would take
+// the process down. Everything that can throw is funnelled through here.
+function smtpFailure(e, cfg) {
+  if (e && e.isApiError) return e;                       // already a clean 4xx
+  const detail = redact(e?.message || e, cfg);
+  return ApiError.badRequest(`Sending failed — ${detail}`);
+}
+
 async function sendTest() {
   const cfg = smtpConfig();
   if (!cfg.configured) throw ApiError.badRequest('SMTP is not configured yet — set host, username and password in Settings.');
-  const transport = buildTransport( cfg);
   try {
-    await transport.verify();
+    await transportFor(cfg).verify();
     return { ok: true, host: cfg.host, port: cfg.port, secure: cfg.secure, from: cfg.from };
   } catch (e) {
-    throw ApiError.badRequest(`Could not reach ${cfg.host}:${cfg.port} — ${String(e.message || e).slice(0, 200)}`);
+    // A failed verify means this transport is not worth keeping around.
+    dropTransport();
+    throw ApiError.badRequest(`Could not reach ${cfg.host}:${cfg.port} — ${redact(e.message || e, cfg)}`);
   }
 }
 
 async function send({ to, subject, text, html, attachments = [], replyTo }) {
   const cfg = smtpConfig();
-  if (!cfg.configured) throw ApiError.badRequest('SMTP is not configured yet — set host, username and password in Settings.');
-  if (!to || !Array.isArray(to) ? false : !to.length) throw ApiError.badRequest('No recipient given.');
-  const recipients = (Array.isArray(to) ? to : [to]).map((t) => String(t).trim()).filter(Boolean);
+
+  // Coerce first, then validate, so a stray undefined can never become the literal string
+  // "undefined" in a recipient header.
+  const recipients = (Array.isArray(to) ? to : [to])
+    .map((t) => String(t ?? '').trim())
+    .filter(Boolean);
+
   if (!recipients.length) throw ApiError.badRequest('No recipient given.');
   for (const r of recipients) {
     if (!SYNTAX_RE.test(r)) throw ApiError.badRequest(`"${r}" is not a valid email address.`);
   }
   if (!String(subject || '').trim()) throw ApiError.badRequest('The email needs a subject.');
+  if (!cfg.configured) throw ApiError.badRequest('SMTP is not configured yet — set host, username and password in Settings.');
 
-  const transport = buildTransport(cfg);
-  const info = await transport.sendMail({
-    from: cfg.from, to: recipients.join(', '), replyTo: replyTo || undefined,
-    subject: String(subject).slice(0, 300),
-    text: String(text || ''),
-    html: html || undefined,
-    attachments: attachments.map((a) => ({
-      filename: String(a.filename || 'attachment'),
-      content: a.content,                       // Buffer
-      contentType: a.contentType || undefined,
-    })),
-  });
-  return {
-    ok: true,
-    messageId: info.messageId,
-    accepted: (info.accepted || []).map(String),
-    rejected: (info.rejected || []).map(String),
-    to: recipients,
-    sentAt: new Date().toISOString(),
+  const headers = {
+    from: sanitizeHeader(cfg.from || cfg.user, 320),
+    to: recipients.join(', '),
+    replyTo: replyTo ? sanitizeHeader(replyTo, 320) : undefined,
+    subject: sanitizeHeader(subject, 300),
   };
+
+  try {
+    const info = await transportFor(cfg).sendMail({
+      ...headers,
+      text: String(text || ''),
+      html: html || undefined,
+      attachments: attachments.map((a) => ({
+        filename: sanitizeHeader(a.filename || 'attachment', 200),
+        content: a.content,                       // Buffer
+        contentType: a.contentType || undefined,
+      })),
+    });
+    return {
+      ok: true,
+      messageId: info.messageId,
+      accepted: (info.accepted || []).map(String),
+      rejected: (info.rejected || []).map(String),
+      to: recipients,
+      sentAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    throw smtpFailure(e, cfg);
+  }
 }
 
 module.exports = {
   verify, verifyMany, send, sendTest, smtpConfig, probeRcpt, lookupMx, suggestDomain,
+  buildTransport, transportFor, invalidateTransport, sanitizeHeader, redact,
   SYNTAX_RE, DISPOSABLE, DEFAULT_MX_TIMEOUT_MS,
 };

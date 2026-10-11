@@ -107,6 +107,59 @@ const check = (cond, m) => (cond ? ok(m) : bad(m));
   check(/^400/.test(await attempt({ to: ['a@gmail.com'], subject: '', body: 'x' })), 'an empty subject is refused');
   check(/^400/.test(await attempt({ to: ['not-an-email'], subject: 's', body: 'x' })), 'a malformed recipient is refused');
   check(/^400/.test(await attempt({ to: [], subject: 's', body: 'x' })), 'no recipients is refused');
+  check(/^400/.test(await attempt({ to: [undefined], subject: 's', body: 'x' })), 'an undefined recipient never becomes the string "undefined"');
+
+  // ---- header injection: a subject is attacker-controlled text, not a header ----
+  console.log('\n[email] header sanitisation');
+  const injected = email.sanitizeHeader('Hej\r\nBcc: attacker@evil.dk');
+  check(!injected.includes('\r') && !injected.includes('\n'), 'CRLF in a header value is neutralised');
+  check(injected === 'Hej Bcc: attacker@evil.dk', 'the injected text survives as inert body text, not a header');
+  check(!email.sanitizeHeader('a\u0000b\u001fc').match(/[\u0000-\u001f]/), 'control characters are stripped');
+  check(email.sanitizeHeader('x'.repeat(500), 300).length === 300, 'header length is capped');
+  check(email.sanitizeHeader(null) === '' && email.sanitizeHeader(undefined) === '', 'null/undefined headers become empty strings');
+
+  // ---- pooled transport: reuse unless the settings actually change ----
+  console.log('\n[email] transporter reuse');
+  const cfgA = { host: 'smtp.a.dk', port: 587, secure: false, user: 'u', pass: 'p', from: 'u@a.dk' };
+  const cfgB = { ...cfgA, host: 'smtp.b.dk' };
+  check(email.transportFor(cfgA) === email.transportFor(cfgA), 'identical settings reuse the same pooled transport');
+  const changed = email.transportFor(cfgB);
+  check(changed !== email.transportFor(cfgA), 'a changed host builds a new transport');
+  email.invalidateTransport();
+  check(email.transportFor(cfgB) !== changed, 'invalidateTransport() forces a rebuild (an edited password takes effect)');
+
+  // ---- a credential must never reach the client or the log ----
+  console.log('\n[email] credential redaction');
+  const red = email.redact('535 auth failed for agent@firma.dk using super-secret-app-password', { user: 'agent@firma.dk', pass: 'super-secret-app-password' });
+  check(!red.includes('super-secret-app-password'), 'the SMTP password is redacted out of an error message');
+  check(!red.includes('agent@firma.dk'), 'the SMTP username is redacted too');
+
+  // ---- the activity ledger line is specified, so pin its shape ----
+  console.log('\n[email] activity ledger');
+  const notesRepo = require('../../server/repositories/noteRepo');
+  const prospectRepo = require('../../server/repositories/prospectRepo');
+  const p = prospectRepo.insert({ name: 'Mette', email: 'mette@firma.dk' });
+  const logged = notesRepo.logEmail(p.id, { subject: 'Opfølgning — Firma', recipients: ['mette@firma.dk'], attachmentCount: 2 });
+  check(logged.body === '📧 Sent email: "Opfølgning — Firma" to mette@firma.dk (attachments: 2)',
+    `the ledger line matches the specified format (got ${JSON.stringify(logged.body)})`);
+  check(notesRepo.logEmail(p.id, { subject: 'Hej', recipients: ['a@b.dk'] }).body.endsWith('(attachments: 0)'),
+    'a send with no attachments records (attachments: 0)');
+  check(notesRepo.logEmail(p.id, { subject: 'Quote " here', recipients: ['a@b.dk', 'c@d.dk'] }).body.includes('a@b.dk, c@d.dk'),
+    'multiple recipients join with a comma and quotes in the subject cannot break the line');
+  check(notesRepo.listByProspect(p.id).some((n) => n.id === logged.id), 'the logged email appears in the prospect notes feed');
+
+  // ---- {{meet_link}} and {{agent_name}} are real placeholders ----
+  console.log('\n[email] template placeholders');
+  const followUp = require('../../server/services/followUpService');
+  settingsRepo.set('meet_link', 'https://meet.google.com/abc-defg-hij');
+  settingsRepo.set('agent_name', 'Gagan');
+  settingsRepo.set('followup_email_template', 'Hej {{name}} fra {{company}} ({{title}})\nMøde: {{meet_link}}\n/ {{agent_name}}');
+  const draft = followUp.renderEmail(p.id, { noteText: 'Snakkede om priser' });
+  check(draft.body.includes('https://meet.google.com/abc-defg-hij'), '{{meet_link}} is substituted');
+  check(draft.body.includes('Gagan'), '{{agent_name}} is substituted');
+  check(!/\{\{/.test(draft.body), 'no placeholder is left literal in the rendered body');
+  const emptyMeet = (() => { settingsRepo.set('meet_link', ''); const d = followUp.renderEmail(p.id); settingsRepo.set('meet_link', 'https://meet.google.com/abc-defg-hij'); return d; })();
+  check(!/\{\{meet_link\}\}/.test(emptyMeet.body), 'an unset meeting link renders empty, not as a literal placeholder');
 
   db.close();
   console.log(`\n  [email] ${passed} checks passed, ${failures.length} failed`);

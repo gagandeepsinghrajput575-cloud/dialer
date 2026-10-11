@@ -97,13 +97,17 @@ const draftFor = asyncHandler(async (req, res) => {
   const followUp = require('../services/followUpService');
   const draft = followUp.renderEmail(id, { noteText: req.body?.noteText, at: req.body?.at });
   const meetLink = String(settingsRepo.get('meet_link') || '');
-  const body = meetLink ? `${draft.body}\n\nMødelink: ${meetLink}` : draft.body;
+  // The template may already place the link via {{meet_link}}. Only append it when the
+  // rendered body does not contain it, so the link never shows up twice.
+  const body = meetLink && !draft.body.includes(meetLink)
+    ? `${draft.body}\n\nMødelink: ${meetLink}`
+    : draft.body;
   const notes = noteRepo.listByProspect(id).slice(0, 3).map((n) => n.body);
   res.json({
     to: draft.to, subject: draft.subject, body,
     prospect: { id: prospect.id, name: prospect.name, email: prospect.email, company: prospect.company },
     verification: prospect.email ? await emailService.verify(prospect.email) : null,
-    meetLink, recentNotes: notes,
+    meetLink, recentNotes: notes, followUpAt: draft.followUpAt, placeholders: draft.placeholders,
     smtpConfigured: emailService.smtpConfig().configured,
   });
 });
@@ -144,9 +148,13 @@ const send = asyncHandler(async (req, res) => {
   if (b.prospectId) {
     const pid = Number(b.prospectId);
     if (prospectRepo.get(pid)) {
-      const label = attachments.length ? ` · ${attachments.length} attachment(s)` : '';
-      noteRepo.insert(pid, `📧 Email sendt til ${to.join(', ')} — "${String(b.subject || '').slice(0, 80)}"${label}`);
+      const note = noteRepo.logEmail(pid, {
+        subject: b.subject,
+        recipients: to,
+        attachmentCount: attachments.length,
+      });
       result.loggedAsNote = true;
+      result.noteId = note?.id ?? null;
     }
   }
   for (const id of wanted) staged.delete(String(id));   // consumed

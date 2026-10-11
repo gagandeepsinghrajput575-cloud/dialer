@@ -258,6 +258,83 @@ async function run() {
     }
     addApp.dom.window.close();
 
+    // --- E5: email is in-app, not a mailto: hand-off -----------------------------
+    // The banner chip, the prospect card and the table row all used to hand the agent off to
+    // whatever the OS had registered for mailto:. E must open the composer inside the cockpit,
+    // stay out of the way while the agent is typing, and never let a keystroke reach a call.
+    await post('/api/prospects', { name: 'Mail Target', phone: '20999999', email: 'mailtest@gmail.com' });
+    let mailApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    await wait(() => mailApp.window.document.querySelector('.q-item'), 15000, 'queue to render');
+    await ensureListener(mailApp);
+    {
+      const d = mailApp.window.document;
+      const item = [...d.querySelectorAll('.q-item')].find((el) => /Mail Target/.test(el.textContent));
+      check(!!item, 'the email fixture prospect is in the queue');
+      if (item) item.dispatchEvent(new mailApp.window.MouseEvent('click', { bubbles: true }));
+      await wait(() => /mailtest@gmail\.com/.test(d.body.textContent), 12000, 'the banner email chip');
+      await sleep(400);
+
+      check(d.querySelectorAll('a[href^="mailto:"]').length === 0,
+        `no mailto: anchors left anywhere in the dialer (got ${d.querySelectorAll('a[href^="mailto:"]').length})`);
+      check(!!d.querySelector('button.banner-email-chip'), 'the banner chip is an in-app button');
+
+      // Typing E somewhere the agent writes must be a keystroke, never a shortcut.
+      const sbox = d.querySelector('.search input');
+      if (sbox) {
+        key(mailApp.window, 'e', {}, sbox);
+        await sleep(500);
+        check(!d.querySelector('.email-modal'), 'E typed into the search box opens nothing');
+      }
+
+      mailApp.drain();
+      key(mailApp.window, 'e');
+      const opened = await (async () => { try { await wait(() => d.querySelector('.email-modal'), 12000, 'composer'); return true; } catch { return false; } })();
+      check(opened, 'E opens the in-app email composer for the active prospect');
+      if (opened) {
+        check(/mailtest@gmail\.com/.test(d.body.textContent), 'the composer arrives pre-filled with the prospect address');
+        const drafts = count(mailApp.drain(), /POST \/api\/email\/prospects\/\d+\/draft/);
+        check(drafts >= 1, `the composer asks the server for a template-filled draft (got ${drafts})`);
+        check(/Opf|Hej|Mødelink|@/.test(d.querySelector('.email-modal')?.textContent || ''), 'the draft carries rendered template text');
+
+        // A modal owns the keyboard: C must not dial the prospect behind the dialog.
+        mailApp.drain();
+        key(mailApp.window, 'c');
+        await sleep(900);
+        check(count(mailApp.drain(), DIAL) === 0, 'C with the composer open places no call behind it');
+
+        // ...and closing it gives the keyboard back.
+        const closeBtn = d.querySelector('.email-modal .modal-head .icon-btn');
+        check(!!closeBtn, 'the composer has a close control');
+        if (closeBtn) closeBtn.dispatchEvent(new mailApp.window.MouseEvent('click', { bubbles: true }));
+        await sleep(700);
+        check(!d.querySelector('.email-modal'), 'closing the composer dismisses it');
+      }
+
+      // A call that ends well should offer the follow-up in one click, without the agent
+      // hunting for the prospect again.
+      mailApp.drain();
+      key(mailApp.window, 'c');
+      await sleep(1200);
+      const placed = count(mailApp.drain(), DIAL);
+      check(placed === 1, `the email prospect can be dialled (got ${placed} call)`);
+      key(mailApp.window, '6');                       // conversation — a follow-up-worthy outcome
+      const prompted = await (async () => { try { await wait(() => d.querySelector('.followup-prompt'), 12000, 'follow-up prompt'); return true; } catch { return false; } })();
+      check(prompted, 'a positive outcome offers the follow-up email in one click');
+      if (prompted) {
+        check(/Mail Target/.test(d.querySelector('.followup-prompt').textContent), 'the prompt names the prospect just spoken to');
+        mailApp.drain();
+        const sendBtn = [...d.querySelectorAll('.followup-prompt button')].find((b) => /follow-up email/i.test(b.textContent));
+        check(!!sendBtn, 'the prompt carries a send action');
+        if (sendBtn) sendBtn.dispatchEvent(new mailApp.window.MouseEvent('click', { bubbles: true }));
+        const reopened = await (async () => { try { await wait(() => d.querySelector('.email-modal'), 12000, 'composer from the prompt'); return true; } catch { return false; } })();
+        check(reopened, 'the prompt opens the composer for that prospect');
+        if (reopened) {
+          check(/mailtest@gmail\.com/.test(d.body.textContent), 'the re-opened composer targets the right prospect');
+        }
+      }
+    }
+    mailApp.dom.window.close();
+
     // --- E6: a dial the cross-tab mutex refuses must not place a call ------------
     // jsdom has no navigator.locks, so install one with the real contract: with
     // ifAvailable, a lock already held elsewhere yields cb(null). Whatever prospect this

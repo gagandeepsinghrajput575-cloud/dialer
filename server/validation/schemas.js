@@ -93,9 +93,19 @@ const notePatch = z.object({ body: z.string().max(20000) });
 const settingsUpdate = z.object({
   telephony_mode: z.enum(TELEPHONY_MODES).optional(),
   softphone_protocol: z.enum(SOFTPHONE_PROTOCOLS).optional(),
-  voipso_sip_server: str(200).optional(),
-  voipso_sip_user: str(200).optional(),
-  voipso_sip_password: str(500).optional(),
+  // ---- Telnyx SIP connection ----
+  // The FQDN is validated as a hostname rather than free text: a stray scheme or a trailing
+  // slash here produces a dial URI no softphone can parse, and it would fail silently.
+  telnyx_sip_server: str(200).refine((v) => {
+    const t = String(v || '').trim();
+    if (!t) return true;                      // empty falls back to sip.telnyx.com
+    if (!/^[a-z0-9.-]+(:\d{2,5})?$/i.test(t)) return false;
+    return t.includes('.');
+  }, 'Use a SIP domain like sip.telnyx.com (no scheme, no path)').optional(),
+  telnyx_sip_user: str(200).optional(),
+  telnyx_sip_password: str(500).optional(),
+  telnyx_api_key: str(500).optional(),
+  telnyx_connection_id: str(200).optional(),
   caller_id: str(64).optional(),
   caller_id_pool: str(1000).optional(),
   caller_id_cursor: count.optional(),

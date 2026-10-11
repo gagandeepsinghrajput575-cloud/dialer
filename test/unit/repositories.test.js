@@ -46,18 +46,97 @@ async function run() {
   // ---- settings repo ----
   assert.strictEqual(Object.keys(DEFAULTS).length, SETTING_KEYS.length);
   assert.strictEqual(settings.get('default_country_code'), '45');
-  assert.strictEqual(settings.get('voipso_sip_server'), 'sip.voip.so');
-  settings.set('voipso_sip_password', 's3cret');
+  assert.strictEqual(settings.get('telnyx_sip_server'), 'sip.telnyx.com');
+  settings.set('telnyx_sip_password', 's3cret');
+  settings.set('telnyx_api_key', 'KEY0123456789');
+  settings.set('ai_api_key', 'ai-secret');
   const view = settings.publicView();
-  assert.strictEqual(view.voipso_sip_password, '', 'secret is masked in the public view');
+  assert.strictEqual(view.telnyx_sip_password, '', 'the SIP secret is masked in the public view');
+  assert.strictEqual(view.telnyx_api_key, '', 'the Telnyx API key is masked too');
+  assert.strictEqual(view.ai_api_key, '', 'and so is the AI key');
   assert.strictEqual(view.has_password, true);
-  assert.strictEqual(view.ai_api_key, '');
-  assert.strictEqual(view.has_api_key, false);
+  assert.strictEqual(view.has_api_key, true, 'has_api_key answers for the Telnyx key');
+  assert.strictEqual(view.has_ai_key, true, 'the AI key has its own flag, so the two cannot be confused');
+  assert.notStrictEqual(view.has_api_key, view.has_ai_key === false, 'the flags are independent');
   // unknown keys are purged so retired settings never linger
   db.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('retired_key', 'x');
   migrate.purgeUnknownSettings();
   assert.strictEqual(db.prepare("SELECT COUNT(*) c FROM settings WHERE key = 'retired_key'").get().c, 0);
   ok('settings defaults, secret masking and unknown-key purge all behave');
+
+  // ---- migration 7: the VOIP.SO -> Telnyx cutover ----
+  // The end-to-end upgrade is covered by the integration suite booting a legacy database. What
+  // is only testable here is how the migration treats the three awkward cases: a host the
+  // agent chose deliberately, a key that is already set, and running it twice.
+  assert.ok(migrate.MIGRATIONS.some((m) => m.version === 7 && m.name === 'telnyx-telephony-migration'),
+    'migration 7 is registered under its documented name');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM _migrations WHERE version = 7').get().c, 1,
+    'and the ledger records that it ran');
+  const rawPut = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v);
+  const rawGet = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value;
+
+  // Start from the state a pre-cutover database is in: the telnyx_* keys do not exist yet.
+  // (The earlier masking test wrote some, and carrying a value over must never overwrite one
+  // that is already there — that is the guard being exercised two paragraphs down.)
+  settings.set('telnyx_sip_server', '');
+  settings.set('telnyx_sip_user', '');
+  settings.set('telnyx_sip_password', '');
+
+  // A host the agent chose deliberately is carried across; the retired vendor default is not.
+  rawPut('voipso_sip_server', 'pbx.kundens-eget.dk');
+  rawPut('voipso_sip_user', 'weird-extension');
+  rawPut('voipso_sip_password', 'legacy-pass');
+  migrate.migrateTelephonyToTelnyx(db);
+  assert.strictEqual(settings.get('telnyx_sip_server'), 'pbx.kundens-eget.dk', 'a custom SIP host survives the cutover');
+  assert.strictEqual(settings.get('telnyx_sip_user'), 'weird-extension', 'the SIP username is carried across');
+  assert.strictEqual(settings.get('telnyx_sip_password'), 'legacy-pass', 'and the secret too');
+
+  // The vendor default is a placeholder, not a configuration.
+  rawPut('voipso_sip_server', 'sip.voip.so');
+  settings.set('telnyx_sip_server', '');
+  migrate.migrateTelephonyToTelnyx(db);
+  assert.strictEqual(settings.get('telnyx_sip_server'), 'sip.telnyx.com', 'the old vendor default becomes the new vendor default');
+
+  // Running it again must not undo anything the agent has since changed.
+  settings.set('telnyx_sip_server', 'sip.mit-eget-edge.dk');
+  rawPut('voipso_sip_server', 'sip.voip.so');
+  migrate.migrateTelephonyToTelnyx(db);
+  assert.strictEqual(settings.get('telnyx_sip_server'), 'sip.mit-eget-edge.dk', 'a key already set is never overwritten');
+  settings.set('telnyx_sip_server', 'sip.telnyx.com');
+
+  // A gateway pointing at the retired carrier is cleared; a deliberate one is kept.
+  settings.set('webrtc_ws_url', 'wss://sip.voip.so:8089/ws');
+  migrate.migrateTelephonyToTelnyx(db);
+  assert.strictEqual(settings.get('webrtc_ws_url'), '', 'a legacy WebSocket gateway is cleared');
+  settings.set('webrtc_ws_url', 'wss://rtc.eu.telnyx.com');
+  migrate.migrateTelephonyToTelnyx(db);
+  assert.strictEqual(settings.get('webrtc_ws_url'), 'wss://rtc.eu.telnyx.com', 'a deliberate gateway is left alone');
+
+  // Finally the purge a real boot performs: the retired keys are gone for good afterwards.
+  migrate.purgeUnknownSettings();
+  assert.strictEqual(rawGet('voipso_sip_server'), undefined, 'the legacy server key is purged');
+  assert.strictEqual(rawGet('voipso_sip_user'), undefined, 'the legacy username key is purged');
+  assert.strictEqual(rawGet('voipso_sip_password'), undefined, 'and the legacy secret key with it');
+  assert.strictEqual(rawGet('telnyx_sip_password'), 'legacy-pass', 'while the value it carried lives on under the new name');
+  // The environment names the Telnyx variables now (TELNYX_*), and seeding still only ever
+  // fills a setting that is empty — a value saved in the UI must survive a later .env edit.
+  settings.set('telnyx_sip_user', '');
+  settings.set('telnyx_sip_password', '');
+  process.env.TELNYX_SIP_USER = 'env-user';
+  process.env.TELNYX_SIP_PASSWORD = 'env-secret';
+  process.env.TELNYX_SIP_SERVER = 'sip.env.example.dk';
+  settings.seedFromEnv();
+  assert.strictEqual(settings.get('telnyx_sip_user'), 'env-user', 'TELNYX_SIP_USER seeds an empty setting');
+  assert.strictEqual(settings.get('telnyx_sip_password'), 'env-secret', 'TELNYX_SIP_PASSWORD seeds an empty setting');
+  assert.strictEqual(settings.get('telnyx_sip_server'), 'sip.telnyx.com', 'but a setting that already has a value is left alone');
+  settings.set('telnyx_sip_user', 'saved-in-the-ui');
+  settings.seedFromEnv();
+  assert.strictEqual(settings.get('telnyx_sip_user'), 'saved-in-the-ui', 'a saved value beats the environment');
+  delete process.env.TELNYX_SIP_USER;
+  delete process.env.TELNYX_SIP_PASSWORD;
+  delete process.env.TELNYX_SIP_SERVER;
+
+  ok('migration 7 carries a custom host, respects an already-set key, clears a legacy gateway and lets the purge finish the job');
 
   // ---- prospect repo ----
   const p = prospects.insert({ name: 'Mette Jensen', phone: '+4520123456', email: 'mette@nordiclogistik.dk', company: 'Nordic Logistik', stage: 'new' });
@@ -98,46 +177,48 @@ async function run() {
   const cases = [
     ['20123456', '+4520123456'], ['20 12 34 56', '+4520123456'], ['+45 20 12 34 56', '+4520123456'],
     ['004520123456', '+4520123456'], ['4520123456', '+4520123456'], ['0045 20 12 34 56', '+4520123456'],
-    ['1234', ''], ['', ''], ['mette@sip.voip.so', 'mette@sip.voip.so'],
+    ['1234', ''], ['', ''], ['mette@sip.telnyx.com', 'mette@sip.telnyx.com'],
   ];
   for (const [input, expected] of cases) {
     assert.strictEqual(telephony.normalizePhone(input), expected, `normalizePhone(${JSON.stringify(input)})`);
   }
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'sip'), 'sip:+4520123456');
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'tel'), 'tel:+4520123456');
-  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.voip.so');
+  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.telnyx.com');
+  assert.strictEqual(telephony.sipServer(), 'sip.telnyx.com', 'the Telnyx FQDN is the default floor');
   ok('normalization table (9 cases) + dial URI builders');
 
   // ---- in-browser softphone session (WebRTC) ----
   // The browser leg is addressed over the provider's WebSocket gateway, and the SIP secret
   // only leaves the server when the operator explicitly turned the handoff on.
-  settings.set('voipso_sip_server', 'sip.voip.so');
-  settings.set('voipso_sip_user', '1001');
-  settings.set('voipso_sip_password', 'super-secret');
+  settings.set('telnyx_sip_server', 'sip.telnyx.com');
+  settings.set('telnyx_sip_user', '1001');
+  settings.set('telnyx_sip_password', 'super-secret');
   settings.set('webrtc_ws_url', '');
   settings.set('webrtc_credential_handoff', '0');
-  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.voip.so;transport=ws');
-  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://sip.voip.so:8089/ws', 'the gateway is derived when no URL is set');
+  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.telnyx.com;transport=ws');
+  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.telnyx.com', "an empty gateway means Telnyx's own gateway");
+  assert.strictEqual(telephony.webrtcSession().provider, 'telnyx');
   const handoffOff = telephony.webrtcSession();
   assert.strictEqual(handoffOff.password, '', 'the password must not be in the descriptor while the handoff is off');
   assert.strictEqual(handoffOff.hasPassword, true);
   assert.strictEqual(handoffOff.canRegister, false, 'a browser cannot register without the secret');
-  assert.strictEqual(handoffOff.wsUrlSource, 'derived');
+  assert.strictEqual(handoffOff.wsUrlSource, 'telnyx_default');
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('webrtc_credential_handoff', '1');
   const handoffOn = telephony.webrtcSession();
   assert.strictEqual(handoffOn.password, 'super-secret');
   assert.strictEqual(handoffOn.canRegister, true);
   assert.strictEqual(handoffOn.callerId, '+4520123456');
-  settings.set('webrtc_ws_url', 'wss://edge.voip.so/live');
-  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://edge.voip.so/live', 'an explicit gateway wins');
+  settings.set('webrtc_ws_url', 'wss://rtc.eu.telnyx.com');
+  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.eu.telnyx.com', 'an explicit gateway wins (regional edge)');
   assert.strictEqual(telephony.webrtcSession().wsUrlSource, 'settings');
   settings.set('webrtc_ws_url', '');
-  settings.set('voipso_sip_password', '');
+  settings.set('telnyx_sip_password', '');
   const unconfigured = telephony.webrtcSession();
   assert.deepStrictEqual(unconfigured.missing, ['password']);
   assert.strictEqual(unconfigured.configured, false);
-  ok('webrtc session: derived gateway, credential handoff gate, readiness reasons');
+  ok('webrtc session: Telnyx gateway default, credential handoff gate, readiness reasons');
 
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('caller_id_pool', '+4520987654, 31 45 67 89');

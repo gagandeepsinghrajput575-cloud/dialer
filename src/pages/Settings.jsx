@@ -114,7 +114,7 @@ export default function SettingsPage() {
   const [testingSmtp, setTestingSmtp] = useState(false);
 
   useEffect(() => {
-    if (settings && !f) setF({ ...settings, voipso_sip_password: '', dry_run: settings.dry_run === '1' });
+    if (settings && !f) setF({ ...settings, telnyx_sip_password: '', telnyx_api_key: '', dry_run: settings.dry_run === '1' });
   }, [settings, f]);
 
   const loadBackups = useCallback(async () => {
@@ -174,7 +174,10 @@ export default function SettingsPage() {
   const cc = String(f.default_country_code || '45').replace(/\D/g, '');
   const proto = f.softphone_protocol === 'tel' ? 'tel' : 'sip';
   const inBrowser = f.telephony_mode === 'webrtc';
-  const sipServer = f.voipso_sip_server || 'sip.voip.so';
+  const sipServer = f.telnyx_sip_server || 'sip.telnyx.com';
+  // Telnyx's WebRTC gateway is a single fixed endpoint, not a port/path derived from the SIP
+  // domain, so the placeholder states it outright instead of synthesising a URL.
+  const wsGateway = f.webrtc_ws_url || 'wss://rtc.telnyx.com';
   // The two modes hand out completely different URIs, so the sample must not lie about which
   // one Pulse will actually dial.
   const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer};transport=ws` : `${proto}:+${cc}20123456`;
@@ -185,7 +188,7 @@ export default function SettingsPage() {
     try {
       await api.saveSettings(f);
       await refreshSettings();
-      setF((x) => ({ ...x, voipso_sip_password: '' }));
+      setF((x) => ({ ...x, telnyx_sip_password: '', telnyx_api_key: '' }));
       toast('Settings saved');
       refreshStats();
     } catch (e) { toast(e.message, 'error'); }
@@ -213,7 +216,7 @@ export default function SettingsPage() {
       setResult({
         ok: true,
         msg: launched
-          ? `Launched ${r.dialUri} — ${softphoneLabel(r.telephonyMode)} should be dialing it now.${r.configured ? '' : ' (No VOIP.SO SIP account saved yet — register it in your softphone first.)'}`
+          ? `Launched ${r.dialUri} — ${softphoneLabel(r.telephonyMode)} should be dialing it now.${r.configured ? '' : ' (No Telnyx SIP connection saved yet — register it in your softphone first.)'}`
           : r.message,
       });
     } catch (e) { setResult({ ok: false, msg: e.message }); }
@@ -251,7 +254,7 @@ export default function SettingsPage() {
   return (
     <div className="settings">
       <header className="page-head">
-        <div><h1>Settings</h1><p>Point Pulse at VOIP.SO, pick your softphone, and set your daily targets.</p></div>
+        <div><h1>Settings</h1><p>Point Pulse at your Telnyx SIP connection, pick your softphone, and set your daily targets.</p></div>
         <button className="btn primary glow" onClick={save} disabled={saving}>{saving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} Save changes</button>
       </header>
 
@@ -262,14 +265,14 @@ export default function SettingsPage() {
             <h3>Test mode {f.dry_run ? 'is ON' : 'is OFF'}</h3>
             <p>{f.dry_run
               ? 'Nothing is dialed. Pulse simulates the call in the browser so you can try the flow safely.'
-              : `Calls are REAL: ${softphone} dials straight out over VOIP.SO and every second is billed.`}</p>
+              : `Calls are REAL: ${softphone} dials straight out over Telnyx and every second is billed.`}</p>
           </div>
           <Switch checked={f.dry_run} onChange={(v) => setF({ ...f, dry_run: v })} />
         </div>
       </motion.section>
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.06 }}>
-        <div className="panel-title"><PhoneCall size={16} /> Telephony &amp; VOIP.SO (Denmark +45) <em>direct dialing</em></div>
+        <div className="panel-title"><PhoneCall size={16} /> Telephony &amp; Telnyx (Denmark +45) <em>direct dialing</em></div>
 
         <div className="picker-grid">
           {MODES.map((m) => (
@@ -306,18 +309,23 @@ export default function SettingsPage() {
           <label>Default country code (numbers without +)<input value={f.default_country_code} onChange={set('default_country_code')} placeholder="45" /></label>
         </div>
 
-        <div className="panel-title sub"><KeyRound size={15} /> VOIP.SO SIP account</div>
+        <div className="panel-title sub"><KeyRound size={15} /> Telnyx SIP connection <em>Credential Auth</em></div>
         {settings.has_password && <div className="banner ok"><ShieldCheck size={15} /> A SIP password is stored locally. Leave the field blank to keep it.</div>}
         <div className="form two">
-          <label>SIP server / domain<input value={f.voipso_sip_server} onChange={set('voipso_sip_server')} placeholder="sip.voip.so" autoComplete="off" /></label>
-          <label>SIP username / extension<input value={f.voipso_sip_user} onChange={set('voipso_sip_user')} placeholder="1001" autoComplete="off" /></label>
-          <label>SIP password<input type="password" value={f.voipso_sip_password} onChange={set('voipso_sip_password')} placeholder={settings.has_password ? '•••••••• (saved, leave blank to keep)' : 'Your SIP secret'} autoComplete="new-password" /></label>
+          <label>SIP domain (FQDN)<input value={f.telnyx_sip_server} onChange={set('telnyx_sip_server')} placeholder="sip.telnyx.com" autoComplete="off" /></label>
+          <label>SIP username<input value={f.telnyx_sip_user} onChange={set('telnyx_sip_user')} placeholder="From the SIP Connection" autoComplete="off" /></label>
+          <label>SIP password<input type="password" value={f.telnyx_sip_password} onChange={set('telnyx_sip_password')} placeholder={settings.has_password ? '•••••••• (saved, leave blank to keep)' : 'Your SIP connection secret'} autoComplete="new-password" /></label>
           <label>Sample dial URI Pulse will dispatch<input readOnly value={sampleUri} className="mono" /></label>
+        </div>
+        <div className="panel-title sub"><KeyRound size={15} /> Telnyx API access <em>optional</em></div>
+        <div className="form two">
+          <label>API key<input type="password" value={f.telnyx_api_key} onChange={set('telnyx_api_key')} placeholder={settings.has_api_key ? '•••••••• (saved, leave blank to keep)' : 'KEY… (Mission Control → API Keys)'} autoComplete="new-password" /></label>
+          <label>SIP Connection ID<input value={f.telnyx_connection_id} onChange={set('telnyx_connection_id')} placeholder="Optional — for carrier automation" autoComplete="off" /></label>
         </div>
         <p className="muted small">
           {inBrowser
-            ? 'Your credential stays in this computer’s local database. Pulse only releases it to the in-browser softphone when you switch the handoff on below, and never to any other site.'
-            : 'Register your VOIP.SO credentials and Danish number in Zoiper. When you hit Call in Pulse Dialer, Zoiper will instantly place the call with zero callback lag. The SIP secret stays in this computer’s local database and is never sent to the browser.'}
+            ? 'Your credential stays in this computer’s local database. Pulse releases it to the in-browser softphone only when you switch the handoff on below, and never to any other site.'
+            : 'Register the same Telnyx SIP connection in Zoiper. When you hit Call in Pulse Dialer, Zoiper places the call instantly with zero callback lag. The SIP secret stays in this computer’s local database and is never sent to the browser.'}
         </p>
         <div className="row gap">
           <button className="btn" onClick={testSoftphone} disabled={testing}>
@@ -338,7 +346,7 @@ export default function SettingsPage() {
           <div className="form two">
             <label>
               WebSocket signalling URL
-              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder={`wss://${sipServer}:8089/ws`} className="mono" />
+              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder="wss://rtc.telnyx.com" className="mono" />
             </label>
             <label>
               Microphone
@@ -366,7 +374,7 @@ export default function SettingsPage() {
             <div>
               <b>SIP credential handoff</b>
               <small>
-                Required for in-browser calls. Pulse passes the stored VOIP.SO password to this page only —
+                Required for in-browser calls. Pulse passes the stored Telnyx SIP password to this page only —
                 every other origin and any request without the page token is refused, and Settings never echoes it back.
               </small>
             </div>
@@ -378,21 +386,47 @@ export default function SettingsPage() {
       )}
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.12 }}>
-        <div className="panel-title"><Headphones size={16} /> {inBrowser ? 'In-browser call flow' : 'Zoiper quick setup'}</div>
+        <div className="panel-title"><Headphones size={16} /> Telnyx setup <em>once, then it just dials</em></div>
         <ol className="setup-steps">
+          <li>
+            In <b>Telnyx Mission Control</b>, create a <b>SIP Connection</b> with
+            <b> Credential Auth</b> (Connections → SIP). Copy its <b>username</b> and <b>secret</b>
+            into the fields above — the domain stays <b>sip.telnyx.com</b>.
+          </li>
+          <li>
+            Buy or port your Danish <b>+45</b> numbers, then assign them to that SIP Connection
+            (Numbers → your number → Connection).
+          </li>
+          <li>
+            Set the connection's <b>outbound caller ID</b> to the Danish DID you want to present,
+            and paste the same number(s) into <b>Outbound caller ID</b> / the DID pool below so
+            Pulse rotates them.
+          </li>
           {inBrowser ? (
             <>
-              <li>Save <b>SIP server</b>, <b>username</b> and <b>password</b> above — the same VOIP.SO account you would put in Zoiper.</li>
-              <li>Leave the WebSocket URL blank to use Pulse's derived gateway (<b>wss://{sipServer}:8089/ws</b>), or paste the one your provider documents.</li>
-              <li>Turn <b>SIP credential handoff</b> on, then press <b>Test microphone</b> and allow the browser access.</li>
-              <li>In the Dialer, press <b>C</b>: the call connects in this tab. <kbd>M</kbd> mutes, <kbd>D</kbd> opens the touch-tone pad, <kbd>H</kbd> hangs up and drops you straight into classification — and the microphone is released the moment you do.</li>
+              <li>
+                In-browser mode needs no softphone: leave the gateway blank to use Telnyx's
+                <b> wss://rtc.telnyx.com</b>, then switch <b>SIP credential handoff</b> on and
+                press <b>Test microphone</b>.
+              </li>
+              <li>
+                Press <kbd>C</kbd> in the Dialer: the call connects in this tab. <kbd>M</kbd> mutes,
+                <kbd>D</kbd> opens the touch-tone pad, <kbd>H</kbd> hangs up into classification —
+                and the microphone is released the moment you do.
+              </li>
             </>
           ) : (
             <>
-              <li>Install <b>Zoiper 5</b> (or Linphone) and add a SIP account: domain <b>{sipServer}</b>, username and password from your VOIP.SO portal.</li>
-              <li>Wait for the green <b>Registered</b> badge, then set your outbound caller ID to your Danish <b>+45</b> number.</li>
-              <li>Make Zoiper the default app for <b>{proto}:</b> links (Zoiper does this on install).</li>
-              <li>Back here: turn <b>Test mode OFF</b> and press <b>C</b> in the Dialer — Zoiper dials the prospect instantly while your notes, timer and 1–8 shortcuts stay live.</li>
+              <li>
+                Install <b>Zoiper 5</b> (or Linphone) and add a SIP account: domain{' '}
+                <b>{sipServer}</b>, plus the username and secret from your Telnyx SIP Connection.
+                Wait for the green <b>Registered</b> badge.
+              </li>
+              <li>
+                Make Zoiper the default app for <b>{proto}:</b> links (Zoiper does this on install),
+                then turn <b>Test mode OFF</b> and press <kbd>C</kbd> in the Dialer — Zoiper dials
+                the prospect instantly while your notes, timer and 1–8 shortcuts stay live.
+              </li>
             </>
           )}
         </ol>

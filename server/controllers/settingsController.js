@@ -73,10 +73,10 @@ const testSoftphone = asyncHandler(async (req, res) => {
     inBrowser: false,
     callerId: settings.get('caller_id') || '',
     callerIdPool: telephony.callerIdPool(),
-    sipServer: settings.get('voipso_sip_server') || '',
+    sipServer: settings.get('telnyx_sip_server') || '',
     message: configured
       ? `Launching ${dialUri} — your softphone should place this test call now.`
-      : `${dialUri} is ready to launch, but no VOIP.SO SIP account is saved yet. Register it in Zoiper (and here) first.`,
+      : `${dialUri} is ready to launch, but no Telnyx SIP account is saved yet. Register it in Zoiper (and here) first.`,
   });
 });
 

@@ -14,7 +14,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "VOIP.SO & Softphone-powered dialer + mini CRM (layered Express backend, Danish cold-calling superpowers)",
+  "description": "Telnyx & Softphone-powered dialer + mini CRM (layered Express backend, Danish cold-calling superpowers)",
   "dependencies": {
     "better-sqlite3": "^12.11.1",
     "cors": "^2.8.6",

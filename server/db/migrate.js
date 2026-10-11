@@ -19,6 +19,48 @@ function purgeUnknownSettings() {
   return stale;
 }
 
+// Hosts that used to be this app's carrier. A stored SIP server pointing at one of these is
+// not a configuration — it is the old default, and it must not survive the cutover.
+const LEGACY_SIP_HOSTS = /voip\.so|voip\.ms|voip\.so:|voipms/i;
+
+// Migration 7: VOIP.SO -> Telnyx.
+//
+// Three things have to happen here rather than in application code, because the very next
+// thing the boot sequence does is purge settings the app no longer knows about — once
+// purgeUnknownSettings() has run, the legacy rows are gone for good.
+//
+//   1. copy the SIP account (server/user/password) onto the telnyx_* keys,
+//   2. replace a stored legacy host with the Telnyx FQDN, keeping a genuinely custom server,
+//   3. drop a stored legacy WebSocket gateway so the Telnyx gateway default takes over.
+//
+// Running it against a database that never had a legacy carrier is a no-op plus the default.
+function migrateTelephonyToTelnyx(db) {
+  const read = (key) => {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row && row.value !== null && row.value !== undefined ? String(row.value) : '';
+  };
+  const write = (key, value) => db.prepare(
+    'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, String(value ?? ''));
+
+  const legacyServer = read('voipso_sip_server').trim();
+  const legacyUser = read('voipso_sip_user').trim();
+  const legacyPass = read('voipso_sip_password');
+
+  // A server the agent chose deliberately (their own PBX, a reseller) is preserved; the old
+  // vendor default is not a choice and becomes the new vendor.
+  const carriedServer = legacyServer && !LEGACY_SIP_HOSTS.test(legacyServer) ? legacyServer : '';
+  if (!read('telnyx_sip_server').trim()) write('telnyx_sip_server', carriedServer || 'sip.telnyx.com');
+  if (legacyUser && !read('telnyx_sip_user').trim()) write('telnyx_sip_user', legacyUser);
+  if (legacyPass && !read('telnyx_sip_password')) write('telnyx_sip_password', legacyPass);
+
+  // A gateway left pointing at the retired provider is worse than no gateway: the browser
+  // would dial a host that no longer answers, and the failure would look like a credentials
+  // problem. Clearing it restores the documented Telnyx default.
+  const legacyWs = read('webrtc_ws_url').trim();
+  if (legacyWs && LEGACY_SIP_HOSTS.test(legacyWs)) write('webrtc_ws_url', '');
+}
+
 const MIGRATIONS = [
   { version: 1, name: 'baseline-schema', up: () => db.exec(BASELINE_SQL) },
   { version: 2, name: 'calls-dial-uri', up: () => addColumn('calls', 'dial_uri', 'TEXT') },
@@ -42,6 +84,8 @@ const MIGRATIONS = [
   { version: 5, name: 'purge-legacy-settings', up: () => purgeUnknownSettings() },
   // The local mail sink's ledger. A pure addition, so it cannot disturb a database in use.
   { version: 6, name: 'outbox-local-mail-sink', up: () => db.exec(OUTBOX_SQL) },
+  // The carrier cutover. Runs before the purge on purpose — see migrateTelephonyToTelnyx.
+  { version: 7, name: 'telnyx-telephony-migration', up: (d) => migrateTelephonyToTelnyx(d) },
 ];
 
 function run() {
@@ -61,4 +105,4 @@ function run() {
   return { applied: pending.map((m) => `${m.version}:${m.name}`), total: MIGRATIONS.length };
 }
 
-module.exports = { run, MIGRATIONS, purgeUnknownSettings, addColumn };
+module.exports = { run, MIGRATIONS, purgeUnknownSettings, addColumn, migrateTelephonyToTelnyx, LEGACY_SIP_HOSTS };

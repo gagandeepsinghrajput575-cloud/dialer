@@ -31,7 +31,13 @@ These files must not be deleted if this directory is redistributed.
 - `n8n/skills.png` — a 2 MB screenshot, 40% of the payload, with no offline use.
   Everything else is a faithful copy.
 
-Total: 364 files, 2.9 MB.
+Total: 367 tracked paths, 2.9 MB — 364 regular files, one symlink, and the two
+notes written here (`PROVENANCE.md`, `skill-god.NOTES.md`).
+
+Upstream ships `mattpocock/AGENTS.md` as a **symlink** to `CLAUDE.md`, so both
+agent conventions resolve to one file. Git stores it as mode `120000`, i.e. still
+a symlink, not a dereferenced copy. That is why `find skills -type f` reports one
+fewer path than `git ls-files skills`.
 
 ## What is in here
 

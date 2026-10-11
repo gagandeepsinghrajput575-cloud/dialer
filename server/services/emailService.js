@@ -19,6 +19,7 @@ const net = require('net');
 const dns = require('dns').promises;
 const nodemailer = require('nodemailer');
 const settingsRepo = require('../repositories/settingsRepo');
+const outboxRepo = require('../repositories/outboxRepo');
 const { ApiError } = require('../middleware/errorHandler');
 
 // Practical upper bound from RFC 5321 — 64 char local part, 255 total.
@@ -257,16 +258,35 @@ async function verifyMany(emails, { concurrency = 8, mxTimeoutMs = DEFAULT_MX_TI
 }
 
 // ---------------------------------------------------------------- sending
+
+// The catch-all sink. `smtp_host === 'local'` means "do not transmit": mail is written to the
+// outbox table instead, so the compose → send → preview loop works with no credentials at all.
+// The distinction from an empty host matters and is load-bearing: empty must stay *unconfigured*
+// (that is the guard the whole app relies on), local is deliberately configured-but-offline.
+const LOCAL_SINK_HOST = 'local';
+const LOCAL_SINK_FROM = 'agent@pulse.dialer';
+
 function smtpConfig() {
   const s = settingsRepo.all();
   const host = String(s.smtp_host || '').trim();
   const user = String(s.smtp_user || '').trim();
   const pass = String(s.smtp_pass || '').trim();
+  const isLocalSink = host.toLowerCase() === LOCAL_SINK_HOST;
   return {
     host, port: Number(s.smtp_port || 587), secure: String(s.smtp_secure) === '1',
-    user, pass, from: String(s.smtp_from || '').trim() || user,
-    configured: Boolean(host && user && pass),
+    user, pass,
+    // A From header is mandatory in the previewer, and the sink is exactly where someone is
+    // most likely to have typed no identitity yet — so it gets a working default, and only it.
+    from: String(s.smtp_from || '').trim() || user || (isLocalSink ? LOCAL_SINK_FROM : ''),
+    isLocalSink,
+    configured: isLocalSink || Boolean(host && user && pass),
   };
+}
+
+// A Message-ID that is obviously local and cannot collide with a real provider's.
+function localMessageId() {
+  const rand = require('crypto').randomBytes(6).toString('hex');
+  return `local-${Date.now()}-${rand}@pulse.dialer`;
 }
 
 // Strip CR/LF and control characters out of anything that becomes a mail header. Without
@@ -344,6 +364,14 @@ function smtpFailure(e, cfg) {
 async function sendTest() {
   const cfg = smtpConfig();
   if (!cfg.configured) throw ApiError.badRequest('SMTP is not configured yet — set host, username and password in Settings.');
+  if (cfg.isLocalSink) {
+    // There is no server to reach: the sink is this process's own database. Reporting success
+    // is not a shortcut, it is the truth — and the UI says which mode it is in.
+    return {
+      ok: true, host: LOCAL_SINK_HOST, port: cfg.port, secure: false, from: cfg.from,
+      local: true, message: 'Local Outbox Sink ready',
+    };
+  }
   try {
     await transportFor(cfg).verify();
     return { ok: true, host: cfg.host, port: cfg.port, secure: cfg.secure, from: cfg.from };
@@ -354,7 +382,7 @@ async function sendTest() {
   }
 }
 
-async function send({ to, subject, text, html, attachments = [], replyTo }) {
+async function send({ to, subject, text, html, attachments = [], replyTo, prospectId = null }) {
   const cfg = smtpConfig();
 
   // Coerce first, then validate, so a stray undefined can never become the literal string
@@ -376,6 +404,50 @@ async function send({ to, subject, text, html, attachments = [], replyTo }) {
     replyTo: replyTo ? sanitizeHeader(replyTo, 320) : undefined,
     subject: sanitizeHeader(subject, 300),
   };
+
+  // ---- local catch-all sink: capture instead of transmit ----
+  // Everything above this line already ran, so the sink enforces exactly the same guards as a
+  // live send (valid recipients, a subject, sanitized headers). It only replaces the transport.
+  if (cfg.isLocalSink) {
+    const messageId = localMessageId();
+    const sentAt = new Date().toISOString();
+    const storedHeaders = {
+      From: headers.from,
+      To: headers.to,
+      ...(headers.replyTo ? { 'Reply-To': headers.replyTo } : {}),
+      Subject: headers.subject,
+      'Message-ID': messageId,
+      Date: new Date(sentAt).toUTCString(),
+      'X-Pulse-Transport': 'local-sink',
+    };
+    try {
+      const row = outboxRepo.insert({
+        prospectId,
+        to: recipients,
+        from: headers.from,
+        replyTo: headers.replyTo || '',
+        subject: headers.subject,
+        text: String(text || ''),
+        html: String(html || ''),
+        attachments,
+        headers: storedHeaders,
+      });
+      return {
+        ok: true,
+        messageId,
+        accepted: recipients,
+        rejected: [],
+        to: recipients,
+        sentAt,
+        local: true,          // the UI branches on this to say "captured", not "sent"
+        outboxId: row?.id ?? null,
+      };
+    } catch (e) {
+      // A sink that cannot write is a real failure — never report a captured mail that is not
+      // in the ledger, or the agent believes it was sent when nothing was recorded.
+      throw ApiError.badRequest(`Local outbox could not store the message — ${redact(e?.message || e, cfg)}`);
+    }
+  }
 
   try {
     const info = await transportFor(cfg).sendMail({
@@ -403,6 +475,7 @@ async function send({ to, subject, text, html, attachments = [], replyTo }) {
 
 module.exports = {
   verify, verifyMany, send, sendTest, smtpConfig, probeRcpt, lookupMx, suggestDomain,
-  buildTransport, transportFor, invalidateTransport, sanitizeHeader, redact,
+  buildTransport, transportFor, invalidateTransport, sanitizeHeader, redact, localMessageId,
+  LOCAL_SINK_HOST, LOCAL_SINK_FROM,
   SYNTAX_RE, DISPOSABLE, DEFAULT_MX_TIMEOUT_MS,
 };

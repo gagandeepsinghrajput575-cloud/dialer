@@ -4,7 +4,7 @@ import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { useStore } from '../store.jsx';
 
 export default function Toasts() {
-  const { toasts } = useStore();
+  const { toasts, dismissToast: dismiss } = useStore();
   return (
     <div className="toasts">
       <AnimatePresence>
@@ -12,6 +12,14 @@ export default function Toasts() {
           <motion.div key={t.id} layout className={`toast ${t.type}`} initial={{ opacity: 0, x: 40, scale: 0.95 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 40, scale: 0.95 }} transition={{ type: 'spring', stiffness: 400, damping: 30 }}>
             {t.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
             <span>{t.msg}{t.repeats > 1 ? ` (×${t.repeats})` : ''}</span>
+            {t.action && (
+              <button
+                className="toast-action"
+                onClick={() => { try { t.action.onClick(); } finally { dismiss(t.id); } }}
+              >
+                {t.action.label}
+              </button>
+            )}
           </motion.div>
         ))}
       </AnimatePresence>

@@ -118,6 +118,95 @@ const check = (cond, m) => (cond ? ok(m) : bad(m));
   check(email.sanitizeHeader('x'.repeat(500), 300).length === 300, 'header length is capped');
   check(email.sanitizeHeader(null) === '' && email.sanitizeHeader(undefined) === '', 'null/undefined headers become empty strings');
 
+  // ---- local catch-all mail sink ----
+  // The whole point: sending works with no credentials and no network, and what was "sent" is
+  // inspectable. Every guard from the live path must still apply — the sink replaces the
+  // transport, not the validation.
+  console.log('\n[email] local outbox sink');
+  const outbox = require('../../server/repositories/outboxRepo');
+  const previousFrom = settingsRepo.get('smtp_from');
+  settingsRepo.set('smtp_host', 'local');
+  settingsRepo.set('smtp_port', '1025');
+  settingsRepo.set('smtp_user', 'agent@firma.dk');
+  settingsRepo.set('smtp_from', '');
+
+  const sink = email.smtpConfig();
+  check(sink.configured === true && sink.isLocalSink === true, "host 'local' counts as configured and is flagged as the sink");
+  check(sink.from === 'agent@firma.dk', 'the sink still falls back to the username for From');
+
+  settingsRepo.set('smtp_user', '');
+  check(email.smtpConfig().from === 'agent@pulse.dialer', 'with no username either, the sink invents a usable From instead of an empty header');
+  settingsRepo.set('smtp_user', 'agent@firma.dk');
+
+  const sinkTest = await email.sendTest();
+  check(sinkTest.ok === true && sinkTest.host === 'local' && /Local Outbox Sink ready/.test(sinkTest.message),
+    'sendTest short-circuits to success without touching the network');
+
+  check(outbox.count() === 0, 'the outbox starts empty');
+  const sent = await email.send({ to: ['lead@gmail.com'], subject: 'Hej', text: 'body', html: '<b>hi</b>' });
+  check(sent.ok === true && sent.local === true, 'a sink send reports success and says it was local');
+  check(/^local-\d+-[0-9a-f]{12}@pulse\.dialer$/.test(sent.messageId), `the Message-ID is unmistakably local (${sent.messageId})`);
+  check(sent.accepted.length === 1 && sent.rejected.length === 0, 'the recipient is reported accepted');
+  check(typeof sent.outboxId === 'number' && outbox.count() === 1, 'the message landed in the ledger');
+
+  const stored = outbox.get(sent.outboxId);
+  check(stored.subject === 'Hej' && stored.text === 'body' && stored.html === '<b>hi</b>', 'bodies are stored verbatim, HTML included');
+  check(stored.to.join(',') === 'lead@gmail.com' && stored.from === 'agent@firma.dk', 'recipient and sender survive the round-trip through SQLite');
+  check(stored.headers['Message-ID'] === sent.messageId, 'the raw headers carry the same Message-ID the caller was given');
+  check(stored.headers['X-Pulse-Transport'] === 'local-sink', 'the transport marker identifies the row as captured, not sent');
+
+  // The live-path guards still hold in sink mode.
+  check(/^400/.test(await attempt({ to: ['not-an-email'], subject: 's', body: 'x' })), 'a malformed recipient is still refused in sink mode');
+  check(/^400/.test(await attempt({ to: ['a@gmail.com'], subject: '   ', body: 'x' })), 'an empty subject is still refused in sink mode');
+  check(/^400/.test(await attempt({ to: [], subject: 's', body: 'x' })), 'no recipient is still refused in sink mode');
+  check(outbox.count() === 1, 'nothing was captured by the refused sends');
+
+  // Header injection must not reach the stored headers either.
+  const injectedSend = await email.send({ to: ['a@gmail.com'], subject: 'Hej\r\nBcc: attacker@evil.dk', text: 'x' });
+  const injectedRow = outbox.get(injectedSend.outboxId);
+  check(!/[\r\n]/.test(injectedRow.subject), 'CRLF in a subject cannot become a header line in the ledger');
+  check(injectedRow.headers.Subject === 'Hej Bcc: attacker@evil.dk', 'the injected text survives as inert text, exactly as a live send would send it');
+
+  // Attachment metadata serialization, including the deliberate degradation.
+  const big = outbox.MAX_STORED_ATTACHMENT_BYTES + 1;
+  const withFiles = await email.send({
+    to: ['a@gmail.com'], subject: 'Files', text: 'x',
+    attachments: [
+      { filename: 'Tilbud.pdf', contentType: 'application/pdf', content: Buffer.from('PDF') },
+      { filename: 'huge.bin', contentType: 'application/octet-stream', content: Buffer.alloc(big, 7) },
+      { filename: 'meta-only.txt', contentType: 'text/plain', bytes: 42 },
+    ],
+  });
+  const filesRow = outbox.get(withFiles.outboxId);
+  check(filesRow.attachments.length === 3, 'every attachment is described, in order');
+  check(filesRow.attachments[0].stored === true && Buffer.from(filesRow.attachments[0].contentBase64, 'base64').toString() === 'PDF',
+    'a small attachment round-trips byte for byte through base64');
+  check(filesRow.attachments[1].stored === false && filesRow.attachments[1].bytes === big, 'an oversized attachment degrades to metadata');
+  check(filesRow.attachments[2].stored === false && filesRow.attachments[2].bytes === 42, 'a metadata-only attachment keeps its size');
+  const decoded = outbox.attachmentBuffer(withFiles.outboxId, 0);
+  check(decoded && decoded.content.toString() === 'PDF' && decoded.filename === 'Tilbud.pdf', 'attachmentBuffer decodes what the previewer downloads');
+  check(outbox.attachmentBuffer(withFiles.outboxId, 1) === null && outbox.attachmentBuffer(999999, 0) === null,
+    'a non-stored or missing attachment is a null, never a crash');
+
+  // Listing, search, paging and lifecycle.
+  check(outbox.list({ q: 'Files' }).total === 1, 'search matches on the subject');
+  check(outbox.list({ q: 'Tilbud' }).total === 1, 'search matches on an attachment filename');
+  check(outbox.list({ q: 'nothing-like-this' }).total === 0, 'a miss returns nothing rather than everything');
+  const page = outbox.list({ limit: 1 });
+  check(page.messages.length === 1 && page.total === 3, 'limit pages the rows without truncating the total');
+  check(page.messages[0].attachments.every((a) => a.contentBase64 === undefined), 'listings never ship attachment payloads');
+  check(outbox.remove(withFiles.outboxId) === 1 && outbox.remove(withFiles.outboxId) === 0, 'remove reports what it actually deleted');
+  check(outbox.clear() === 2 && outbox.count() === 0, 'clear empties the ledger');
+  check(outbox.list({}).total === 0 && outbox.get(sent.outboxId) === null, 'a cleared ledger reads back empty, and get() returns null, not undefined');
+
+  // Back to unconfigured: the sink must not have changed what an empty host means.
+  settingsRepo.set('smtp_host', '');
+  settingsRepo.set('smtp_from', previousFrom || '');
+  check(email.smtpConfig().configured === false && email.smtpConfig().isLocalSink === false,
+    'clearing the host leaves the sink and returns to unconfigured');
+  check(/^400/.test(await attempt({ to: ['a@gmail.com'], subject: 's', body: 'x' })), 'and sending is refused again');
+  check(outbox.count() === 0, 'the refused send captured nothing');
+
   // ---- pooled transport: reuse unless the settings actually change ----
   console.log('\n[email] transporter reuse');
   const cfgA = { host: 'smtp.a.dk', port: 587, secure: false, user: 'u', pass: 'p', from: 'u@a.dk' };

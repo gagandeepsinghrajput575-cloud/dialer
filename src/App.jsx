@@ -11,6 +11,7 @@ import ImportPage from './pages/Import.jsx';
 import SettingsPage from './pages/Settings.jsx';
 import Drawer from './components/Drawer.jsx';
 import Toasts from './components/Toasts.jsx';
+import OutboxModal from './components/OutboxModal.jsx';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -85,6 +86,8 @@ export default function App() {
       </main>
 
       <Drawer />
+      {/* Root-level so Settings, the composer and the "captured" toast can all open it. */}
+      <OutboxModal />
       <Toasts />
     </div>
   );

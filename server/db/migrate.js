@@ -1,7 +1,7 @@
 // Versioned migrations. Every entry runs exactly once, inside a transaction, and is
 // recorded in _migrations — so upgrading an existing database never loses data.
 const { db } = require('./index');
-const { BASELINE_SQL } = require('./schema');
+const { BASELINE_SQL, OUTBOX_SQL } = require('./schema');
 const { SETTING_KEYS } = require('../config/defaults');
 
 function hasColumn(table, column) {
@@ -40,6 +40,8 @@ const MIGRATIONS = [
     },
   },
   { version: 5, name: 'purge-legacy-settings', up: () => purgeUnknownSettings() },
+  // The local mail sink's ledger. A pure addition, so it cannot disturb a database in use.
+  { version: 6, name: 'outbox-local-mail-sink', up: () => db.exec(OUTBOX_SQL) },
 ];
 
 function run() {

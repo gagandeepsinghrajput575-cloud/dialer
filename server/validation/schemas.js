@@ -110,6 +110,14 @@ const settingsUpdate = z.object({
   smtp_reply_to: str(320).optional(),
   meet_link: nullable(z.string().max(500)).optional(),
   email_verify_deep: boolish.optional(),
+  // ---- in-browser WebRTC softphone ----
+  // Every one of these must also exist in config/defaults DEFAULTS — this schema strips
+  // unknown keys, so a setting missing here is silently un-settable. Group 2 of the test
+  // suite asserts the two lists stay in step.
+  webrtc_ws_url: str(300).optional(),
+  webrtc_credential_handoff: boolish.optional(),
+  webrtc_mic_device: str(200).optional(),
+  webrtc_speaker_device: str(200).optional(),
 });
 
 const followUpSchedule = z.object({ at: datetime() });

@@ -43,7 +43,13 @@ function start(prospectId, { tzOffset = null } = {}) {
 
   const dry = settings.getBool('dry_run');
   const proto = telephony.protocol();
-  const dialUri = telephony.buildDialUri(p.phone, proto);
+  const callMode = telephony.mode();
+  const webrtc = callMode === 'webrtc';
+  // A browser call is addressed to the SIP server over the WebSocket gateway; a softphone
+  // call is an OS protocol URI. Keeping them distinct means the client can tell, from the
+  // response alone, that it must open an in-browser session instead of handing the URI to
+  // the operating system.
+  const dialUri = webrtc ? telephony.buildWebRtcUri(p.phone) : telephony.buildDialUri(p.phone, proto);
   const { callerId, poolSize, index } = telephony.nextCallerId();
 
   // One atomic unit: either the call row and the prospect's dial counter both land, or
@@ -71,13 +77,19 @@ function start(prospectId, { tzOffset = null } = {}) {
     throw new ApiError(500, String(e.message || e), failed ? { callId: failed.id } : undefined);
   }
 
+  const readiness = webrtc ? telephony.webrtcReadiness() : null;
+
   return {
     callId: call.id,
     dryRun: dry,
     dialUri,
-    dialUriFull: telephony.buildDialUriFull(p.phone),
-    protocol: proto,
-    telephonyMode: telephony.mode(),
+    dialUriFull: webrtc ? dialUri : telephony.buildDialUriFull(p.phone),
+    protocol: webrtc ? 'webrtc' : proto,
+    telephonyMode: callMode,
+    // The client branches on this: true means "open an in-browser session", false means
+    // "hand the URI to the OS softphone".
+    inBrowser: webrtc,
+    webrtc: webrtc ? { wsUrl: readiness.wsUrl, server: readiness.server, configured: readiness.configured } : null,
     phone: p.phone,
     callerId,
     callerIdPoolSize: poolSize,
@@ -87,9 +99,12 @@ function start(prospectId, { tzOffset = null } = {}) {
     // before the softphone is handed the number, not after the bill arrives.
     numberKind: telephony.numberKind(p.phone),
     voicemail: telephony.voicemailGreeting(),
-    warning: !dry && telephony.mode() === 'softphone' && !telephony.sipConfigured()
-      ? 'VOIP.SO SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
-      : null,
+    warning: webrtc
+      ? (readiness.configured ? null
+        : `The in-browser softphone is missing: ${readiness.missing.join(', ')}. Add it in Settings → Telephony.`)
+      : (!dry && !telephony.sipConfigured()
+        ? 'VOIP.SO SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
+        : null),
   };
 }
 

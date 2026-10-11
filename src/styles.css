@@ -865,3 +865,59 @@ button, a, label, summary, input, select, textarea,
   .banner-phone-chip, .banner-email-chip, .banner-company-chip { min-height: 40px; padding-top: 9px; padding-bottom: 9px; }
 }
 
+
+/* ---------- In-browser softphone (WebRTC) ---------- */
+/* The far end plays through this element, so it has to exist in the document. Hiding it
+   visually does not stop playback. */
+.webrtc-audio { display: none; }
+
+.webrtc-badge {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+  padding: 3px 10px; border-radius: 99px; font-size: 11.5px; font-weight: 700;
+  color: #6ee7b7; background: rgba(52,211,153,0.14);
+  border: 1px solid rgba(52,211,153,0.4); white-space: nowrap;
+}
+.webrtc-badge::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; animation: pulse 1.6s infinite;
+}
+.webrtc-badge.muted { color: #fca5a5; background: rgba(248,113,113,0.14); border-color: rgba(248,113,113,0.4); }
+.webrtc-badge.muted::before { animation: none; }
+
+/* Only the first action button in the strip is pushed right — the badge already did the
+   pushing, so Mute and Keypad stay next to each other. */
+.inflight .webrtc-badge ~ .btn.xs { margin-left: 0; }
+.inflight.err { color: #fca5a5; border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.09); }
+
+.dtmf-pad { width: min(320px, 92vw); padding: 16px; border-radius: 18px; }
+.dtmf-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-size: 14px; }
+.dtmf-head b { display: inline-flex; align-items: center; gap: 7px; }
+.dtmf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.dtmf-key {
+  padding: 14px 0; border-radius: 13px; font-size: 19px; font-weight: 700; cursor: pointer;
+  color: var(--text); background: rgba(255,255,255,0.05); border: 1px solid var(--line);
+  transition: background 120ms ease, transform 80ms ease;
+}
+.dtmf-key:hover { background: rgba(255,255,255,0.1); }
+.dtmf-key:active { transform: scale(0.94); background: rgba(52,211,153,0.18); }
+.dtmf-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.dtmf-log {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------- Settings: in-browser softphone panel ---------- */
+.handoff-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  margin: 14px 0 4px; padding: 12px 14px; border-radius: 14px;
+  border: 1px solid var(--line); background: rgba(255,255,255,0.03);
+}
+.handoff-row b { display: block; margin-bottom: 4px; font-size: 13.5px; }
+.handoff-row small { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; max-width: 62ch; }
+
+.mic-test { margin-top: 14px; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.03); }
+.mic-test-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 13.5px; }
+.mic-test-head b { display: inline-flex; align-items: center; gap: 7px; }
+.mic-meter { height: 10px; border-radius: 99px; background: rgba(0,0,0,0.4); overflow: hidden; border: 1px solid var(--line); }
+.mic-meter span { display: block; height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, #34d399, #22d3ee); transition: width 90ms linear; }
+.mic-meter.on { border-color: rgba(52,211,153,0.45); }

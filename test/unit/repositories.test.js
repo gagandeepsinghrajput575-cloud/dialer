@@ -108,6 +108,37 @@ async function run() {
   assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.voip.so');
   ok('normalization table (9 cases) + dial URI builders');
 
+  // ---- in-browser softphone session (WebRTC) ----
+  // The browser leg is addressed over the provider's WebSocket gateway, and the SIP secret
+  // only leaves the server when the operator explicitly turned the handoff on.
+  settings.set('voipso_sip_server', 'sip.voip.so');
+  settings.set('voipso_sip_user', '1001');
+  settings.set('voipso_sip_password', 'super-secret');
+  settings.set('webrtc_ws_url', '');
+  settings.set('webrtc_credential_handoff', '0');
+  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.voip.so;transport=ws');
+  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://sip.voip.so:8089/ws', 'the gateway is derived when no URL is set');
+  const handoffOff = telephony.webrtcSession();
+  assert.strictEqual(handoffOff.password, '', 'the password must not be in the descriptor while the handoff is off');
+  assert.strictEqual(handoffOff.hasPassword, true);
+  assert.strictEqual(handoffOff.canRegister, false, 'a browser cannot register without the secret');
+  assert.strictEqual(handoffOff.wsUrlSource, 'derived');
+  settings.set('caller_id', '+45 20 12 34 56');
+  settings.set('webrtc_credential_handoff', '1');
+  const handoffOn = telephony.webrtcSession();
+  assert.strictEqual(handoffOn.password, 'super-secret');
+  assert.strictEqual(handoffOn.canRegister, true);
+  assert.strictEqual(handoffOn.callerId, '+4520123456');
+  settings.set('webrtc_ws_url', 'wss://edge.voip.so/live');
+  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://edge.voip.so/live', 'an explicit gateway wins');
+  assert.strictEqual(telephony.webrtcSession().wsUrlSource, 'settings');
+  settings.set('webrtc_ws_url', '');
+  settings.set('voipso_sip_password', '');
+  const unconfigured = telephony.webrtcSession();
+  assert.deepStrictEqual(unconfigured.missing, ['password']);
+  assert.strictEqual(unconfigured.configured, false);
+  ok('webrtc session: derived gateway, credential handoff gate, readiness reasons');
+
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('caller_id_pool', '+4520987654, 31 45 67 89');
   assert.deepStrictEqual(telephony.callerIdPool(), ['+4520123456', '+4520987654', '+4531456789']);

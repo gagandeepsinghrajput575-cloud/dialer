@@ -26,13 +26,43 @@ const put = asyncHandler(async (req, res) => {
 });
 
 // Protocol verification: nothing leaves the machine, the browser dispatches the returned URI.
+// In webrtc mode there is no OS dispatch at all — the browser opens the session itself — so
+// the response describes a WebRTC session instead of claiming a softphone will launch. It used
+// to answer `configured: true` unconditionally for webrtc, which told the agent everything was
+// ready when nothing had been set up.
 const testSoftphone = asyncHandler(async (req, res) => {
   const proto = telephony.protocol();
   const mode = telephony.mode();
   const sample = telephony.normalizePhone(req.body?.number || '20123456');
+
+  if (mode === 'webrtc') {
+    const session = telephony.webrtcSession();
+    return res.json({
+      ok: true,
+      configured: session.canRegister,
+      protocol: 'webrtc',
+      telephonyMode: mode,
+      sampleNumber: sample,
+      dialUri: telephony.buildWebRtcUri(sample),
+      dialUriFull: telephony.buildWebRtcUri(sample),
+      inBrowser: true,
+      callerId: session.callerId,
+      callerIdPool: telephony.callerIdPool(),
+      sipServer: session.server,
+      wsUrl: session.wsUrl,
+      needsCredentialHandoff: session.configured && !session.credentialHandoff,
+      webrtc: session,
+      message: session.canRegister
+        ? `Ready — the browser will dial ${sample} over ${session.wsUrl}.`
+        : session.configured
+          ? 'The SIP account is saved, but credential handoff is off, so the browser cannot register. Turn it on in Settings → Telephony.'
+          : `The in-browser softphone is missing: ${session.missing.join(', ')}. Add it in Settings → Telephony.`,
+    });
+  }
+
   const dialUri = telephony.buildDialUri(sample, proto);
-  const configured = mode === 'webrtc' ? true : telephony.sipConfigured();
-  res.json({
+  const configured = telephony.sipConfigured();
+  return res.json({
     ok: true,
     configured,
     protocol: proto,
@@ -40,6 +70,7 @@ const testSoftphone = asyncHandler(async (req, res) => {
     sampleNumber: sample,
     dialUri,
     dialUriFull: telephony.buildDialUriFull(sample),
+    inBrowser: false,
     callerId: settings.get('caller_id') || '',
     callerIdPool: telephony.callerIdPool(),
     sipServer: settings.get('voipso_sip_server') || '',

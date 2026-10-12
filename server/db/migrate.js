@@ -1,7 +1,7 @@
 // Versioned migrations. Every entry runs exactly once, inside a transaction, and is
 // recorded in _migrations — so upgrading an existing database never loses data.
 const { db } = require('./index');
-const { BASELINE_SQL, OUTBOX_SQL } = require('./schema');
+const { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL } = require('./schema');
 const { SETTING_KEYS } = require('../config/defaults');
 
 function hasColumn(table, column) {
@@ -90,6 +90,8 @@ const MIGRATIONS = [
   // O(1), rewrite-free ALTER on SQLite, so every row a running database already holds keeps
   // reading back as 'outbound' — nothing to backfill, nothing to lose.
   { version: 8, name: 'calls-direction-inbound', up: () => addColumn('calls', 'direction', "TEXT NOT NULL DEFAULT 'outbound'") },
+  // Local audio recording storage ledger. Completely offline, local disk storage at zero cost.
+  { version: 9, name: 'recordings-storage', up: () => db.exec(RECORDINGS_SQL) },
 ];
 
 function run() {

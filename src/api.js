@@ -139,4 +139,25 @@ export const api = {
   createBackup: (reason = 'manual') => req('POST', '/api/settings/backups', { reason }),
   backupDownloadUrl: (file) => `/api/settings/backups/${encodeURIComponent(file)}`,
   exportJsonUrl: () => '/api/prospects/export?format=json',
+
+  // ---- In-Browser Web Audio Recordings (Zero Extra Charges) ----
+  recordings: (opts = {}) => {
+    const { search = '', outcome = '', direction = '', limit = 50, offset = 0 } = opts;
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (outcome) params.set('outcome', outcome);
+    if (direction) params.set('direction', direction);
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    return req('GET', `/api/recordings?${params.toString()}`);
+  },
+  uploadRecording: (callId, blob, durationSec = 0) => {
+    const form = new FormData();
+    form.append('audio', blob, `call-${callId}.webm`);
+    form.append('duration_sec', String(Math.round(durationSec)));
+    return req('POST', `/api/recordings/${callId}`, form, true);
+  },
+  deleteRecording: (callId) => req('DELETE', `/api/recordings/${callId}`),
+  demoRecordings: () => req('POST', '/api/recordings/demo', {}),
+  recordingAudioUrl: (callId) => `/api/recordings/${callId}/audio`,
 };

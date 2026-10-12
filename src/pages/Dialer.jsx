@@ -242,9 +242,19 @@ export default function Dialer() {
     webrtcLiveRef.current = false;
     if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
   }, []);
+  const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
+    const idToUpload = recCallId || callId || classifyRef.current?.callId;
+    if (idToUpload && blob && blob.size > 0) {
+      try {
+        await api.uploadRecording(idToUpload, blob, durationSec);
+      } catch (err) {
+        console.warn('Background recording upload non-fatal failure:', err);
+      }
+    }
+  }, [callId]);
   useEffect(() => {
-    webrtc?.setCallHandlers?.({ onActive: engineActive, onEnded: engineEnded });
-  }, [webrtc, engineActive, engineEnded]);
+    webrtc?.setCallHandlers?.({ onActive: engineActive, onEnded: engineEnded, onRecordingReady: handleRecordingReady });
+  }, [webrtc, engineActive, engineEnded, handleRecordingReady]);
   webrtcRef.current = webrtc;
   // Readable synchronously from the key handler: while this is set, the banner owns the phone.
   const ringingRef = useRef(null);
@@ -427,7 +437,7 @@ export default function Dialer() {
       // here. The engine reports back only when the audio path is real (or, in test mode, when
       // the simulator has auto-connected), so the timer cannot start on a silent call.
       if (r.inBrowser) {
-        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun });
+        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
         if (!res.ok) {
           // Nothing ever left the machine, so the record the server just created is a phantom.
           // Remove it rather than leaving a call in history that no audio ever carried.

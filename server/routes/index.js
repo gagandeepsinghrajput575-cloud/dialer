@@ -11,6 +11,7 @@ router.use('/settings', require('./settings'));
 router.use('/telephony', require('./telephony'));
 router.use('/import', require('./import'));
 router.use('/email', require('./email'));
+router.use('/recordings', require('./recordings'));
 router.use('/', require('./system'));
 
 router.get('/stats', statsController.stats);

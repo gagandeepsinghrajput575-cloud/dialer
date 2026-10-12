@@ -7,7 +7,7 @@
     "dev": "concurrently -k \"node server/index.js\" \"vite\"",
     "app": "vite build && node server/index.js",
     "test": "node test/all-tests.js",
-    "test:unit": "node test/unit/repositories.test.js && node test/unit/inbound.test.js && node test/unit/hardening.test.js && node test/unit/email.test.js && node test/unit/property.test.js && node test/unit/import-map.test.js",
+    "test:unit": "node test/unit/repositories.test.js && node test/unit/inbound.test.js && node test/unit/hardening.test.js && node test/unit/email.test.js && node test/unit/property.test.js && node test/unit/import-map.test.js && node test/unit/recordings.test.js",
     "test:property": "node test/unit/property.test.js",
     "test:ui": "vite build && node test/ui/dialer-race.test.js"
   },

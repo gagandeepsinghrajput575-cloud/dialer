@@ -72,4 +72,22 @@ CREATE INDEX IF NOT EXISTS idx_outbox_prospect ON outbox(prospect_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at);
 `;
 
-module.exports = { BASELINE_SQL, OUTBOX_SQL };
+// Call recordings ledger for zero-extra-charge local audio storage.
+// Directly references calls and prospects, tracking filename on disk, duration, and file size.
+const RECORDINGS_SQL = `
+CREATE TABLE IF NOT EXISTS recordings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id INTEGER NOT NULL UNIQUE REFERENCES calls(id) ON DELETE CASCADE,
+  prospect_id INTEGER REFERENCES prospects(id) ON DELETE SET NULL,
+  filename TEXT NOT NULL,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  mime_type TEXT NOT NULL DEFAULT 'audio/webm',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_recordings_call ON recordings(call_id);
+CREATE INDEX IF NOT EXISTS idx_recordings_prospect ON recordings(prospect_id);
+CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at);
+`;
+
+module.exports = { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL };

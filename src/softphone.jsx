@@ -27,8 +27,8 @@ export function SoftphoneProvider({ children }) {
 
   // The dialer registers here. It is a ref, not state: the engine calls these on the media
   // thread's timeline and must never wait for a re-render to open the classification modal.
-  const handlersRef = useRef({ onActive: null, onEnded: null });
-  const setCallHandlers = useCallback((handlers) => { handlersRef.current = handlers || { onActive: null, onEnded: null }; }, []);
+  const handlersRef = useRef({ onActive: null, onEnded: null, onRecordingReady: null });
+  const setCallHandlers = useCallback((handlers) => { handlersRef.current = handlers || { onActive: null, onEnded: null, onRecordingReady: null }; }, []);
 
   // ---- a call is ringing ---------------------------------------------------------------
   const onIncoming = useCallback(async (entry) => {
@@ -113,6 +113,17 @@ export function SoftphoneProvider({ children }) {
     handlersRef.current.onEnded?.(direction);
   }, [inboundRef, setInbound, setInboundEnded]);
 
+  const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {
+    if (callId && blob && blob.size > 0) {
+      try {
+        await api.uploadRecording(callId, blob, durationSec);
+      } catch (e) {
+        console.warn('Background recording upload non-fatal failure:', e);
+      }
+    }
+    handlersRef.current.onRecordingReady?.({ blob, durationSec, callId });
+  }, []);
+
   const engine = useWebRtc({
     enabled,
     dryRun,
@@ -122,6 +133,7 @@ export function SoftphoneProvider({ children }) {
     onEnded,
     onIncoming,
     onIncomingEnded,
+    onRecordingReady,
   });
 
   const { simulateIncomingCall, simulateCallerHangup, incomingCall } = engine;

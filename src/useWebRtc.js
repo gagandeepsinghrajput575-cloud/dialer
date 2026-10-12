@@ -81,7 +81,7 @@ export function mediaUnavailableReason() {
  */
 export default function useWebRtc({
   enabled = false, dryRun = false, countryCode = '', micDevice = '',
-  onActive, onEnded, onIncoming, onIncomingEnded,
+  onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady,
 } = {}) {
   const [state, setState] = useState('idle');
   const [muted, setMuted] = useState(false);
@@ -105,7 +105,9 @@ export default function useWebRtc({
   const rafRef = useRef(0);
   const simRef = useRef(0);
   const tonesRef = useRef([]);
-  const callbacksRef = useRef({ onActive, onEnded, onIncoming, onIncomingEnded });
+  const recorderRef = useRef(null);
+  const recordingCallIdRef = useRef(null);
+  const callbacksRef = useRef({ onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady });
   const stateRef = useRef('idle');
   const mutedRef = useRef(false);
   const enabledRef = useRef(enabled);
@@ -121,7 +123,7 @@ export default function useWebRtc({
   const answerInboundRef = useRef(null);
   const declineInboundRef = useRef(null);
 
-  callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded };
+  callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
 
   const setStateSafe = useCallback((next) => {
@@ -142,8 +144,79 @@ export default function useWebRtc({
     if (lock) lock.release?.().catch?.(() => {});
   }, []);
 
+  const startRecording = useCallback((callId) => {
+    if (dryRun || typeof window === 'undefined' || typeof window.MediaRecorder !== 'function') return;
+    const Ctx = audioContextCtor();
+    if (!Ctx) return;
+    try {
+      const ctx = new Ctx();
+      const dest = ctx.createMediaStreamDestination();
+      if (streamRef.current && streamRef.current.getAudioTracks().length) {
+        try {
+          const micSource = ctx.createMediaStreamSource(streamRef.current);
+          micSource.connect(dest);
+        } catch { /* ignore */ }
+      }
+      const remoteStream = audioRef.current?.srcObject;
+      if (remoteStream && remoteStream.getAudioTracks().length) {
+        try {
+          const remoteSource = ctx.createMediaStreamSource(remoteStream);
+          remoteSource.connect(dest);
+        } catch { /* ignore */ }
+      }
+      const mime = typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg');
+      const recorder = new MediaRecorder(dest.stream, { mimeType: mime });
+      const chunks = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+      const startedAt = Date.now();
+      recorder.start(1000);
+      recordingCallIdRef.current = callId || null;
+      recorderRef.current = {
+        recorder,
+        ctx,
+        chunks,
+        mimeType: mime,
+        startedAt,
+        callId,
+        stop: () => {
+          try {
+            if (recorder.state !== 'inactive') recorder.stop();
+          } catch { /* already stopped */ }
+        },
+      };
+    } catch {
+      recorderRef.current = null;
+    }
+  }, [dryRun]);
+
+  const stopRecording = useCallback(() => {
+    const session = recorderRef.current;
+    if (!session) return;
+    recorderRef.current = null;
+    try {
+      session.recorder.onstop = () => {
+        try {
+          const durationSec = Math.max(0, Math.round((Date.now() - session.startedAt) / 1000));
+          const blob = new Blob(session.chunks, { type: session.mimeType });
+          if (blob.size > 0) {
+            callbacksRef.current.onRecordingReady?.({ blob, durationSec, callId: session.callId || recordingCallIdRef.current });
+          }
+        } catch { /* ignore assembly errors */ }
+        try { session.ctx.close(); } catch { /* ignore */ }
+      };
+      session.stop();
+    } catch {
+      try { session.ctx.close(); } catch { /* ignore */ }
+    }
+  }, []);
+
   // ---- teardown. Idempotent, and never throws. ----
   const releaseMedia = useCallback(() => {
+    stopRecording();
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     if (simRef.current) { clearInterval(simRef.current); simRef.current = 0; }
 
@@ -177,7 +250,7 @@ export default function useWebRtc({
     setLevel(0);
     setMuted(false);
     mutedRef.current = false;
-  }, [releaseInboundLock, stopRinger]);
+  }, [releaseInboundLock, stopRecording, stopRinger]);
 
   // Release the microphone if the component unmounts mid-call.
   useEffect(() => {
@@ -437,8 +510,9 @@ export default function useWebRtc({
     setTarget(answered.callerNumber);
     setStateSafe('active');
     callbacksRef.current.onActive?.('inbound');
+    if (answered.callId) startRecording(answered.callId);
     return { ok: true, entry: answered };
-  }, [endIncoming, openMicrophone, releaseMedia, setStateSafe, startSimulatedLevel, stopRinger]);
+  }, [endIncoming, openMicrophone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel, stopRinger]);
 
   const declineInbound = useCallback(async () => {
     const entry = incomingRef.current;
@@ -556,7 +630,7 @@ export default function useWebRtc({
     };
   }, [enabled]);
 
-  const start = useCallback(async (phone, { dryRun: callDryRun = false } = {}) => {
+  const start = useCallback(async (phone, { dryRun: callDryRun = false, callId = null } = {}) => {
     if (!enabled) return { ok: false, reason: 'not-webrtc' };
     const origin = stateRef.current;
     // 'standby' is a resting state, not a call: an outbound dial from standby reuses the
@@ -571,6 +645,7 @@ export default function useWebRtc({
     setTarget(phone);
     setDirection('outbound');
     setStateSafe('registering');
+    recordingCallIdRef.current = callId || null;
 
     if (callDryRun) {
       // Test mode never touches the microphone. It plays a ringback, then pretends to connect.
@@ -648,7 +723,11 @@ export default function useWebRtc({
         pc.oniceconnectionstatechange = () => {
           const s = pc.iceConnectionState;
           if (s === 'connected' || s === 'completed') {
-            if (stateRef.current !== 'active') { setStateSafe('active'); callbacksRef.current.onActive?.('outbound'); }
+            if (stateRef.current !== 'active') {
+              setStateSafe('active');
+              callbacksRef.current.onActive?.('outbound');
+              if (recordingCallIdRef.current) startRecording(recordingCallIdRef.current);
+            }
           } else if (s === 'failed' || s === 'disconnected') {
             setError('The audio connection dropped.');
             setStateSafe('error');
@@ -678,7 +757,7 @@ export default function useWebRtc({
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, handleIncoming, openMicrophone, playTone, setStateSafe, startSimulatedLevel]);
+  }, [enabled, handleIncoming, openMicrophone, playTone, setStateSafe, startRecording, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;
@@ -748,9 +827,11 @@ export default function useWebRtc({
     audioRef,
     start, hangUp, toggleMute, sendDtmf, reset,
     answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+    startRecording, stopRecording,
   }), [
     state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
     start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+    startRecording, stopRecording,
   ]);
 }
 

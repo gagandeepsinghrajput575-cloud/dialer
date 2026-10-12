@@ -9,6 +9,7 @@ import Prospects from './pages/Prospects.jsx';
 import Pipeline from './pages/Pipeline.jsx';
 import ImportPage from './pages/Import.jsx';
 import SettingsPage from './pages/Settings.jsx';
+import Recordings from './pages/Recordings.jsx';
 import Drawer from './components/Drawer.jsx';
 import Toasts from './components/Toasts.jsx';
 import OutboxModal from './components/OutboxModal.jsx';
@@ -20,10 +21,11 @@ const NAV = [
   { id: 'dialer', label: 'Dialer', icon: PhoneCall },
   { id: 'prospects', label: 'Prospects', icon: Users },
   { id: 'pipeline', label: 'Pipeline', icon: KanbanSquare },
+  { id: 'recordings', label: 'Recordings', icon: Headphones },
   { id: 'import', label: 'Import', icon: Upload },
   { id: 'settings', label: 'Settings', icon: Cog },
 ];
-const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipeline: Pipeline, import: ImportPage, settings: SettingsPage };
+const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipeline: Pipeline, recordings: Recordings, import: ImportPage, settings: SettingsPage };
 
 // The softphone wraps the whole shell: one engine, one registration, and an incoming call
 // rings on every page — a callback does not wait for the agent to be looking at the dialer.

@@ -7,13 +7,15 @@ const root = path.join(__dirname, '..', '..');
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, 'data');
 const backupDir = path.join(dataDir, 'backups');
 const audioDir = path.join(dataDir, 'audio');
-for (const dir of [dataDir, backupDir, audioDir]) fs.mkdirSync(dir, { recursive: true });
+const recordingsDir = path.join(dataDir, 'recordings');
+for (const dir of [dataDir, backupDir, audioDir, recordingsDir]) fs.mkdirSync(dir, { recursive: true });
 
 module.exports = {
   root,
   dataDir,
   backupDir,
   audioDir,
+  recordingsDir,
   dbPath: path.join(dataDir, 'dialer.db'),
   port: parseInt(process.env.PORT || '3001', 10),
   // The test suite sets PULSE_TEST=1 to keep the logs quiet.

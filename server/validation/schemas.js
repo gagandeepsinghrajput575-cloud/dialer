@@ -207,10 +207,18 @@ const queueQuery = z.object({
   cursor: z.string().max(256).optional(),
 });
 
+const recordingsQuery = z.object({
+  search: z.string().trim().max(120).optional(),
+  outcome: z.string().max(40).optional(),
+  direction: z.enum(['inbound', 'outbound']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).max(100000).optional(),
+});
+
 module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,
   callPatch, callInbound, callMissed, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
-  bulkStage, bulkDelete,
+  bulkStage, bulkDelete, recordingsQuery,
 };

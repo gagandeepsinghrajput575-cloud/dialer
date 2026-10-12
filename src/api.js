@@ -161,4 +161,11 @@ export const api = {
   deleteRecording: (callId) => req('DELETE', `/api/recordings/${callId}`),
   demoRecordings: () => req('POST', '/api/recordings/demo', {}),
   recordingAudioUrl: (callId) => `/api/recordings/${callId}/audio`,
+  recordingChats: (callId) => req('GET', `/api/recordings/${callId}/chats`),
+  createRecordingChat: (callId, title) => req('POST', `/api/recordings/${callId}/chats`, { title }),
+  getRecordingChat: (callId, chatId) => req('GET', `/api/recordings/${callId}/chats/${chatId}`),
+  deleteRecordingChat: (callId, chatId) => req('DELETE', `/api/recordings/${callId}/chats/${chatId}`),
+  recordingAiChat: (callId, body) => req('POST', `/api/recordings/${callId}/ai-chat`, body),
+  getRecordingScript: () => req('GET', '/api/recordings/script'),
+  updateRecordingScript: (script) => req('PUT', '/api/recordings/script', { script }),
 };

@@ -1,9 +1,12 @@
-// Controller for call recordings: zero-cost local audio streaming, upload, and querying.
 const fs = require('fs');
 const path = require('path');
 const recordingRepo = require('../repositories/recordingRepo');
 const calls = require('../repositories/callRepo');
 const prospects = require('../repositories/prospectRepo');
+const chatRepo = require('../repositories/recordingChatRepo');
+const aiRecordingCoach = require('../services/aiRecordingCoach');
+const settings = require('../repositories/settingsRepo');
+const { DEFAULT_SALES_SCRIPT } = require('../config/defaults');
 const { recordingsDir } = require('../config/env');
 const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
@@ -210,10 +213,75 @@ const demo = asyncHandler(async (req, res) => {
   res.json({ ok: true, created: createdCount });
 });
 
+const listChats = asyncHandler(async (req, res) => {
+  const callId = Number(req.params.callId);
+  if (!Number.isInteger(callId) || callId <= 0) throw ApiError.badRequest('Invalid call ID');
+  const chats = chatRepo.listChats(callId);
+  res.json({ chats });
+});
+
+const createChat = asyncHandler(async (req, res) => {
+  const callId = Number(req.params.callId);
+  if (!Number.isInteger(callId) || callId <= 0) throw ApiError.badRequest('Invalid call ID');
+  const { title } = req.body || {};
+  const chat = chatRepo.createChat(callId, title);
+  res.status(201).json({ chat });
+});
+
+const getChat = asyncHandler(async (req, res) => {
+  const chatId = Number(req.params.chatId);
+  if (!Number.isInteger(chatId) || chatId <= 0) throw ApiError.badRequest('Invalid chat ID');
+  const chat = chatRepo.getChat(chatId);
+  if (!chat) throw ApiError.notFound('Chat session not found');
+  res.json({ chat });
+});
+
+const deleteChat = asyncHandler(async (req, res) => {
+  const chatId = Number(req.params.chatId);
+  if (!Number.isInteger(chatId) || chatId <= 0) throw ApiError.badRequest('Invalid chat ID');
+  const deleted = chatRepo.deleteChat(chatId);
+  res.json({ ok: true, deleted });
+});
+
+const aiChat = asyncHandler(async (req, res) => {
+  const callId = Number(req.params.callId);
+  if (!Number.isInteger(callId) || callId <= 0) throw ApiError.badRequest('Invalid call ID');
+  const { chatId, message, script, quickAction } = req.body || {};
+
+  const result = await aiRecordingCoach.processCoachingTurn({
+    callId,
+    chatId,
+    message,
+    script,
+    quickAction,
+  });
+
+  res.json(result);
+});
+
+const getScript = asyncHandler(async (req, res) => {
+  const script = settings.get('sales_script') || DEFAULT_SALES_SCRIPT;
+  res.json({ script });
+});
+
+const updateScript = asyncHandler(async (req, res) => {
+  const { script } = req.body || {};
+  if (typeof script !== 'string') throw ApiError.badRequest('Script must be a string');
+  settings.set('sales_script', script);
+  res.json({ ok: true, script });
+});
+
 module.exports = {
   list,
   audio,
   upload,
   remove,
   demo,
+  listChats,
+  createChat,
+  getChat,
+  deleteChat,
+  aiChat,
+  getScript,
+  updateScript,
 };

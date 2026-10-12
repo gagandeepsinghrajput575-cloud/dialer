@@ -13,6 +13,30 @@ const DEFAULT_FOLLOWUP_EMAIL = [
   '{{agent}}',
 ].join('\n');
 
+const DEFAULT_SALES_SCRIPT = [
+  '# Cold Call Script & Objection Battlecard',
+  '',
+  '## 1. Opening Hook (0-15s)',
+  '- "Hej [Navn], det er [Mit Navn] fra [Firma]. Har du 30 sekunder, eller fanger jeg dig midt i noget?"',
+  '- Mål: Respekter deres tid og opnå tilladelse til samtalen.',
+  '',
+  '## 2. Reason & Value Proposition (15-45s)',
+  '- "Grunden til jeg ringer er, at vi hjælper virksomheder som [Firma] med at få kvalificerede opgaver direkte i kalenderen."',
+  '- Pain point: Mange spilder tid på henvendelser, der aldrig bliver til reelle aftaler.',
+  '',
+  '## 3. Qualifying Questions (45-75s)',
+  '- "Hvordan ser jeres kapacitet ud for de kommende 2-3 måneder?"',
+  '- "Er der specifikke projekter eller kunder, I helst vil have flere af?"',
+  '',
+  '## 4. Objection Handling',
+  '- "Vi har for travlt": "Forståeligt! Netop derfor tager vi kun 10 minutter over Meet, så du ved hvad mulighederne er til når I har luft."',
+  '- "Send en mail": "Det gør jeg meget gerne. Hvad er den bedste mailadresse? For at gøre den relevant: hvilke typer opgaver foretrækker I mest?"',
+  '- "Vi bruger allerede nogen": "Det er godt at høre. Vi erstatter dem ikke nødvendigvis, men giver jer et benchmark på markedet."',
+  '',
+  '## 5. Close for Meeting',
+  '- "Lad os tage en uforpligtende 10-minutters snak over Google Meet på tirsdag kl. 10 eller torsdag kl. 13 — hvad passer bedst?"',
+].join('\n');
+
 const DEFAULTS = {
   // ---- telephony: Telnyx + desktop softphone (Denmark) ----
   telephony_mode: 'softphone', // 'softphone' (Zoiper/Linphone) or 'webrtc'
@@ -39,10 +63,11 @@ const DEFAULTS = {
   queue_smart_sort: '1',
   vm_auto_advance: '1', // V (voicemail drop) advances to the next prospect instantly
   vm_greeting: '', // filename inside data/audio
-  // ---- post-call copilot ----
+  // ---- post-call copilot & AI audio coach ----
   ai_provider: 'local', // 'local' | 'openai' | 'gemini'
   ai_model: '',
   ai_api_key: '', // secret
+  sales_script: DEFAULT_SALES_SCRIPT, // cold calling target script & objection battlecard
   // ---- agent + follow-up email ----
   agent_name: '', // your name, used in the follow-up email template
   followup_email_template: DEFAULT_FOLLOWUP_EMAIL,

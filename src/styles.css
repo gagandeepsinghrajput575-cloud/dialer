@@ -1913,3 +1913,313 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
   .eq-bar { animation: none !important; }
   .skeleton-loading::after { animation: none !important; }
 }
+
+/* ==========================================================================
+   AI RECORDINGS COACH & DUAL-PANE STUDIO
+   ========================================================================== */
+.recordings-studio-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 14px;
+}
+
+.recordings-catalog-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.studio-select-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.studio-select-pill:hover,
+.studio-select-pill.active {
+  background: rgba(34, 211, 238, 0.15);
+  border-color: rgba(34, 211, 238, 0.4);
+  color: #67e8f9;
+}
+
+.recording-card.is-selected-studio {
+  border-color: rgba(34, 211, 238, 0.4);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.06);
+}
+
+.recordings-coach-pane {
+  position: sticky;
+  top: 16px;
+  border-radius: 18px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 80px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.coach-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.coach-title-cluster {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.coach-prospect-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.coach-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.coach-session-select {
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  color: var(--text);
+  outline: none;
+  max-width: 140px;
+}
+
+.coach-script-panel {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.coach-script-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.coach-script-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.coach-quick-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+
+.coach-action-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.coach-action-pill:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.coach-action-pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.coach-chat-stream {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+  min-height: 220px;
+  max-height: 480px;
+}
+
+.coach-bubble-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.coach-bubble-row.user {
+  flex-direction: row-reverse;
+}
+
+.coach-avatar-bubble {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.coach-bubble-card {
+  max-width: 88%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.coach-bubble-row.user .coach-bubble-card {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.coach-bubble-time {
+  margin-top: 4px;
+  font-size: 10.5px;
+  opacity: 0.7;
+  text-align: right;
+}
+
+.coach-score-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.coach-score-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.coach-score-fill {
+  height: 100%;
+  background: #22c55e;
+  border-radius: 999px;
+}
+
+.coach-input-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.coach-text-input {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.coach-text-input:focus {
+  border-color: var(--b);
+}
+
+.coach-empty-pane {
+  min-height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.coach-bot-badge {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 14px;
+}
+
+.coach-perks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.coach-perk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+@media (max-width: 1024px) {
+  .recordings-studio-layout {
+    grid-template-columns: 1fr;
+  }
+  .recordings-coach-pane {
+    position: static;
+    max-height: none;
+  }
+}
+

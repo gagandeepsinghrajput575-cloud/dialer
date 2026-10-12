@@ -189,7 +189,7 @@ async function run() {
     'caller_id', 'caller_id_cursor', 'caller_id_pool',
     'daily_cap', 'daily_goal', 'default_country_code', 'dry_run', 'email_verify_deep',
     'followup_email_template', 'has_ai_key', 'has_api_key', 'has_password', 'has_smtp_pass', 'meet_link',
-    'queue_smart_sort', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
+    'queue_smart_sort', 'sales_script', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
     'telnyx_api_key', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
     'vm_auto_advance', 'vm_greeting',

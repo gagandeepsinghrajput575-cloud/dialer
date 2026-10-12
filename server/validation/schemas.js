@@ -136,6 +136,7 @@ const settingsUpdate = z.object({
   ai_provider: z.enum(AI_PROVIDERS).optional(),
   ai_model: str(120).optional(),
   ai_api_key: str(500).optional(),
+  sales_script: nullable(z.string().max(30000)).optional(),
   agent_name: str(200).optional(),
   followup_email_template: nullable(z.string().max(8000)).optional(),
   sound_cues: boolish.optional(),
@@ -215,10 +216,26 @@ const recordingsQuery = z.object({
   offset: z.coerce.number().int().min(0).max(100000).optional(),
 });
 
+const recordingChatCreate = z.object({
+  title: z.string().trim().max(120).optional(),
+});
+
+const recordingAiChat = z.object({
+  chatId: z.coerce.number().int().positive().optional(),
+  message: z.string().trim().min(1, 'Please enter a message or select an audit action').max(10000),
+  script: z.string().max(30000).optional(),
+  quickAction: z.enum(['adherence', 'good_wrong', 'objections', 'followup', 'freeform']).optional(),
+});
+
+const recordingScriptUpdate = z.object({
+  script: z.string().max(30000),
+});
+
 module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,
   callPatch, callInbound, callMissed, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
   bulkStage, bulkDelete, recordingsQuery,
+  recordingChatCreate, recordingAiChat, recordingScriptUpdate,
 };

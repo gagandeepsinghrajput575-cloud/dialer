@@ -47,6 +47,24 @@ async function run() {
   }
   ok('registry columns (CVR, protection, source URLs, secondary phone) are never claimed as contact fields');
 
+  // ---- Danish remodeler 500 column sheet ------------------------------------------------
+  const REMODELER_500 = [
+    'Category', 'Website', 'Phone', 'Company / Legal Name', 'Best Public Decision-Maker',
+    'Decision-Maker Role', 'CVR', 'CVR Advertising Protection', 'Google Maps URL',
+    'Base Location', 'Email',
+  ];
+  const rmap = guessMapping(REMODELER_500);
+  assert.strictEqual(rmap.name, 'Best Public Decision-Maker');
+  assert.strictEqual(rmap.company, 'Company / Legal Name');
+  assert.strictEqual(rmap.phone, 'Phone');
+  assert.strictEqual(rmap.email, 'Email');
+  assert.strictEqual(rmap.website, 'Website');
+  assert.strictEqual(rmap.title, 'Decision-Maker Role');
+  assert.strictEqual(rmap.location, 'Base Location');
+  const rextras = extrasOf(REMODELER_500, rmap);
+  assert.ok(rextras.includes('CVR') && rextras.includes('CVR Advertising Protection') && rextras.includes('Google Maps URL') && rextras.includes('Category'));
+  ok('Danish remodeler 500 columns map primary fields accurately and route registry/maps to extras');
+
   // A source URL must not be mistaken for a website: the sheet's real Website column is one
   // link, the two "Source URL(s)" columns are provenance for individual fields.
   assert.ok(isRegistryHeader('Owner Source URL(s)') && isRegistryHeader('CVR'), 'registry detection is exposed');

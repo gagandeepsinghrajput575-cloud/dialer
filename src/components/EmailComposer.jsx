@@ -174,7 +174,10 @@ export default function EmailComposer({ prospectId, recipient, initial, noteText
         exit={{ opacity: 0, scale: 0.97 }}
       >
         <div className="modal-head">
-          <h3>Email{recipient ? ` — ${recipient}` : ''}</h3>
+          <h3>
+            Email{recipient ? ` — ${recipient}` : ''}
+            {f.to ? <span className="composer-to-pill" title={f.to}>{f.to}</span> : null}
+          </h3>
           <button className="icon-btn" onClick={() => onClose?.(false)} title="Close"><X size={16} /></button>
         </div>
 

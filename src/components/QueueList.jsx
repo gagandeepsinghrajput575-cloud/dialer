@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Check, ChevronDown, Loader2, PartyPopper, RefreshCw } from 'lucide-react';
 import { Avatar } from './ui.jsx';
-import { stageMeta } from '../utils.js';
+import { stageMeta, getProspectDisplayName } from '../utils.js';
 
 const asSet = (done) => (done instanceof Set ? done : new Set(done || []));
 
@@ -82,10 +82,10 @@ export default function QueueList({
             onClick={() => !locked && onSelect(p.id)}
           >
             {on && <motion.span layoutId="qpill" className="q-pill" transition={{ type: 'spring', stiffness: 400, damping: 36 }} />}
-            <Avatar name={p.name || p.company} size={34} seed={p.id + p.name} />
+            <Avatar name={getProspectDisplayName(p)} size={34} seed={p.id + (p.name || p.company || p.phone || '')} />
             <div className="q-txt">
-              <b>{p.name || '(no name)'}</b>
-              <span>{p.company || p.phone}</span>
+              <b>{getProspectDisplayName(p)}</b>
+              <span>{p.name ? (p.company || p.title || p.phone) : (p.title || p.location || p.phone)}</span>
             </div>
             {/* A lead with no number cannot be dialled, so say so on the row rather than
                 letting the agent discover it by pressing C. */}

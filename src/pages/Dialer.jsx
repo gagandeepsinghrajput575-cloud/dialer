@@ -6,7 +6,8 @@ import {
   ChevronLeft, ChevronRight, Check, SkipForward, Upload, Sparkles,
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
   Headphones, RotateCw, FlaskConical, Wifi, Send,
-  Mic, MicOff, Radio, Grid3x3, Trophy, LayoutDashboard, Repeat, Trash2
+  Mic, MicOff, Radio, Grid3x3, Trophy, LayoutDashboard, Repeat, Trash2,
+  ChevronDown, ExternalLink, ShieldX, MapPin
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -19,7 +20,8 @@ import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import useServerQueue from '../useServerQueue.js';
 import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueProgress, queueTab, stepIndex, tabForProspect } from '../queue.js';
-import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
+import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, getProspectDisplayName, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
+import { extraInsights, clip, isUrlValue } from '../registry.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
 
@@ -135,6 +137,90 @@ function QuickAddModal({ onClose, onAdded }) {
         </div>
       </motion.div>
     </>
+  );
+}
+
+function ExtraDetailsAccordion({ prospect }) {
+  const [open, setOpen] = useState(false);
+  const insights = useMemo(() => extraInsights(prospect?.extra), [prospect?.extra]);
+  const panelId = `dialer-extra-${prospect?.id || 'curr'}`;
+
+  // Keyboard shortcut X to toggle extra details
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (e.key?.toLowerCase() === 'x' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
+        setOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, []);
+
+  if (!insights || insights.count === 0) return null;
+
+  return (
+    <div className="registry registry-cockpit" aria-label="Extra prospect details and registry metadata">
+      <button
+        type="button"
+        className="registry-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        title="Toggle extra lead details & registry metadata (Press X)"
+      >
+        <ChevronDown size={15} className={`registry-caret ${open ? 'open' : ''}`} aria-hidden />
+        <span className="registry-label">
+          <b>Extra Details &amp; Registry Info</b> <em>{insights.count}</em>
+        </span>
+        <span className="registry-pills">
+          {insights.cvr && <span className="pill pill-cvr" title="Danish company registration number (CVR)">CVR {insights.cvr}</span>}
+          {insights.adProtected && (
+            <span className="pill pill-protected" title={insights.protectionNote}>
+              <ShieldX size={12} /> Ad-protected
+            </span>
+          )}
+          {insights.urlCount > 0 && <span className="pill pill-quiet">{insights.urlCount} link{insights.urlCount === 1 ? '' : 's'}</span>}
+          <kbd className="chip-kbd" title="Shortcut to toggle extra details">X</kbd>
+        </span>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={panelId}
+            className="registry-body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+          >
+            <div className="registry-grid">
+              {insights.entries.map((e) => (
+                <div key={e.key} className="registry-item">
+                  <label>{e.key}</label>
+                  {e.isUrl ? (
+                    <a
+                      href={e.value}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="registry-link"
+                      title={e.value}
+                    >
+                      {e.key.toLowerCase().includes('map') ? <MapPin size={11} aria-hidden /> : null}
+                      {clip(e.value, 48)} <ExternalLink size={11} aria-hidden />
+                    </a>
+                  ) : (
+                    <span>{isUrlValue(e.value) ? clip(e.value, 48) : e.value}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -333,8 +419,16 @@ export default function Dialer() {
   }, [active?.id]);
 
   // Synchronize tab when activeId changes externally (e.g. Prospects table 'Call')
+  const prevActiveIdRef = useRef(activeId);
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId) {
+      prevActiveIdRef.current = null;
+      return;
+    }
+    const isNewActive = prevActiveIdRef.current !== activeId;
+    prevActiveIdRef.current = activeId;
+    if (!isNewActive) return;
+
     const target = items.find((p) => p.id === activeId) || pinned;
     if (!target) return;
     const curTab = TABS.find((x) => x.id === tab);
@@ -694,7 +788,7 @@ export default function Dialer() {
   const openComposer = useCallback((target, noteText) => {
     const p = target || active;
     if (!p?.email) { toast('This prospect has no email address yet', 'error'); return; }
-    setMailing({ id: p.id, name: p.name, noteText });
+    setMailing({ id: p.id, name: getProspectDisplayName(p), email: p.email, noteText });
   }, [active, toast]);
 
   // Quick add from dialer queue
@@ -924,10 +1018,10 @@ export default function Dialer() {
             {/* PROMINENT TOP HERO HEADER - NAME & EMAIL ALWAYS VISIBLE */}
             <div className="glass top-prospect-banner">
               <div className="banner-left">
-                <Avatar name={active.name || active.company} size={64} seed={active.id + active.name} />
+                <Avatar name={getProspectDisplayName(active)} size={64} seed={active.id + (active.name || active.company || '')} />
                 <div className="banner-titles">
                   <div className="banner-name-row">
-                    <h2 className="banner-name">{active.name || 'Unnamed Prospect'}</h2>
+                    <h2 className="banner-name">{getProspectDisplayName(active)}</h2>
                     {active.title && <span className="banner-title-badge">{active.title}</span>}
                     {active.dnc && <span className="dnc-badge sm"><Ban size={12} /> DNC</span>}
                   </div>
@@ -955,9 +1049,14 @@ export default function Dialer() {
                     ) : (
                       <span className="banner-email-chip muted"><Mail size={14} /> <span>No email listed</span></span>
                     )}
-                    {active.company && (
+                    {active.company && active.name && (
                       <span className="banner-company-chip">
                         <Building2 size={14} /> <span>{active.company}</span>
+                      </span>
+                    )}
+                    {active.location && (!active.name || !active.company) && (
+                      <span className="banner-company-chip">
+                        <MapPin size={14} /> <span>{active.location}</span>
                       </span>
                     )}
                   </div>
@@ -982,6 +1081,9 @@ export default function Dialer() {
                 />
               </div>
             </div>
+
+            {/* EXTRA DETAILS & REGISTRY METADATA COLLAPSIBLE DROPDOWN */}
+            <ExtraDetailsAccordion prospect={active} />
 
             {/* SOFT PHONE STANDBY. A phone that is only registered while you dial cannot
                 receive a call, so the state of the registration is part of the cockpit, not a
@@ -1409,6 +1511,7 @@ export default function Dialer() {
             key={mailing.id}
             prospectId={mailing.id}
             recipient={mailing.name}
+            initial={mailing.email ? { to: mailing.email } : undefined}
             noteText={mailing.noteText}
             onSent={async () => {
               // The send appended a note server-side; pull the timeline and the queue back so

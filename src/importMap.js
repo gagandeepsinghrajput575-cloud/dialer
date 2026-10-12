@@ -58,7 +58,7 @@ export const IMPORT_TARGETS = [
   },
   {
     id: 'company', label: 'Company', priority: 3,
-    aliases: ['company', 'companyname', 'virksomhed', 'virksomhedsnavn', 'selskab', 'selskabsnavn', 'firma', 'firmanavn', 'organisation', 'organization', 'employer', 'business'],
+    aliases: ['company', 'companyname', 'companylegalname', 'legalname', 'websitename', 'businessname', 'virksomhed', 'virksomhedsnavn', 'selskab', 'selskabsnavn', 'firma', 'firmanavn', 'organisation', 'organization', 'employer', 'business'],
     re: /company|organi[sz]ation|business|employer|firm|virksomhed|selskab|firma/i,
     loose: /(firma|virksomhed|selskab|company|organisation|organization)/i,
   },
@@ -76,15 +76,16 @@ export const IMPORT_TARGETS = [
   },
   {
     id: 'title', label: 'Job title', priority: 6,
-    aliases: ['title', 'jobtitle', 'designation', 'role', 'position', 'stilling', 'titel', 'rolle', 'category', 'kategori', 'trade', 'branche', 'fag', 'erhverv'],
-    re: /title|designation|role|position|stilling|titel|rolle|category|kategori|trade|branche|fag/i,
-    loose: /(stilling|titel|rolle|title|position|category|trade|branche)/i,
+    primaryAliases: ['decisionmakerrole', 'role', 'title', 'jobtitle', 'designation', 'position', 'stilling', 'titel', 'rolle'],
+    aliases: ['decisionmakerrole', 'role', 'title', 'jobtitle', 'designation', 'position', 'stilling', 'titel', 'rolle', 'category', 'kategori', 'trade', 'branche', 'fag', 'erhverv'],
+    re: /decision[\s_-]*maker[\s_-]*role|title|designation|role|position|stilling|titel|rolle|category|kategori|trade|branche|fag/i,
+    loose: /(decision[\s_-]*maker[\s_-]*role|stilling|titel|rolle|title|position|category|trade|branche)/i,
   },
   {
     id: 'location', label: 'Location', priority: 7,
-    aliases: ['location', 'city', 'by', 'byen', 'kommune', 'adresse', 'address', 'postnr', 'postnummer', 'zip', 'country', 'land', 'region', 'state'],
-    re: /location|city|address|adresse|kommune|postnummer|postnr|country|region|state/i,
-    loose: /^(by|city|adresse|address|postnr|postnummer|kommune|location)$/i,
+    aliases: ['baselocation', 'location', 'city', 'by', 'byen', 'kommune', 'adresse', 'address', 'postnr', 'postnummer', 'zip', 'country', 'land', 'region', 'state'],
+    re: /base[\s_-]*location|location|city|address|adresse|kommune|postnummer|postnr|country|region|state/i,
+    loose: /^(base[\s_-]*location|by|city|adresse|address|postnr|postnummer|kommune|location)$/i,
   },
   {
     id: 'first_name', label: 'First name', priority: 8,
@@ -100,19 +101,21 @@ export const IMPORT_TARGETS = [
   },
   {
     id: 'name', label: 'Full name', priority: 10,
-    aliases: ['name', 'fullname', 'fuldenavn', 'ownername', 'ownernames', 'owner', 'owners', 'contactname', 'kontaktperson', 'kunde', 'kundenavn', 'navn', 'ejer', 'ejere', 'ejernavn', 'indehaver', 'indehavere', 'beslutningstager', 'decisionmaker'],
-    re: /name|navn|owner|ejer|indehaver|kontaktperson|kunde|decision[\s_-]*maker/i,
-    loose: /(navn|name|owner|ejer|indehaver)/i,
+    aliases: ['bestpublicdecisionmaker', 'publicdecisionmaker', 'name', 'fullname', 'fuldenavn', 'ownername', 'ownernames', 'owner', 'owners', 'contactname', 'kontaktperson', 'kunde', 'kundenavn', 'navn', 'ejer', 'ejere', 'ejernavn', 'indehaver', 'indehavere', 'beslutningstager', 'decisionmaker', 'decisionmakers'],
+    re: /best[\s_-]*public[\s_-]*decision[\s_-]*maker|name|navn|owner|ejer|indehaver|kontaktperson|kunde|decision[\s_-]*maker/i,
+    loose: /(best[\s_-]*public[\s_-]*decision[\s_-]*maker|navn|name|owner|ejer|indehaver|decision[\s_-]*maker)/i,
   },
 ];
 
 const byPriority = [...IMPORT_TARGETS].sort((a, b) => a.priority - b.priority);
 
-/** 100 for a known alias, 60 for a pattern match, and a haircut for secondary columns. */
+/** 110 for primary aliases, 100 for secondary aliases, 60 for pattern match, and penalty for secondary. */
 function scoreHeader(header, target, strict) {
   const penalty = SECONDARY.test(header) ? -45 : 0;
+  const norm = normalizeHeader(header);
   if (strict) {
-    if (target.aliases.includes(normalizeHeader(header))) return 100 + penalty;
+    if (target.primaryAliases && target.primaryAliases.includes(norm)) return 110 + penalty;
+    if (target.aliases.includes(norm)) return 100 + penalty;
     if (target.re.test(header)) return 60 + penalty;
     return null;
   }

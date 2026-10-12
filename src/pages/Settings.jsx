@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   Save, Loader2, Trash2, ShieldCheck, FlaskConical, PhoneCall, Target,
   Headphones, KeyRound, Radio, Globe, PlayCircle, DatabaseBackup, Download, FileJson, FileSpreadsheet,
-  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle, Inbox, ServerOff
+  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle, Inbox, ServerOff, Sparkles
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -497,6 +497,60 @@ export default function SettingsPage() {
           meet.google.com/new, which mints a fresh room in your own logged-in browser — a link cannot be
           generated server-side without Google OAuth, so you paste it back.
         </p>
+      </motion.section>
+
+      {/* AI COPILOT & LEAD SORTER */}
+      <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.22 }}>
+        <div className="panel-title"><Sparkles size={16} /> AI Lead Sorter &amp; Copilot</div>
+        <p className="muted small">
+          Connect Google Gemini to intelligently analyze and sort raw lead sheets, map primary contact fields,
+          and automatically tuck secondary registry/social metadata into the dialer dropdown menu.
+        </p>
+
+        <div className="form two">
+          <label>
+            AI Provider
+            <select value={f.ai_provider || 'gemini'} onChange={set('ai_provider')}>
+              <option value="gemini">Google Gemini (Recommended)</option>
+              <option value="openai">OpenAI</option>
+              <option value="local">Local (Offline heuristic)</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <input
+              value={f.ai_model || ''}
+              onChange={set('ai_model')}
+              placeholder={f.ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-1.5-flash'}
+            />
+          </label>
+        </div>
+
+        <div className="form" style={{ marginTop: 10 }}>
+          <label>
+            API Key
+            <input
+              type="password"
+              value={f.ai_api_key || ''}
+              onChange={set('ai_api_key')}
+              placeholder={settings?.has_ai_key ? '•••••••• (saved — type to replace)' : 'Google Gemini API key (AIzaSy...)'}
+              autoComplete="new-password"
+            />
+          </label>
+        </div>
+
+        <p className="muted small">
+          Get a free Google Gemini API key at{' '}
+          <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>
+            Google AI Studio
+          </a>.
+        </p>
+
+        <div className="row gap" style={{ marginTop: 12 }}>
+          <button className="btn primary glow" onClick={save} disabled={saving}>
+            {saving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} Save AI settings
+          </button>
+        </div>
       </motion.section>
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }}>

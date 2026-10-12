@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, PhoneCall, Download } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, PhoneCall, Download, Sparkles, KeyRound, X } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { IMPORT_TARGETS as TARGETS, canImport, extrasOf, guessMapping, isRegistryHeader } from '../importMap.js';
@@ -12,6 +12,11 @@ export default function ImportPage() {
   const [step, setStep] = useState(0); // 0 upload, 1 map, 2 done
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiSummary, setAiSummary] = useState('');
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [customKey, setCustomKey] = useState('');
+  const [saveKey, setSaveKey] = useState(true);
   const [data, setData] = useState(null);
   const [mapping, setMapping] = useState({});
   // What the matcher guessed before anybody touched it: the "auto" pill is only honest while
@@ -41,6 +46,37 @@ export default function ImportPage() {
       setResult(r); setStep(2);
     } catch (e) { toast(e.message, 'error'); }
     setBusy(false);
+  };
+
+  const runAiSort = async (providedKey = '') => {
+    if (!data) return;
+    setAiBusy(true);
+    try {
+      const res = await api.aiAnalyzeLead({
+        headers: data.headers,
+        sampleRows: data.rows.slice(0, 5),
+        apiKey: providedKey || undefined,
+        saveKey: !!providedKey && saveKey,
+      });
+      if (res.needsKey) {
+        setShowKeyModal(true);
+        return;
+      }
+      if (!res.success) {
+        throw new Error(res.error || 'AI analysis failed');
+      }
+      if (res.mapping && Object.keys(res.mapping).length) {
+        setMapping(res.mapping);
+        setGuessed(res.mapping);
+      }
+      setAiSummary(res.summary || 'Columns successfully classified by Google Gemini.');
+      toast('✨ AI mapped primary calling fields and routed secondary details into the drop-down menu!');
+      setShowKeyModal(false);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   const downloadSample = () => {
@@ -80,7 +116,27 @@ export default function ImportPage() {
         {step === 1 && data && (
           <motion.div key="s1" className="map-grid" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
             <div className="glass pad-lg">
-              <div className="panel-title"><FileSpreadsheet size={16} /> {data.filename} <em>{data.rows.length} rows</em></div>
+              <div className="panel-head-ai">
+                <div className="panel-title"><FileSpreadsheet size={16} /> {data.filename} <em>{data.rows.length} rows</em></div>
+                <button
+                  type="button"
+                  className="btn sm ai-btn glow"
+                  onClick={() => runAiSort(customKey)}
+                  disabled={aiBusy}
+                  title="Use Google Gemini AI to analyze raw columns and sort into primary calling fields vs dropdown extra details"
+                >
+                  {aiBusy ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}
+                  <span>AI Auto-Sort with Gemini</span>
+                </button>
+              </div>
+
+              {aiSummary && (
+                <div className="banner ai-summary-banner">
+                  <Sparkles size={15} />
+                  <span>{aiSummary}</span>
+                </div>
+              )}
+
               <p className="muted small">
                 We matched what we could. Check each field and fix anything that's off.
                 A <b>Notes</b> column becomes each prospect's first note, so the context you
@@ -143,6 +199,56 @@ export default function ImportPage() {
             </div>
             <div className="confetti" aria-hidden>{Array.from({ length: 26 }).map((_, i) => <motion.i key={i} style={{ left: `${(i * 37) % 100}%`, background: ['#8b5cf6', '#22d3ee', '#34d399', '#f472b6', '#fbbf24'][i % 5] }} initial={{ y: -20, opacity: 1, rotate: 0 }} animate={{ y: 360, opacity: 0, rotate: 360 + i * 20 }} transition={{ duration: 1.8 + (i % 5) * 0.2, delay: (i % 8) * 0.05, ease: 'easeIn' }} />)}</div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* GOOGLE GEMINI API KEY MODAL */}
+      <AnimatePresence>
+        {showKeyModal && (
+          <>
+            <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowKeyModal(false)} />
+            <motion.div className="modal glass" initial={{ opacity: 0, scale: 0.94, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96 }}>
+              <div className="modal-head">
+                <div className="row gap" style={{ alignItems: 'center' }}>
+                  <Sparkles size={18} style={{ color: '#c4b5fd' }} />
+                  <h3 style={{ margin: 0 }}>Connect Google Gemini AI</h3>
+                </div>
+                <button className="icon-btn" onClick={() => setShowKeyModal(false)}><X size={16} /></button>
+              </div>
+              <div className="form">
+                <p className="muted small" style={{ marginTop: 0 }}>
+                  Enter your Google Gemini API key to let Gemini analyze raw lead sheets, sort the primary calling fields, and organize secondary registry info into the dialer dropdown menu.
+                </p>
+                <label>
+                  Google AI Key
+                  <input
+                    type="password"
+                    autoFocus
+                    placeholder="AIzaSy..."
+                    value={customKey}
+                    onChange={(e) => setCustomKey(e.target.value)}
+                  />
+                </label>
+                <label className="check-row" style={{ marginTop: 6 }}>
+                  <input type="checkbox" checked={saveKey} onChange={(e) => setSaveKey(e.target.checked)} />
+                  Save key to settings for future lead imports
+                </label>
+                <p className="muted small" style={{ marginBottom: 0 }}>
+                  Don&apos;t have an AI key? Get a free API key from <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>Google AI Studio</a>.
+                </p>
+              </div>
+              <div className="modal-foot">
+                <button className="btn" onClick={() => setShowKeyModal(false)}>Cancel</button>
+                <button
+                  className="btn primary glow"
+                  onClick={() => runAiSort(customKey)}
+                  disabled={aiBusy || !customKey.trim()}
+                >
+                  {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} Analyze with Gemini
+                </button>
+              </div>
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
     </div>

@@ -45,4 +45,27 @@ router.post('/parse', upload.single('file'), asyncHandler(async (req, res) => {
   }
 }));
 
+const aiLeadSorter = require('../services/aiLeadSorter');
+const settings = require('../repositories/settingsRepo');
+
+router.post('/ai-analyze', asyncHandler(async (req, res) => {
+  const { headers, sampleRows, apiKey, saveKey } = req.body || {};
+  if (!Array.isArray(headers) || !headers.length) {
+    throw ApiError.badRequest('No headers provided for AI analysis');
+  }
+
+  if (saveKey && apiKey && typeof apiKey === 'string') {
+    settings.set('ai_api_key', apiKey.trim());
+    settings.set('ai_provider', 'gemini');
+  }
+
+  const result = await aiLeadSorter.analyzeLeadStructure({
+    headers,
+    sampleRows: Array.isArray(sampleRows) ? sampleRows : [],
+    apiKey,
+  });
+
+  res.json(result);
+}));
+
 module.exports = router;

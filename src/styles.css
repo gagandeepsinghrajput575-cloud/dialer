@@ -220,6 +220,32 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .registry-link:hover { text-decoration: underline; }
 .registry-link:focus-visible { outline: 2px solid var(--b); outline-offset: 2px; border-radius: 4px; }
 
+.registry-cockpit {
+  margin-top: 10px;
+  border-top: none;
+  padding-top: 0;
+}
+.registry-cockpit .registry-toggle {
+  background: rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  padding: 8px 14px;
+}
+.registry-cockpit .registry-toggle:hover {
+  background: rgba(255, 255, 255, 0.065);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.composer-to-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #a5f3fc;
+  margin-left: 8px;
+  letter-spacing: 0;
+}
+
 /* Kept for the drawer and tablet breakpoints that already target these names. */
 .extra-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .extra-item { padding: 9px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.03); border: 1px dashed var(--line); display: flex; flex-direction: column; min-width: 0; }
@@ -232,6 +258,43 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .panel-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 14px; }
 .panel-title svg { color: #a78bfa; }
 .panel-title em { font-style: normal; font-size: 11px; color: var(--muted); background: rgba(255,255,255,0.08); padding: 1px 8px; border-radius: 99px; font-weight: 600; }
+
+.panel-head-ai {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.panel-head-ai .panel-title { margin-bottom: 0; }
+.ai-btn {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.25), rgba(56, 189, 248, 0.25));
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  color: #c4b5fd;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  transition: all 0.15s ease;
+}
+.ai-btn:hover {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.4), rgba(56, 189, 248, 0.4));
+  color: #fff;
+  border-color: rgba(167, 139, 250, 0.6);
+}
+.ai-summary-banner {
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  color: #ddd6fe;
+  padding: 8px 12px;
+  border-radius: 10px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .note-compose { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .note-compose textarea, .form input, .form select, .search input, .map-row select { width: 100%; background: rgba(0,0,0,0.25); border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
 .map-auto {

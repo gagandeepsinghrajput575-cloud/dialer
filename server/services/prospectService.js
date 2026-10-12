@@ -81,6 +81,31 @@ function update(id, input = {}) {
 const remove = (id) => prospects.remove(id);
 const clearAll = () => prospects.clearAll();
 
+function extractMapsInfo(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const q = u.searchParams.get('query');
+    if (!q) return null;
+    const parts = q.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    return { company: parts[0], location: parts.slice(1).join(', ') };
+  } catch {
+    return null;
+  }
+}
+
+function extractDomainName(url) {
+  if (!url) return '';
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+    const host = u.hostname.replace(/^www\./i, '').split('.')[0];
+    return host ? host.charAt(0).toUpperCase() + host.slice(1) : '';
+  } catch {
+    return '';
+  }
+}
+
 // Bulk import. Junk header/summary rows are dropped, duplicates are counted, and a snapshot
 // is taken first so a bad import is always recoverable.
 async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {}) {
@@ -109,7 +134,31 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
     const rawPhone = v.phone;
     v.phone = telephony.normalizePhone(rawPhone);
     if (!v.phone && rawPhone) badPhones++;
-    if (v.email && !v.email.includes('@')) v.email = '';
+    // Auto-extract company, location, title, or decision-maker name if missing from mapping
+    if (!v.company) {
+      const compCandidate = cleanStr(row['Company / Legal Name'] || row['Website Name'] || row['Virksomhedsnavn'] || row['Firmanavn'] || row['Company Name'] || row['Firma'] || row['Virksomhed']);
+      if (compCandidate) {
+        v.company = compCandidate;
+      } else if (row['Google Maps URL']) {
+        const maps = extractMapsInfo(row['Google Maps URL']);
+        if (maps?.company) v.company = maps.company;
+        if (!v.location && maps?.location) v.location = maps.location;
+      } else if (v.website) {
+        v.company = extractDomainName(v.website);
+      }
+    }
+    if (!v.name) {
+      const nameCandidate = cleanStr(row['Best Public Decision-Maker'] || row['Owner Name(s)'] || row['Decision-Maker'] || row['Kontaktperson'] || row['Ejer']);
+      if (nameCandidate) v.name = nameCandidate;
+    }
+    if (!v.title) {
+      const titleCandidate = cleanStr(row['Decision-Maker Role'] || row['Category'] || row['Kategori'] || row['Stilling'] || row['Rolle']);
+      if (titleCandidate) v.title = titleCandidate;
+    }
+    if (!v.location) {
+      const locCandidate = cleanStr(row['Base Location'] || row['Location'] || row['Adresse'] || row['Kommune'] || row['By']);
+      if (locCandidate) v.location = locCandidate;
+    }
 
     if (v.name && (JUNK_NAMES.has(v.name.toLowerCase()) || JUNK_PATTERN.test(v.name.trim()))) { empty++; continue; }
     if (!v.phone && !v.name && !v.email) { empty++; continue; }

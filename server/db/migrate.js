@@ -92,7 +92,56 @@ const MIGRATIONS = [
   { version: 8, name: 'calls-direction-inbound', up: () => addColumn('calls', 'direction', "TEXT NOT NULL DEFAULT 'outbound'") },
   // Local audio recording storage ledger. Completely offline, local disk storage at zero cost.
   { version: 9, name: 'recordings-storage', up: () => db.exec(RECORDINGS_SQL) },
+  // Backfill company, location and title for records whose names were stored inside extra / Google Maps URL.
+  { version: 10, name: 'backfill-prospect-company-from-extra', up: (d) => backfillProspectCompanyFromExtra(d) },
 ];
+
+function extractMapsInfo(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const q = u.searchParams.get('query');
+    if (!q) return null;
+    const parts = q.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    return {
+      company: parts[0],
+      location: parts.slice(1).join(', '),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function backfillProspectCompanyFromExtra(d) {
+  // Purge phantom pagination rows (e.g. 'Page 1 of 4' with no contact details)
+  d.prepare("DELETE FROM prospects WHERE (phone = '' OR phone IS NULL) AND (email = '' OR email IS NULL) AND (company = '' OR company IS NULL) AND name LIKE 'Page %'").run();
+
+  // Backfill empty company / name from extra / Google Maps URL
+  const rows = d.prepare("SELECT id, name, company, title, location, extra FROM prospects WHERE (name = '' OR name IS NULL) AND (company = '' OR company IS NULL)").all();
+  if (!rows.length) return;
+
+  const update = d.prepare("UPDATE prospects SET company = ?, location = COALESCE(NULLIF(location, ''), ?), title = COALESCE(NULLIF(title, ''), ?) WHERE id = ?");
+
+  for (const r of rows) {
+    let ex = {};
+    try { ex = JSON.parse(r.extra || '{}'); } catch {}
+    let company = ex['Company / Legal Name'] || ex['Website Name'] || ex['Company'] || '';
+    let location = ex['Base Location'] || ex['Location'] || '';
+    let title = ex['Category'] || ex['Decision-Maker Role'] || '';
+
+    if (!company && ex['Google Maps URL']) {
+      const maps = extractMapsInfo(ex['Google Maps URL']);
+      if (maps) {
+        if (!company) company = maps.company;
+        if (!location) location = maps.location;
+      }
+    }
+    if (company) {
+      update.run(company, location || null, title || null, r.id);
+    }
+  }
+}
 
 function run() {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (

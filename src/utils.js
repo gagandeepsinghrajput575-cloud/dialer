@@ -51,6 +51,51 @@ export function initials(name) {
   const parts = String(name || '?').trim().split(/\s+/).filter(Boolean);
   return ((parts[0]?.[0] || '?') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
+
+/**
+ * Deterministic human-facing name for a prospect.
+ * Resolves: name -> company -> extra details -> website domain -> phone -> id.
+ * Prevents blank "(no name)" / "Unnamed Prospect" displays across the app.
+ */
+export function getProspectDisplayName(p) {
+  if (!p) return 'Unnamed Prospect';
+  if (p.name && String(p.name).trim()) return String(p.name).trim();
+  if (p.company && String(p.company).trim()) return String(p.company).trim();
+
+  let extra = {};
+  if (typeof p.extra === 'string') {
+    try { extra = JSON.parse(p.extra); } catch {}
+  } else if (typeof p.extra === 'object' && p.extra !== null) {
+    extra = p.extra;
+  }
+  if (extra['Company / Legal Name'] && String(extra['Company / Legal Name']).trim()) {
+    return String(extra['Company / Legal Name']).trim();
+  }
+  if (extra['Website Name'] && String(extra['Website Name']).trim()) {
+    return String(extra['Website Name']).trim();
+  }
+  if (extra['Best Public Decision-Maker'] && String(extra['Best Public Decision-Maker']).trim()) {
+    return String(extra['Best Public Decision-Maker']).trim();
+  }
+  if (extra['Google Maps URL']) {
+    try {
+      const u = new URL(extra['Google Maps URL']);
+      const q = u.searchParams.get('query');
+      if (q) {
+        const comp = q.split(',')[0].trim();
+        if (comp) return comp;
+      }
+    } catch {}
+  }
+  if (p.website) {
+    try {
+      const host = new URL(p.website.startsWith('http') ? p.website : `https://${p.website}`).hostname.replace(/^www\./, '');
+      if (host) return host;
+    } catch {}
+  }
+  if (p.phone) return `Lead ${p.phone}`;
+  return p.id ? `Lead #${p.id}` : 'Unnamed Prospect';
+}
 const GRADS = [
   ['#8b5cf6', '#22d3ee'], ['#f472b6', '#8b5cf6'], ['#22d3ee', '#34d399'], ['#fbbf24', '#f472b6'],
   ['#60a5fa', '#a78bfa'], ['#34d399', '#38bdf8'], ['#fb7185', '#fbbf24'],

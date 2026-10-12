@@ -712,7 +712,7 @@ export default function Dialer() {
       if (shouldOfferFollowUp(outcomeId, chosenStage) && modal.prospect.email) {
         // Carry the address with the prompt: the agent may have auto-advanced to the next
         // prospect by the time they click, so the prompt cannot re-derive it from `active`.
-        setFollowUp({ id: pid, name: modal.prospect.name, email: modal.prospect.email, noteText: noteToSave });
+        setFollowUp({ id: pid, name: getProspectDisplayName(modal.prospect), email: modal.prospect.email, noteText: noteToSave });
       }
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
       if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
@@ -1435,7 +1435,7 @@ export default function Dialer() {
               <div className="modal-head">
                 <div>
                   <div className="eyebrow" style={{ color: '#38bdf8' }}>Call Finished ({fmtDur(classifyModal.duration)})</div>
-                  <h3 style={{ fontSize: '20px', fontWeight: 800 }}>How would you classify {classifyModal.prospect.name || 'this prospect'}?</h3>
+                  <h3 style={{ fontSize: '20px', fontWeight: 800 }}>How would you classify {getProspectDisplayName(classifyModal.prospect)}?</h3>
                 </div>
                 <button className="icon-btn" onClick={requestDiscard} title="Discard call"><X size={16} /></button>
               </div>

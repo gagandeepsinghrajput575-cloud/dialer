@@ -148,7 +148,11 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
       }
     }
     if (!v.name) {
-      const nameCandidate = cleanStr(row['Best Public Decision-Maker'] || row['Owner Name(s)'] || row['Decision-Maker'] || row['Kontaktperson'] || row['Ejer']);
+      const nameCandidate = cleanStr(
+        row['Best Public Decision-Maker'] || row['Owner Name(s)'] || row['Decision-Maker'] ||
+        row['Navn'] || row['Full Name'] || row['Fulde navn'] || row['Kontaktperson'] ||
+        row['Contact Name'] || row['Contact Person'] || row['Ejer'] || row['Direktør'] || row['CEO'] || row['Owner']
+      );
       if (nameCandidate) v.name = nameCandidate;
     }
     if (!v.title) {

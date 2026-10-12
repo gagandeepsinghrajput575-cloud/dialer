@@ -130,12 +130,38 @@ export default function ProspectCard({ p, big = false, onSent }) {
   const insights = extraInsights(p.extra);
   const lastOut = outcomeMeta(p.last_outcome);
 
+  let extraData = {};
+  if (typeof p.extra === 'string') {
+    try { extraData = JSON.parse(p.extra); } catch {}
+  } else if (typeof p.extra === 'object' && p.extra !== null) {
+    extraData = p.extra;
+  }
+  const inferredName = p.name || extraData['Best Public Decision-Maker'] || extraData['Owner Name(s)'] || extraData['Kontaktperson'] || extraData['Navn'] || '';
+
   return (
     <motion.div className={`pcard ${big ? 'big' : ''}`} key={p.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
       <div className="pcard-head">
-        <Avatar name={p.name || p.company} size={big ? 72 : 56} seed={p.id + p.name} />
+        <Avatar name={p.name || inferredName || p.company} size={big ? 72 : 56} seed={p.id + (p.name || inferredName || '')} />
         <div className="pcard-title">
-          <Editable className="h-name" value={p.name} placeholder="Name" onSave={save('name')} />
+          <div className="row gap center-row" style={{ alignItems: 'baseline' }}>
+            <Editable
+              className="h-name"
+              value={p.name}
+              placeholder={inferredName ? `Name (Found: ${inferredName})` : "Name"}
+              onSave={save('name')}
+            />
+            {(!p.name && inferredName) && (
+              <button
+                type="button"
+                className="btn xs link-btn"
+                style={{ fontSize: '11px', padding: '1px 6px', height: '20px', color: 'var(--cyan, #38bdf8)' }}
+                title={`Click to save "${inferredName}" as name`}
+                onClick={() => save('name')(inferredName)}
+              >
+                Use "{inferredName}"
+              </button>
+            )}
+          </div>
           <div className="sub-line">
             <Editable className="h-sub" value={p.title} placeholder="Job title" onSave={save('title')} />
             <span className="dot-sep">·</span>

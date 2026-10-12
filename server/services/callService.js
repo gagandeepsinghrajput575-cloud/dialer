@@ -1,9 +1,11 @@
-// Call lifecycle: direct softphone dialing, outcome classification, voicemail drops,
-// discards and the daily-dial safety rails.
+const fs = require('fs');
+const path = require('path');
 const calls = require('../repositories/callRepo');
 const prospects = require('../repositories/prospectRepo');
 const notes = require('../repositories/noteRepo');
 const settings = require('../repositories/settingsRepo');
+const recordingRepo = require('../repositories/recordingRepo');
+const { recordingsDir } = require('../config/env');
 const telephony = require('./telephonyService');
 const prospectService = require('./prospectService');
 const { ApiError } = require('../middleware/errorHandler');
@@ -295,6 +297,14 @@ function voicemailDrop(callId, input = {}) {
 function discard(callId) {
   const call = calls.get(callId);
   if (call) {
+    const rec = recordingRepo.getByCallId(call.id);
+    if (rec && rec.filename) {
+      try {
+        const filePath = path.join(recordingsDir, path.basename(rec.filename));
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {}
+      recordingRepo.remove(call.id);
+    }
     calls.remove(call.id);
     prospects.unmarkCalled(call.prospect_id);
   }

@@ -225,6 +225,8 @@ const recordingAiChat = z.object({
   message: z.string().trim().min(1, 'Please enter a message or select an audit action').max(10000),
   script: z.string().max(30000).optional(),
   quickAction: z.enum(['adherence', 'good_wrong', 'objections', 'followup', 'freeform']).optional(),
+  apiKey: z.string().max(500).optional(),
+  model: z.string().max(120).optional(),
 });
 
 const recordingScriptUpdate = z.object({

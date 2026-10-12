@@ -246,7 +246,7 @@ const deleteChat = asyncHandler(async (req, res) => {
 const aiChat = asyncHandler(async (req, res) => {
   const callId = Number(req.params.callId);
   if (!Number.isInteger(callId) || callId <= 0) throw ApiError.badRequest('Invalid call ID');
-  const { chatId, message, script, quickAction } = req.body || {};
+  const { chatId, message, script, quickAction, apiKey, model } = req.body || {};
 
   const result = await aiRecordingCoach.processCoachingTurn({
     callId,
@@ -254,6 +254,8 @@ const aiChat = asyncHandler(async (req, res) => {
     message,
     script,
     quickAction,
+    apiKey,
+    model,
   });
 
   res.json(result);

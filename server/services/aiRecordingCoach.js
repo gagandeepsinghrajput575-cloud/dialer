@@ -98,7 +98,16 @@ async function processCoachingTurn({
     meta: { quickAction },
   });
 
-  // 5. Read audio file into base64
+  // 5. Read audio file into base64 with payload size guard
+  const stats = fs.statSync(audioPath);
+  if (stats.size > 15 * 1024 * 1024) {
+    return {
+      success: false,
+      chatId: activeChat.id,
+      error: `Audio recording (${Math.round(stats.size / 1024 / 1024)}MB) exceeds Gemini's 15MB inline payload limit.`,
+    };
+  }
+
   const audioBuffer = fs.readFileSync(audioPath);
   const base64Audio = audioBuffer.toString('base64');
   let mimeType = rec.mime_type || 'audio/webm';
@@ -131,7 +140,7 @@ YOUR OBJECTIVES:
 4. Deliver actionable coaching: Give the exact words/lines the rep should have said instead.
 5. Format your output clearly in clean, beautiful GitHub markdown with bold headers, bullet points, and timestamp markers (e.g. \`[0:24]\`).`;
 
-  // Build conversational turns for Gemini
+  // Build conversational turns for Gemini ensuring strict role alternation (user <-> model)
   const existingMessages = (activeChat.messages || []).filter((m) => m.id !== userMsgRecord.id);
   const contents = [];
 
@@ -151,19 +160,32 @@ YOUR OBJECTIVES:
   contents.push({ role: 'user', parts: turn1Parts });
 
   if (existingMessages.length > 0) {
-    for (let i = 0; i < existingMessages.length; i++) {
+    // Collect turns and collapse consecutive same-role messages so Gemini never returns 400
+    for (let i = 1; i < existingMessages.length; i++) {
       const m = existingMessages[i];
-      if (i === 0 && m.role === 'user') continue; // already in turn 1
+      const role = m.role === 'assistant' ? 'model' : 'user';
+      const lastTurn = contents[contents.length - 1];
+
+      if (lastTurn && lastTurn.role === role) {
+        lastTurn.parts.push({ text: m.content });
+      } else {
+        contents.push({
+          role,
+          parts: [{ text: m.content }],
+        });
+      }
+    }
+
+    // Append the current user turn
+    const lastTurn = contents[contents.length - 1];
+    if (lastTurn && lastTurn.role === 'user') {
+      lastTurn.parts.push({ text: message });
+    } else {
       contents.push({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
+        role: 'user',
+        parts: [{ text: message }],
       });
     }
-    // Append the current turn
-    contents.push({
-      role: 'user',
-      parts: [{ text: message }],
-    });
   }
 
   // 7. Execute call to Google Gemini

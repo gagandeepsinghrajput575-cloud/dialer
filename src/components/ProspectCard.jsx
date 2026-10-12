@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock, ChevronDown } from 'lucide-react';
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
 import { outcomeMeta, phoneIssue, emailIssue, timeAgo } from '../utils.js';
@@ -34,6 +34,7 @@ function Row({ icon: Icon, label, children, extra }) {
 export default function ProspectCard({ p, big = false, onSent }) {
   const { updateProspect, toast, settings } = useStore();
   const [mailing, setMailing] = useState(false);
+  const [extraOpen, setExtraOpen] = useState(false);
   if (!p) return null;
   const save = (field) => (val) => updateProspect(p.id, { [field]: val });
 
@@ -52,6 +53,11 @@ export default function ProspectCard({ p, big = false, onSent }) {
   };
   const extra = p.extra || {};
   const extraKeys = Object.keys(extra);
+  const cvrKey = extraKeys.find((k) => /cvr/i.test(k));
+  const cvrVal = cvrKey ? String(extra[cvrKey]).trim() : null;
+  const isProtected = Object.entries(extra).some(
+    ([k, v]) => /reklamebeskyttelse|advertising\s*protection|protection/i.test(k) && /yes|ja|true|1/i.test(String(v))
+  );
   const lastOut = outcomeMeta(p.last_outcome);
 
   return (
@@ -106,13 +112,54 @@ export default function ProspectCard({ p, big = false, onSent }) {
       </div>
 
       {extraKeys.length > 0 && (
-        <div className="extra">
-          <h4>More details</h4>
-          <div className="extra-grid">
-            {extraKeys.map((k) => (
-              <div key={k} className="extra-item"><label>{k}</label><span>{String(extra[k])}</span></div>
-            ))}
-          </div>
+        <div className="extra-section">
+          <button
+            type="button"
+            className="extra-toggle-btn"
+            onClick={() => setExtraOpen((o) => !o)}
+            aria-expanded={extraOpen}
+            aria-controls={`extra-grid-${p.id}`}
+          >
+            <div className="extra-toggle-title">
+              <ChevronDown size={14} className={`extra-caret ${extraOpen ? 'open' : ''}`} />
+              <span>More details &amp; registry data ({extraKeys.length})</span>
+            </div>
+            <div className="extra-pills">
+              {cvrVal && <span className="pill-cvr">CVR: {cvrVal}</span>}
+              {isProtected && <span className="pill-protected" title="CVR Advertising Protected">⚠️ Ad-Protected</span>}
+            </div>
+          </button>
+          <AnimatePresence initial={false}>
+            {extraOpen && (
+              <motion.div
+                id={`extra-grid-${p.id}`}
+                className="extra-content"
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.18 }}
+              >
+                <div className="extra-grid">
+                  {extraKeys.map((k) => {
+                    const val = String(extra[k] ?? '');
+                    const isUrl = /^https?:\/\//i.test(val);
+                    return (
+                      <div key={k} className="extra-item">
+                        <label>{k}</label>
+                        {isUrl ? (
+                          <a href={val} target="_blank" rel="noopener noreferrer" className="extra-link" title={val}>
+                            {val.length > 36 ? val.slice(0, 33) + '…' : val}
+                          </a>
+                        ) : (
+                          <span>{val}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 

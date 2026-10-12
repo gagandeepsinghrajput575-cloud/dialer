@@ -288,10 +288,13 @@ export default function Dialer() {
     if (activeId) {
       const match = items.find((p) => p.id === activeId);
       if (match) return match;
-      if (pinned && pinned.id === activeId) return pinned;
+      if (pinned && pinned.id === activeId) {
+        const tabDef = queueTab(tab);
+        if (!tabDef?.test || tabDef.test(pinned)) return pinned;
+      }
     }
     return items[0] || null;
-  }, [items, activeId, pinned]);
+  }, [items, activeId, pinned, tab]);
 
   const { detail, reload } = useDetail(active?.id);
   const idx = active ? items.findIndex((p) => p.id === active.id) : -1;

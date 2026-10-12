@@ -8,18 +8,18 @@ import { useStore } from '../store.jsx';
 // because they are the common case, but Navn/Telefon/Firma/Stilling/By used to fall through to
 // "skip" and had to be matched by hand on every single import.
 const TARGETS = [
-  { id: 'name', label: 'Full name', re: /^(full[\s_-]*)?name$|contact[\s_-]*name|prospect|navn|kontaktperson|kunde/i },
+  { id: 'name', label: 'Full name', re: /^(full[\s_-]*)?name$|contact[\s_-]*name|prospect|navn|kontaktperson|kunde|owner([\s_-]*names?)?|ejer(e)?|indehaver|decision[\s_-]*maker/i },
   { id: 'first_name', label: 'First name', re: /first[\s_-]*name|fname|given|fornavn/i },
   { id: 'last_name', label: 'Last name', re: /last[\s_-]*name|lname|surname|family|efternavn/i },
   { id: 'phone', label: 'Phone number', re: /phone|mobile|cell|number|contact[\s_-]*no|tel|whatsapp|telefon|tlf|mobil|mobilnummer|hovednummer/i },
   { id: 'email', label: 'Email', re: /e-?mail|mailadresse/i },
-  { id: 'company', label: 'Company', re: /company|organi[sz]ation|business|employer|firm|firma|virksomhed|selskab/i },
-  { id: 'title', label: 'Job title', re: /title|designation|role|position|stilling|titel|rolle/i },
+  { id: 'company', label: 'Company', re: /company|organi[sz]ation|business|employer|firm|firma|virksomhed|selskab|virksomhedsnavn/i },
+  { id: 'title', label: 'Job title', re: /title|designation|role|position|stilling|titel|rolle|category|trade|branche|fag/i },
   { id: 'location', label: 'Location', re: /location|city|address|country|region|state|by|postnr|postnummer|adresse|kommune/i },
   { id: 'website', label: 'Website', re: /website|url|web|domain|linkedin|hjemmeside|webadresse|domæne/i },
   // Notes are a real field now: the text is written to the prospect's note feed at import
   // instead of being dumped into "More details" and forgotten.
-  { id: 'notes', label: 'Notes', re: /note|notes|comment|comments|noter|bemærkning|bemærkninger|kommentar/i },
+  { id: 'notes', label: 'Notes', re: /note|notes|comment|comments|noter|bemærkning|bemærkninger|kommentar|marketing[\s_-]*notes/i },
 ];
 
 // Two passes. The first is strict: a header only wins if it matches nothing earlier in the
@@ -41,10 +41,10 @@ const LOOSE = [
   ['phone', /(telefon|tlf|mobil|phone|tel)[\s_-]?(nr|nummer|number|no)?/i],
   ['email', /(e-?mail|mail)/i],
   ['company', /(firma|virksomhed|selskab|company|organisation|organization)/i],
-  ['name', /(navn|name)/i],
-  ['title', /(stilling|titel|rolle|title|position)/i],
+  ['name', /(navn|name|owner|ejer|indehaver)/i],
+  ['title', /(stilling|titel|rolle|title|position|category|trade|branche)/i],
   ['location', /^(by|city|adresse|address|postnr|postnummer|kommune|location)$/i],
-  ['notes', /(noter?|bemærkning|kommentar|notes?|comment)/i],
+  ['notes', /(noter?|bemærkning|kommentar|notes?|comment|marketing[\s_-]*notes)/i],
 ];
 
 function guessLoose(headers, alreadyMapped) {

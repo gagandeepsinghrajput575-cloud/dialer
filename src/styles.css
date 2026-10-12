@@ -177,6 +177,74 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .mini-stats > div { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 11px 6px; border-radius: 14px; background: rgba(255,255,255,0.03); border: 1px solid var(--line); color: var(--muted); }
 .mini-stats b { color: var(--text); font-size: 14px; }
 .mini-stats span { font-size: 11px; }
+.extra-section { display: flex; flex-direction: column; gap: 8px; }
+.extra-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+.extra-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+.extra-toggle-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 500;
+}
+.extra-caret {
+  transition: transform 0.2s ease;
+}
+.extra-caret.open {
+  transform: rotate(180deg);
+}
+.extra-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pill-cvr {
+  font-size: 11px;
+  font-family: var(--mono);
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(139, 92, 246, 0.15);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.pill-protected {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.extra-content {
+  overflow: hidden;
+}
+.extra-link {
+  color: #93c5fd;
+  text-decoration: underline;
+  word-break: break-all;
+  font-size: 12px;
+}
+.extra-link:hover {
+  color: #bfdbfe;
+}
 .extra h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 8px; }
 .extra-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .extra-item { padding: 9px 12px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px dashed var(--line); display: flex; flex-direction: column; min-width: 0; }

@@ -129,7 +129,7 @@ function shutdown() {
   if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } tmpDir = null; }
 }
 
-const TOTAL = 36;
+const TOTAL = 37;
 
 async function run() {
   console.log('--- Pulse Dialer: VOIP.SO + softphone verification suite ---');
@@ -769,7 +769,17 @@ async function run() {
   process.stdout.write(unit.stdout || '');
   if (unit.status !== 0) throw new Error(`unit tests failed:\n${unit.stderr || unit.stdout}`);
   assert.match(unit.stdout, /unit checks passed/);
-  ok('repository, migration, backup, telephony and copilot unit checks all green');
+
+  // The inbound engine (ringer lifecycle, caller-ID matching, cross-tab audio lock) runs here
+  // too: it is the half of the softphone that nothing else can reach, and a ringer left
+  // running after a call is a defect you only notice on the phone.
+  const inboundUnit = spawnSync(process.execPath, [path.join(__dirname, 'unit', 'inbound.test.js')], {
+    cwd: REPO, env: { ...process.env, PULSE_TEST: '1' }, encoding: 'utf8',
+  });
+  process.stdout.write(inboundUnit.stdout || '');
+  if (inboundUnit.status !== 0) throw new Error(`inbound engine unit tests failed:\n${inboundUnit.stderr || inboundUnit.stdout}`);
+  assert.match(inboundUnit.stdout, /inbound engine checks passed/);
+  ok('repository, migration, backup, telephony, copilot and inbound-engine unit checks all green');
 
   // ---------------------------------------------------------------- hardening unit layer
   step(29, TOTAL, 'Hardening unit layer (fuzzing, timezones, injection, fault tolerance)');
@@ -1244,6 +1254,122 @@ async function run() {
   // rows behind, so looping over every prospect here means 50,000 sequential DELETEs.
   for (const p of [...mette.json, ...anders.json]) await req('DELETE', `/api/prospects/${p.id}`);
   ok('email + phone duplicate detection, including within a single file and across case');
+
+
+  // ---------------------------------------------------------------- inbound calls
+  step(37, TOTAL, 'Inbound calls — the phone rings in the browser, the ledger stays honest');
+
+  // The outbound half must be untouched by the new column: a dial is still a dial.
+  const outbound = await req('POST', `/api/prospects/${testId}/call`, {});
+  assert.strictEqual(outbound.status, 200);
+  assert.strictEqual(outbound.json.direction, undefined, 'the outbound dial contract is unchanged');
+  const outboundRow = (await req('GET', `/api/prospects/${testId}`)).json.calls[0];
+  assert.strictEqual(outboundRow.direction, 'outbound', 'an outbound dial is recorded as outbound');
+  await req('POST', `/api/calls/${outbound.json.callId}/discard`, {});
+
+  // A known customer calls back. The server must find them by number alone — the agent is
+  // holding a phone, not a search box.
+  const statsBefore = (await req('GET', '/api/stats')).json.today;
+  const ring = await req('POST', '/api/calls/inbound', { callerPhone: E164 });
+  assert.strictEqual(ring.status, 200);
+  assert.strictEqual(ring.json.reused, false);
+  assert.strictEqual(ring.json.direction, 'inbound');
+  assert.strictEqual(ring.json.callerId, E164, 'the caller ID is normalised to the stored form');
+  assert.strictEqual(ring.json.matched, true, 'the caller is matched to the prospect on file');
+  assert.strictEqual(ring.json.provisional, false);
+  assert.strictEqual(ring.json.prospect.id, testId, 'and the modal gets that prospect');
+  assert.strictEqual(ring.json.call.status, 'ringing', 'the ledger row is open until the ring resolves');
+  ok('inbound, matched by caller ID: one open ledger row and the prospect the agent is about to greet');
+
+  // A forked INVITE / a retried socket is the *same* ring, not a second caller.
+  const retry = await req('POST', '/api/calls/inbound', { callerPhone: E164 });
+  assert.strictEqual(retry.json.reused, true, 'a duplicate INVITE reuses the ringing row');
+  assert.strictEqual(retry.json.callId, ring.json.callId);
+  const afterRetry = (await req('GET', `/api/prospects/${testId}`)).json.calls
+    .filter((c) => c.direction === 'inbound');
+  assert.strictEqual(afterRetry.length, 1, 'no second inbound row was written for the same ring');
+  ok('a repeated INVITE inside the window is the same ring — reused, never double-logged');
+
+  // A complete stranger. Nobody on file, so a placeholder lead exists for the length of the
+  // ring — and answering is what turns it into a real record.
+  const stranger = '+4599000011';
+  const unknown = await req('POST', '/api/calls/inbound', { callerPhone: stranger });
+  assert.strictEqual(unknown.json.matched, false);
+  assert.strictEqual(unknown.json.provisional, true, 'an unknown caller is provisioned, not dropped');
+  assert.strictEqual(unknown.json.prospect.phone, stranger);
+  assert.strictEqual(unknown.json.prospect.stage, 'new');
+  ok('an unknown caller becomes a placeholder lead the agent can answer instead of retyping');
+
+  // The caller hangs up before anyone picks up: the ring closes, and the placeholder goes with
+  // it — nothing about that person is kept, because there is nothing about that person to keep.
+  const swept = await req('POST', `/api/calls/${unknown.json.callId}/missed`, { reason: 'missed' });
+  assert.strictEqual(swept.status, 200);
+  assert.strictEqual(swept.json.alreadyResolved, false);
+  assert.strictEqual(swept.json.status, 'missed');
+  assert.strictEqual(swept.json.cleanedUp, true, 'the placeholder lead is swept with the ring');
+  const sweptLead = await req('GET', `/api/prospects/search?q=${encodeURIComponent(stranger)}&limit=5`);
+  assert.strictEqual(sweptLead.json.length, 0, 'a missed call from a stranger leaves no ghost lead behind');
+  ok('a missed call from a stranger is closed and its placeholder swept — no ghost leads');
+
+  // Lost call, declined on purpose: same row, different terminal state.
+  const declined = await req('POST', `/api/calls/${ring.json.callId}/missed`, { reason: 'declined' });
+  assert.strictEqual(declined.json.status, 'declined', 'a declined ring is a decline, not a miss');
+  assert.strictEqual(declined.json.cleanedUp, false, 'a real prospect is never swept');
+
+  // CANCEL and the Decline button can both land; the second one must be a no-op, and a replay
+  // after the row is gone must not 404 a UI that is already tearing the call down.
+  const replay = await req('POST', `/api/calls/${ring.json.callId}/missed`, { reason: 'missed' });
+  assert.strictEqual(replay.status, 200);
+  assert.strictEqual(replay.json.alreadyResolved, true, 'replaying the teardown is idempotent');
+  assert.strictEqual(replay.json.status, undefined, 'and it does not rewrite the settled row');
+  const ghostReplay = await req('POST', `/api/calls/${unknown.json.callId}/missed`, { reason: 'missed' });
+  assert.strictEqual(ghostReplay.status, 200, 'the replay of a swept row is not a 404');
+  assert.strictEqual(ghostReplay.json.missing, true);
+  // A numeric id with no row is indistinguishable from a ring that was already swept — both
+  // resolve quietly. A malformed id is a client bug and gets the 404 it deserves.
+  const unknownId = await req('POST', '/api/calls/99999999/missed', { reason: 'missed' });
+  assert.strictEqual(unknownId.status, 200, 'a call id with no row resolves as already handled');
+  assert.strictEqual(unknownId.json.missing, true);
+  const badId = await req('POST', '/api/calls/not-a-number/missed', { reason: 'missed' });
+  assert.strictEqual(badId.status, 404, 'a malformed call id never mutates anything');
+  ok('the teardown is idempotent for a CANCEL/Decline race, and a swept row never 404s the UI');
+
+  // A ring that nobody answered is not a dial and not a conversation. The daily numbers are
+  // the manager's view of the floor; an inbound miss must not inflate them.
+  const statsAfter = (await req('GET', '/api/stats')).json.today;
+  assert.strictEqual(statsAfter.dials, statsBefore.dials, 'an unanswered inbound ring is not a dial');
+  assert.strictEqual(statsAfter.pickups, statsBefore.pickups, 'and it is not a pickup');
+  assert.strictEqual(statsAfter.conversations, statsBefore.conversations, 'and it is not a conversation');
+  ok('unanswered inbound rings stay out of the daily dials/pickups/conversations');
+
+  // Garbage in, 400 out — and the mutation surface needs the session token like every other
+  // write (the browser can be tricked into ringing a stranger's number otherwise).
+  const noNumber = await req('POST', '/api/calls/inbound', { callerPhone: '   ' });
+  assert.strictEqual(noNumber.status, 400, 'a ring with no caller number is refused');
+  assert.match(noNumber.text, /caller number is required/i);
+  const junkNumber = await req('POST', '/api/calls/inbound', { callerPhone: '++--??' });
+  assert.strictEqual(junkNumber.status, 400, 'an unusable caller number is refused');
+  const notInbound = await req('POST', `/api/calls/${(await req('POST', `/api/prospects/${testId}/call`, {})).json.callId}/missed`, { reason: 'missed' });
+  assert.strictEqual(notInbound.status, 400, 'only an inbound ring can be missed');
+  const sessionToken = (await req('GET', '/api/session')).json.token;
+  const untokened = await raw(`${BASE}/api/calls/inbound`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE }, body: JSON.stringify({ callerPhone: E164 }),
+  });
+  assert.strictEqual(untokened.status, 401, 'the inbound endpoint demands the session token');
+  const tokenedRing = await raw(`${BASE}/api/calls/inbound`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: BASE, 'x-pulse-token': sessionToken },
+    body: JSON.stringify({ callerPhone: E164 }),
+  });
+  assert.strictEqual(tokenedRing.status, 200, 'and accepts the same ring with it');
+  const lastRing = await tokenedRing.json();
+  const evilRing = await raw(`${BASE}/api/calls/inbound`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example.com' }, body: JSON.stringify({ callerPhone: E164 }),
+  });
+  assert.strictEqual(evilRing.status, 403, 'another origin cannot ring this phone');
+  assert.ok(!/password|token/i.test(JSON.stringify(lastRing)), 'the ring response carries no credentials');
+  await req('POST', `/api/calls/${lastRing.callId}/missed`, { reason: 'missed' });
+  ok('inbound validates its input, requires the token, refuses other origins and leaks nothing');
 
   await req('DELETE', `/api/prospects/${testId}`);
   console.log('\n  \u2713 test fixtures cleaned up');

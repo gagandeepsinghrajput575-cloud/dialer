@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock, ChevronDown } from 'lucide-react';
+import React, { useId, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import {
+  Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock,
+  ChevronDown, ExternalLink, ShieldX,
+} from 'lucide-react';
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
 import { outcomeMeta, phoneIssue, emailIssue, timeAgo } from '../utils.js';
+import { clip, extraInsights, isUrlValue } from '../registry.js';
 import EmailComposer from './EmailComposer.jsx';
 
 function CopyBtn({ text }) {
@@ -29,12 +33,84 @@ function Row({ icon: Icon, label, children, extra }) {
   );
 }
 
+// Registry metadata from an enriched lead sheet: CVR number, advertising-protection flag,
+// source links, whatever else the sheet carried. Collapsed by default — an agent who has to
+// scroll past eight registry rows to reach the Call button is being slowed down by data they
+// did not ask for — with the two commercially important facts surfaced as pills on the trigger,
+// so "this company is ad-protected" is visible without opening anything.
+function RegistryDetails({ insights }) {
+  const [open, setOpen] = useState(false);
+  const reduce = useReducedMotion();
+  // useId keeps two cards for the same prospect (dialer + drawer) from minting the same DOM id.
+  const panelId = `registry-${useId().replace(/:/g, '')}`;
+  const { count, entries, cvr, adProtected, protectionNote, urlCount } = insights;
+
+  return (
+    <div className="registry">
+      <button
+        type="button"
+        className="registry-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={panelId}
+      >
+        <ChevronDown size={15} className={`registry-caret ${open ? 'open' : ''}`} aria-hidden />
+        <span className="registry-label">
+          More details &amp; registry data <em>{count}</em>
+        </span>
+        <span className="registry-pills">
+          {cvr && <span className="pill pill-cvr" title="Danish company registration number (CVR)">CVR {cvr}</span>}
+          {adProtected && (
+            <span className="pill pill-protected" title={protectionNote}>
+              <ShieldX size={12} /> Ad-protected
+            </span>
+          )}
+          {!cvr && !adProtected && urlCount > 0 && <span className="pill pill-quiet">{urlCount} link{urlCount === 1 ? '' : 's'}</span>}
+        </span>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={panelId}
+            className="registry-body"
+            initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+            animate={reduce ? { opacity: 1 } : { height: 'auto', opacity: 1 }}
+            exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+            transition={{ duration: reduce ? 0.12 : 0.2, ease: 'easeOut' }}
+          >
+            <div className="registry-grid">
+              {entries.map((e) => (
+                <div key={e.key} className="registry-item">
+                  <label>{e.key}</label>
+                  {e.isUrl ? (
+                    <a
+                      href={e.value}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="registry-link"
+                      title={e.value}
+                    >
+                      {clip(e.value)} <ExternalLink size={11} aria-hidden />
+                    </a>
+                  ) : (
+                    <span>{isUrlValue(e.value) ? clip(e.value) : e.value}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 // `onSent` is optional: the card is rendered by the dialer, the drawer and the prospects
 // table, and each of those owns a different timeline to refresh.
 export default function ProspectCard({ p, big = false, onSent }) {
   const { updateProspect, toast, settings } = useStore();
   const [mailing, setMailing] = useState(false);
-  const [extraOpen, setExtraOpen] = useState(false);
   if (!p) return null;
   const save = (field) => (val) => updateProspect(p.id, { [field]: val });
 
@@ -51,13 +127,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
     if (issue) return toast(issue, 'error');
     return updateProspect(p.id, { email: String(val ?? '').trim() });
   };
-  const extra = p.extra || {};
-  const extraKeys = Object.keys(extra);
-  const cvrKey = extraKeys.find((k) => /cvr/i.test(k));
-  const cvrVal = cvrKey ? String(extra[cvrKey]).trim() : null;
-  const isProtected = Object.entries(extra).some(
-    ([k, v]) => /reklamebeskyttelse|advertising\s*protection|protection/i.test(k) && /yes|ja|true|1/i.test(String(v))
-  );
+  const insights = extraInsights(p.extra);
   const lastOut = outcomeMeta(p.last_outcome);
 
   return (
@@ -68,14 +138,12 @@ export default function ProspectCard({ p, big = false, onSent }) {
           <Editable className="h-name" value={p.name} placeholder="Name" onSave={save('name')} />
           <div className="sub-line">
             <Editable className="h-sub" value={p.title} placeholder="Job title" onSave={save('title')} />
-            <span className="at">@</span>
+            <span className="dot-sep">·</span>
             <Editable className="h-sub" value={p.company} placeholder="Company" onSave={save('company')} />
           </div>
         </div>
-        {p.dnc && <span className="dnc-badge"><ShieldAlert size={14} /> Do not call</span>}
+        <StagePicker value={p.stage} onChange={save('stage')} />
       </div>
-
-      <StagePicker value={p.stage} onChange={(s) => updateProspect(p.id, { stage: s })} />
 
       <div className="info-grid">
         <Row icon={Phone} label="Phone" extra={<CopyBtn text={p.phone} />}>
@@ -111,57 +179,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
         <div>{lastOut ? <i className="dot" style={{ background: lastOut.color }} /> : <i className="dot" />}<b>{lastOut ? lastOut.label : '—'}</b><span>last result</span></div>
       </div>
 
-      {extraKeys.length > 0 && (
-        <div className="extra-section">
-          <button
-            type="button"
-            className="extra-toggle-btn"
-            onClick={() => setExtraOpen((o) => !o)}
-            aria-expanded={extraOpen}
-            aria-controls={`extra-grid-${p.id}`}
-          >
-            <div className="extra-toggle-title">
-              <ChevronDown size={14} className={`extra-caret ${extraOpen ? 'open' : ''}`} />
-              <span>More details &amp; registry data ({extraKeys.length})</span>
-            </div>
-            <div className="extra-pills">
-              {cvrVal && <span className="pill-cvr">CVR: {cvrVal}</span>}
-              {isProtected && <span className="pill-protected" title="CVR Advertising Protected">⚠️ Ad-Protected</span>}
-            </div>
-          </button>
-          <AnimatePresence initial={false}>
-            {extraOpen && (
-              <motion.div
-                id={`extra-grid-${p.id}`}
-                className="extra-content"
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.18 }}
-              >
-                <div className="extra-grid">
-                  {extraKeys.map((k) => {
-                    const val = String(extra[k] ?? '');
-                    const isUrl = /^https?:\/\//i.test(val);
-                    return (
-                      <div key={k} className="extra-item">
-                        <label>{k}</label>
-                        {isUrl ? (
-                          <a href={val} target="_blank" rel="noopener noreferrer" className="extra-link" title={val}>
-                            {val.length > 36 ? val.slice(0, 33) + '…' : val}
-                          </a>
-                        ) : (
-                          <span>{val}</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      )}
+      {insights.count > 0 && <RegistryDetails insights={insights} />}
 
       <label className="dnc-toggle">
         <input type="checkbox" checked={!!p.dnc} onChange={(e) => updateProspect(p.id, { dnc: e.target.checked })} />

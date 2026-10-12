@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
+import { Check, ChevronDown, Loader2, PartyPopper, RefreshCw } from 'lucide-react';
 import { Avatar } from './ui.jsx';
 import { stageMeta } from '../utils.js';
 
@@ -28,6 +28,7 @@ export default function QueueList({
   items = [],
   activeId = null,
   done,
+  progress = null,
   locked = false,
   total = 0,
   hasMore = false,
@@ -101,8 +102,26 @@ export default function QueueList({
         </div>
       ) : null}
 
-      {!loading && !error && items.length === 0 ? (
+      {!loading && !error && items.length === 0 && !progress?.allDone ? (
         <div className="muted small center pad">Nobody here. Try another tab or add one above.</div>
+      ) : null}
+
+      {/* Everything this tab listed has been dialed: say so, and stop offering the next lead.
+          A queue that quietly keeps a finished prospect on screen never feels finished, and the
+          agent keeps re-reading the same name instead of moving on. */}
+      {progress?.allDone && !error ? (
+        <motion.div
+          className="queue-done"
+          role="status"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ type: 'spring', stiffness: 320, damping: 28 }}
+        >
+          <PartyPopper size={20} aria-hidden />
+          <b>Queue completed! 🎉</b>
+          <span>{progress.dialed} {progress.dialed === 1 ? 'lead' : 'leads'} dialed on this tab</span>
+          <small>Switch tabs or import a new list to keep going.</small>
+        </motion.div>
       ) : null}
 
       {hasMore ? (

@@ -97,7 +97,7 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
     // A notes column is real context ("met at the expo", "referred by Sofie") and used to be
     // dropped on the floor at import. It rides along on the prepared row and is written as the
     // prospect's first note inside the same transaction as the insert.
-    const noteText = mapping.notes ? cleanStr(row[mapping.notes]) : '';
+    const noteText = mapping.notes ? cleanStr(row[mapping.notes]).slice(0, 20000) : '';
     if (mapping.first_name || mapping.last_name) {
       const fn = mapping.first_name ? cleanStr(row[mapping.first_name]) : '';
       const ln = mapping.last_name ? cleanStr(row[mapping.last_name]) : '';
@@ -138,7 +138,7 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
       if (row.note) { notes.insert(id, row.note); notesCreated++; }
     })
     : 0;
-  return { added, dupes, empty, badPhones, notesCreated, backup: backupInfo };
+  return { added, dupes, empty, badPhones, notesCreated, noted: notesCreated, backup: backupInfo };
 }
 
 // ---- bulk management ----

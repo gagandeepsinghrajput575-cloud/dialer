@@ -18,7 +18,7 @@ import QueueList from '../components/QueueList.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import useServerQueue from '../useServerQueue.js';
-import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex, tabForProspect } from '../queue.js';
+import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueProgress, queueTab, stepIndex, tabForProspect } from '../queue.js';
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
@@ -836,6 +836,7 @@ export default function Dialer() {
   const tabEmpty = (counts?.[tab] ?? 0) === 0;
   const doneToday = Boolean(today && today.dials > 0 && !loading && tabEmpty);
   const phonelessLeft = items.filter((p) => !p.phone).length;
+  const progress = queueProgress(items, done, tab);
   // Tab labels are chips ("To call"), not prose — spelling them into a sentence produced
   // "Every lead in to call has been called". These are the same three queues, said out loud.
   const tabProse = { new: 'the call list', follow: 'the follow-up list', all: 'the list' }[tab] || 'this queue';
@@ -892,6 +893,7 @@ export default function Dialer() {
           items={items}
           activeId={active?.id ?? null}
           done={done}
+          progress={progress}
           locked={calling || !!classifyModal}
           total={total}
           hasMore={hasMore}

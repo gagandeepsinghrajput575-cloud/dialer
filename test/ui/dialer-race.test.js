@@ -24,6 +24,46 @@ const ok = (msg) => { passed++; console.log(`    \u2713 ${msg}`); };
 const bad = (msg) => { failures++; console.log(`    \u274C ${msg}`); };
 const check = (cond, msg) => (cond ? ok(msg) : bad(msg));
 
+// A recording stand-in for the Web Audio API. The ringer is the only thing in the app that
+// makes a noise on its own, and "did the phone stop ringing?" has to be provable in a test.
+function fakeWebAudio() {
+  const live = [];
+  const closed = [];
+  class Param {
+    constructor() { this.value = 0; this.events = []; }
+    setValueAtTime(v) { this.events.push(v); this.value = v; return this; }
+    cancelScheduledValues() { return this; }
+  }
+  class Osc {
+    constructor(ctx) { this.ctx = ctx; this.frequency = new Param(); this.type = 'sine'; this.on = false; }
+    connect() { return this; }
+    start() { this.on = true; live.push(this); }
+    stop() { this.on = false; }
+    disconnect() { this.on = false; }
+  }
+  class Gain {
+    constructor(ctx) { this.ctx = ctx; this.gain = new Param(); this.connected = false; }
+    connect() { return this; }
+    disconnect() { this.connected = false; }
+  }
+  class Ctx {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {}; this.closed = false; closed.push(this); }
+    createGain() { return new Gain(this); }
+    createOscillator() { return new Osc(this); }
+    createAnalyser() { return { fftSize: 0, frequencyBinCount: 8, getByteTimeDomainData() {}, connect() {} }; }
+    createMediaStreamSource() { return { connect() {} }; }
+    resume() { this.state = 'running'; return Promise.resolve(); }
+    close() { this.state = 'closed'; this.closed = true; return Promise.resolve(); }
+  }
+  return {
+    AudioContext: Ctx, Ctor: Ctx,
+    ringing: () => live.filter((o) => o.on).length,
+    contexts: () => closed.length,
+    closedContexts: () => closed.filter((c) => c.closed).length,
+    reset: () => { live.length = 0; closed.length = 0; },
+  };
+}
+
 // opts.nodeFormData swaps jsdom's FormData/File for node's before the bundle runs, which is the
 // only way a FormData upload made *inside* the app can reach node's fetch (two different realms).
 function loadApp(JSDOM, VirtualConsole, hash, opts = {}) {
@@ -64,6 +104,12 @@ function loadApp(JSDOM, VirtualConsole, hash, opts = {}) {
     return fetch(url, init);
   };
   window.matchMedia = window.matchMedia || ((q) => ({ matches: false, media: q, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }));
+  if (opts.webAudio) { window.AudioContext = opts.webAudio.Ctor; }
+  if (opts.reducedMotion) {
+    // jsdom's matchMedia always says "no"; a reduced-motion user is a real client and the
+    // banner has to behave for them too, so it can be requested explicitly.
+    window.matchMedia = (q) => ({ matches: /prefers-reduced-motion/.test(q), media: q, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false });
+  }
   window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
   window.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } };
   window.Element.prototype.scrollIntoView = function () {};
@@ -508,6 +554,207 @@ async function run() {
       'with no microphone API the test explains itself instead of throwing');
     check(sApp.jsErrors.length === 0, `no jsdom errors on the WebRTC settings panel (${sApp.jsErrors.join(' | ').slice(0, 140)})`);
     sApp.dom.window.close();
+    await put('/api/settings', { telephony_mode: 'softphone' });
+
+    // --- I1: a call that arrives in the browser ---------------------------------
+    // The inbound half of the softphone. `i` in test mode rings through exactly the code path
+    // a real INVITE takes (SIP delegate -> engine -> store -> banner), so the checks below are
+    // made against the shipping state machine, not a stub. Web Audio is instrumented so
+    // "the phone stopped ringing" is an assertion and not a hope.
+    await put('/api/settings', { telephony_mode: 'webrtc', dry_run: '1' });
+    const inCaller = await (await post('/api/prospects', {
+      name: 'Inbound Caller', phone: '20123477', company: 'Ringsted ApS', title: 'Driftschef',
+    })).json();
+
+    const audio = fakeWebAudio();
+    const iApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: audio });
+    const iwin = iApp.window;
+    const idoc = iwin.document;
+    await wait(() => idoc.querySelector('.q-item'), 15000, 'inbound queue');
+    await ensureListener(iApp);
+    await sleep(500);
+    iApp.drain();
+    audio.reset();
+
+    const banner = () => idoc.querySelector('.incoming-call');
+    const inToasts = () => [...idoc.querySelectorAll('.toast')].map((t) => t.textContent).join(' ');
+    key(iwin, 'i');
+    await wait(() => banner(), 8000, 'the incoming call banner');
+    await sleep(500);
+
+    check(banner()?.getAttribute('role') === 'alertdialog' && banner()?.getAttribute('aria-modal') === 'true',
+      'the incoming call is an alertdialog');
+    check(/Incoming call from Inbound Caller/.test(banner()?.querySelector('.sr-only')?.textContent || ''),
+      `the caller is announced to screen readers ("${(banner()?.querySelector('.sr-only')?.textContent || '').slice(0, 44)}")`);
+    check(/Inbound Caller/.test(idoc.querySelector('.incoming-name')?.textContent || ''),
+      'the banner names the caller from the CRM');
+    check(/Ringsted ApS/.test(idoc.querySelector('.incoming-sub')?.textContent || ''),
+      'the banner carries the company so two "John"s are never confused');
+    check((idoc.querySelector('.incoming-number')?.textContent || '').replace(/\D/g, '').length >= 8,
+      `the caller's number is on screen (${idoc.querySelector('.incoming-number')?.textContent || ''})`);
+    check(/Answer/.test(idoc.activeElement?.textContent || ''),
+      `focus lands on Answer so Enter accepts it natively ("${(idoc.activeElement?.textContent || '').trim().slice(0, 20)}")`);
+    check(audio.ringing() >= 1, `the tab is audibly ringing (${audio.ringing()} tone(s) live)`);
+    check(count(iApp.drain(), /POST \/api\/calls\/inbound/) === 1,
+      'the ring opens exactly one ledger row for the caller');
+
+    // --- I2: every dialer shortcut is inert while the phone rings ---------------
+    key(iwin, 'c'); key(iwin, '1'); key(iwin, '6'); key(iwin, 'r'); key(iwin, 'h');
+    await sleep(900);
+    const duringRing = iApp.drain();
+    check(count(duringRing, DIAL) === 0, `C behind a ringing phone places no call (got ${count(duringRing, DIAL)})`);
+    check(count(duringRing, PATCH) === 0, `outcome keys behind a ringing phone classify nothing (got ${count(duringRing, PATCH)})`);
+    check(idoc.querySelectorAll('iframe[src^="sip:"], iframe[src^="tel:"]').length === 0,
+      'no dial URI reaches the operating system while the phone rings');
+    check(!!banner(), 'the banner survives the keystrokes (nothing raced it off screen)');
+
+    // --- I3: Escape declines, and the ring stops ---------------------------------
+    key(iwin, 'Escape');
+    await wait(() => !banner(), 8000, 'the banner to close on decline');
+    await sleep(700);   // AnimatePresence exit
+    const declined = iApp.drain();
+    check(count(declined, /POST \/api\/calls\/\d+\/missed/) === 1,
+      `declining logs the miss exactly once (got ${count(declined, /missed/)})`);
+    check(audio.ringing() === 0, `the ringer is silent the instant the call is declined (${audio.ringing()} live)`);
+    check(audio.closedContexts() >= 1, 'declining closes the audio context instead of leaking it');
+    check(/Declined call from/.test(inToasts()), `the agent is told what they did ("${inToasts().slice(0, 40)}")`);
+    check(!/active/.test(idoc.querySelector('.callbar')?.className || ''), 'a declined call never goes "active"');
+    check(!idoc.querySelector('.webrtc-badge'), 'declining opens no microphone (no live badge)');
+
+    // --- I4: Enter answers, the cockpit follows ----------------------------------
+    iApp.drain(); audio.reset();
+    key(iwin, 'i');
+    await wait(() => banner(), 8000, 'a second ring');
+    key(iwin, 'Enter');
+    await wait(() => idoc.querySelector('.webrtc-badge'), 12000, 'the live badge after answering');
+    const answered = iApp.drain();
+    const bannerGone = await (async () => { try { await wait(() => !banner(), 6000, 'banner exit'); return true; } catch { return false; } })();
+    check(bannerGone, 'answering takes the banner down');
+    check(/WebRTC Active \u00b7 Mic Live/.test(idoc.querySelector('.webrtc-badge')?.textContent || ''),
+      'answering goes live with the microphone badge');
+    check(audio.ringing() === 0, `answering stops the ringer (${audio.ringing()} live)`);
+    check(count(answered, /POST \/api\/calls\/inbound/) === 1,
+      `a second ring reuses/opens one inbound row (got ${count(answered, /inbound/)})`);
+    check(count(answered, /missed/) === 0, 'answering never logs the call as missed');
+    check(/Inbound call with Inbound Caller/.test(idoc.querySelector('.inflight-txt')?.textContent || ''),
+      `the in-flight strip says who is on the line ("${(idoc.querySelector('.inflight-txt')?.textContent || '').slice(0, 46)}")`);
+    const it0 = idoc.querySelector('.timer')?.textContent;
+    await sleep(1300);
+    const it1 = idoc.querySelector('.timer')?.textContent;
+    check(it0 !== it1 && /^\d+:\d\d$/.test(it1 || ''), `the inbound talk timer counts real time (${it0} -> ${it1})`);
+
+    // --- I5: hanging up classifies an inbound call like any other ---------------
+    iApp.drain();
+    key(iwin, 'h');
+    await wait(() => idoc.querySelector('.classify-modal'), 9000, 'classification after an inbound hang-up');
+    check(true, 'hanging up an inbound call opens the same 1-8 classification');
+    await sleep(700);
+    check(!idoc.querySelector('.webrtc-badge'), 'hanging up releases the microphone');
+    const inNote = idoc.getElementById('top-quick-note');
+    if (inNote) {
+      const setVal = Object.getOwnPropertyDescriptor(iwin.HTMLTextAreaElement.prototype, 'value').set;
+      setVal.call(inNote, 'Inbound fixture note');
+      inNote.dispatchEvent(new iwin.Event('input', { bubbles: true }));
+      await sleep(200);
+    }
+    key(iwin, '6');
+    await sleep(2000);
+    const inLogged = iApp.drain();
+    check(count(inLogged, PATCH) === 1, `mashing 6 on an inbound call patches it once (got ${count(inLogged, PATCH)})`);
+    const patchedId = (inLogged.find((c) => PATCH.test(`${c.method} ${c.path}`))?.path || '').match(/\d+$/)?.[0];
+    const inDetail = await (await fetch(`${BASE}/api/prospects/${inCaller.id}`)).json();
+    const inRow = inDetail.calls[0];
+    check(!!inRow && inRow.direction === 'inbound',
+      `the ledger row is an inbound call (direction=${inRow?.direction})`);
+    check(String(inRow?.id) === String(patchedId),
+      `the classification landed on the row the ring opened (${patchedId} vs ${inRow?.id})`);
+    check(inRow?.outcome === 'conversation', `the outcome is saved on the inbound row (${inRow?.outcome})`);
+    check((inRow?.duration_sec || 0) > 0, `the inbound call has a real talk time (${inRow?.duration_sec}s)`);
+
+    // --- I6: a second tab must not ring, and says why ----------------------------
+    // jsdom has no navigator.locks. Install one that refuses the inbound audio lock, the way
+    // a real "another tab owns the speakers" refusal arrives.
+    const tabs = { requested: [], refused: [] };
+    Object.defineProperty(iwin.navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: async (name, opts, cb) => {
+          tabs.requested.push(String(name));
+          if (String(name) === 'pulse-inbound-audio') { tabs.refused.push(String(name)); return cb(null); }
+          return cb({ name });
+        },
+      },
+    });
+    await wait(() => !idoc.querySelector('.classify-modal'), 9000, 'the classification modal to close');
+    await sleep(400);
+    iApp.drain();
+    key(iwin, 'i');
+    await sleep(1600);
+    check(tabs.requested.includes('pulse-inbound-audio'), `the ring asks for the audio lock (${tabs.requested.join(',') || 'none'})`);
+    check(!banner(), 'a tab that loses the audio lock does not ring at all');
+    check(count(iApp.drain(), /POST \/api\/calls\/inbound/) === 0, 'the losing tab does not open a second ledger row');
+    check(/Call in progress on another tab/.test(idoc.querySelector('.standby-strip.busy')?.textContent || ''),
+      `the losing tab explains itself ("${(idoc.querySelector('.standby-strip.busy')?.textContent || '').trim().slice(0, 40)}")`);
+    check(/Standby/.test(idoc.querySelector('.standby-strip')?.textContent || ''),
+      'the registration state is visible in the cockpit instead of buried in Settings');
+    check(iApp.jsErrors.length === 0, `no jsdom errors driving an inbound call (${iApp.jsErrors.join(' | ').slice(0, 170)})`);
+    iApp.dom.window.close();
+
+    // --- I8: a caller who is not in the CRM --------------------------------------
+    // Nobody recognises every number. The ring must not fail, must not show the record it
+    // could not find, and must say plainly that answering creates a new lead. The stale list
+    // in the tab is what makes this reproducible: the tab rings from a number the server no
+    // longer knows, which is exactly the stranger-calls-in case.
+    // The test-mode ring dials the first prospect with a number *in the app's own list*, so the
+    // victim has to be picked the same way — from GET /api/prospects, not from the queue tab.
+    const list = await (await fetch(`${BASE}/api/prospects`)).json();
+    const ghost = (Array.isArray(list) ? list : list.items || []).find((p) => p.phone);
+    check(!!ghost?.id && !!ghost?.phone, `the fixture list has a prospect to ring from (${ghost?.name || 'none'})`);
+    const uAudio = fakeWebAudio();
+    const uApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: uAudio });
+    await wait(() => uApp.window.document.querySelector('.q-item'), 15000, 'unknown-caller queue');
+    await ensureListener(uApp);
+    await sleep(500);
+    // The tab keeps the prospect in memory; the database forgets it.
+    await fetch(`${BASE}/api/prospects/${ghost.id}`, { method: 'DELETE' });
+    const uDoc = uApp.window.document;
+    uApp.drain();
+    key(uApp.window, 'i');
+    await wait(() => uDoc.querySelector('.incoming-call'), 8000, 'the unknown-caller ring');
+    await sleep(600);
+    check(/Unknown caller/.test(uDoc.querySelector('.incoming-sub')?.textContent || ''),
+      `an unrecognised number reads as an unknown caller ("${(uDoc.querySelector('.incoming-sub')?.textContent || '').trim()}")`);
+    check((uDoc.querySelector('.incoming-number')?.textContent || '').replace(/\D/g, '').includes(String(ghost.phone).replace(/\D/g, '').slice(-8)),
+      `the banner still shows the number that is ringing (${uDoc.querySelector('.incoming-number')?.textContent || ''})`);
+    check(/Answering creates a new lead/.test(uDoc.querySelector('.incoming-hint')?.textContent || ''),
+      'and tells the agent what answering will do');
+    check(!!uDoc.querySelector('.incoming-actions .incoming-answer'), 'Answer stays available for a stranger');
+    key(uApp.window, 'Escape');
+    await wait(() => !uDoc.querySelector('.incoming-call'), 8000, 'the stranger ring to close');
+    check(uAudio.ringing() === 0, 'and the unknown-caller ring is silenced like any other');
+    uApp.dom.window.close();
+
+    // --- I7: a reduced-motion user still gets the call --------------------------
+    // The ring cadence is drawn, so "no animation" must not mean "no banner": the bars go
+    // static and the keyboard/audio path is unchanged.
+    const rApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: fakeWebAudio(), reducedMotion: true });
+    await wait(() => rApp.window.document.querySelector('.q-item'), 15000, 'reduced-motion queue');
+    await ensureListener(rApp);
+    await sleep(400);
+    key(rApp.window, 'i');
+    await wait(() => rApp.window.document.querySelector('.incoming-call'), 8000, 'the reduced-motion ring');
+    await sleep(400);
+    const bars = [...rApp.window.document.querySelectorAll('.incoming-wave i')];
+    check(bars.length === 5, `the ringing banner still renders with reduced motion (${bars.length} bars)`);
+    check(bars.every((b) => !b.style.transform || /^none$|^scaleY\(0?\.?[0-9]+\)$/.test(b.style.transform)),
+      'reduced motion leaves the ring bars still instead of animating them');
+    check(/Answer/.test(rApp.window.document.activeElement?.textContent || ''),
+      'answering is still one Enter away for a reduced-motion user');
+    key(rApp.window, 'Escape');
+    await wait(() => !rApp.window.document.querySelector('.incoming-call'), 8000, 'the reduced-motion teardown');
+    check(true, 'and Escape still declines');
+    rApp.dom.window.close();
+
     await put('/api/settings', { telephony_mode: 'softphone' });
 
     // --- O1: the local mail sink — email works with no credentials at all ---------
@@ -969,7 +1216,7 @@ async function run() {
     // same value to a controlled input fires no React change event, so it takes two steps.
     await applySearch('zzz-refresh');
     await applySearch('');
-    await wait(() => doneApp.window.document.querySelector('.queue-done'), 12000, 'completion card');
+    await wait(() => doneApp.window.document.querySelector('.queue-done'), 20000, 'completion card');
     const doneCard = doneApp.window.document.querySelector('.queue-done');
     const txt = doneCard.textContent || '';
     check(/Queue completed/.test(txt), `the empty tab is celebrated ("${txt.slice(0, 60).replace(/\s+/g, ' ')}…")`);

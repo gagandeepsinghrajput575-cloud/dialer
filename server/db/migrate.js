@@ -86,6 +86,10 @@ const MIGRATIONS = [
   { version: 6, name: 'outbox-local-mail-sink', up: () => db.exec(OUTBOX_SQL) },
   // The carrier cutover. Runs before the purge on purpose — see migrateTelephonyToTelnyx.
   { version: 7, name: 'telnyx-telephony-migration', up: (d) => migrateTelephonyToTelnyx(d) },
+  // Inbound calls land in the same ledger as outbound ones. A column with a default is an
+  // O(1), rewrite-free ALTER on SQLite, so every row a running database already holds keeps
+  // reading back as 'outbound' — nothing to backfill, nothing to lose.
+  { version: 8, name: 'calls-direction-inbound', up: () => addColumn('calls', 'direction', "TEXT NOT NULL DEFAULT 'outbound'") },
 ];
 
 function run() {

@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
+import { samePhone } from './utils.js';
 
 const Ctx = createContext(null);
 export const useStore = () => useContext(Ctx);
@@ -174,6 +175,23 @@ export function StoreProvider({ children }) {
 
   const openInDialer = useCallback((id) => { setActiveId(id); setDrawerId(null); setView('dialer'); }, [setView]);
 
+  // ---- inbound calls -------------------------------------------------------------------
+  // The ringing call lives here because it is not owned by a page: the modal is mounted at the
+  // root so a callback rings on Settings just as loudly as on the dialer, and the dialer reads
+  // the same object to know that this call did not start with a C keypress.
+  const [inbound, setInbound] = useState(null);
+  const [inboundEnded, setInboundEnded] = useState(null);   // answered call that has hung up: { callId, prospect }
+  const inboundRef = useRef(null);
+  inboundRef.current = inbound;
+
+  // Local, instant match for the ringing caller. The server does the authoritative lookup (and
+  // provisions an unknown caller); this is what puts a name on screen without waiting for a
+  // round trip while the phone is still ringing.
+  const findProspectByPhone = useCallback(
+    (phone) => (phone ? prospects.find((p) => samePhone(p.phone, phone)) || null : null),
+    [prospects],
+  );
+
   // The local outbox is reachable from three places (Settings, the composer's "captured"
   // toast, and the composer itself), so its open state lives here and the modal is rendered
   // once at the root rather than re-mounted per page.
@@ -201,7 +219,8 @@ export function StoreProvider({ children }) {
     bulkStageProspects, bulkMarkDnc, bulkDeleteProspects,
     onProspectSaved, onProspectDeleted,
     outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismissToast: dismiss,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss]);
+    inbound, setInbound, inboundRef, inboundEnded, setInboundEnded, findProspectByPhone,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss, inbound, inboundEnded, findProspectByPhone]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

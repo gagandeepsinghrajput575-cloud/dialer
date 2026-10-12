@@ -3,6 +3,9 @@ const c = require('../controllers/callController');
 const s = require('../validation/schemas');
 const { validate } = require('../middleware/validate');
 
+// Declared before the /:id routes so "inbound" is never read as a call id.
+router.post('/inbound', validate(s.callInbound), c.inbound);
+router.post('/:id/missed', validate(s.callMissed), c.missed);
 router.patch('/:id', validate(s.callPatch), c.patch);
 router.post('/:id/discard', c.discard);
 router.post('/:id/voicemail-drop', validate(s.voicemailDrop), c.voicemailDrop);

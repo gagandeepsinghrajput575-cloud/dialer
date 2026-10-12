@@ -42,6 +42,9 @@ function stats({ tzOffset = null } = {}) {
   const filter = statsFilter();
   const since7 = sqlTime(getStartOfDay(-6, tzOffset));
   const rows = calls.since(since7, filter);
+  // The recent list joins `calls c`, so it needs the same filter spelled with that alias
+  // rather than a string substitution on the unaliased fragment.
+  const recentFilter = statsFilter('c.');
 
   const byDay = {};
   for (let i = 6; i >= 0; i--) byDay[dayLabel(-i, tzOffset)] = [];
@@ -69,7 +72,7 @@ function stats({ tzOffset = null } = {}) {
     stageCounts: prospects.stageCounts(),
     total: prospects.count(),
     dncCount: prospects.dncCount(),
-    recent: calls.recent(8, filter.replace('dry_run', 'c.dry_run')),
+    recent: calls.recent(8, recentFilter),
     stages: STAGES,
   };
 }

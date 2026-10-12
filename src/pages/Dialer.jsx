@@ -10,7 +10,8 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
-import useWebRtc, { DTMF_KEYS } from '../useWebRtc.js';
+import { DTMF_KEYS } from '../useWebRtc.js';
+import { useSoftphone } from '../softphone.jsx';
 import ProspectCard from '../components/ProspectCard.jsx';
 import EmailComposer, { VerifyBadge } from '../components/EmailComposer.jsx';
 import QueueList from '../components/QueueList.jsx';
@@ -138,7 +139,10 @@ function QuickAddModal({ onClose, onAdded }) {
 }
 
 export default function Dialer() {
-  const { prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect, stats } = useStore();
+  const {
+    prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect, stats,
+    inbound, inboundEnded, setInboundEnded,
+  } = useStore();
   const [tab, setTab] = useState('new');
   const [q, setQ] = useState('');
   const [phase, setPhase] = useState('idle'); // idle | dialing | active
@@ -218,27 +222,33 @@ export default function Dialer() {
   const confirmDiscardRef = useRef(false);
   confirmDiscardRef.current = confirmDiscard;
 
-  const webrtc = useWebRtc({
-    enabled: isWebrtc,
-    // Only the engine may promote the callbar to 'active', and it does so when audio really
-    // flows (a live ICE connect, or the dry-run simulator auto-connecting). Everywhere else
-    // the dialer used to go 'active' the instant the server answered, which drew a running
-    // timer over a call that had no audio path at all — the exact bug this replaces.
-    onActive: () => {
-      webrtcLiveRef.current = true;
-      setLaunched(true);
-      setPhaseSafe('active');
-      refreshStats();
-    },
-    // Fires when the engine ends the session. Release the mic first, then classify: nothing
-    // may leave the browser recording after the call, and a hang-up must never need a second
-    // click to reach a result.
-    onEnded: () => {
-      webrtcLiveRef.current = false;
-      if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
-    },
-  });
+  // The phone is owned by the app shell (SoftphoneProvider) so the tab rings on any page.
+  // Dialer only consumes that singleton — and registers its active/ended callbacks with it,
+  // instead of building a second UserAgent behind the banner's back.
+  const webrtc = useSoftphone();
+  // Only the engine may promote the callbar to 'active', and it does so when audio really
+  // flows (a live ICE connect, or the dry-run simulator auto-connecting). Everywhere else the
+  // dialer used to go 'active' the instant the server answered, which drew a running timer
+  // over a call that had no audio path at all — the exact bug this replaces.
+  const engineActive = useCallback(() => {
+    webrtcLiveRef.current = true;
+    setLaunched(true);
+    setPhaseSafe('active');
+    refreshStats();
+  }, [setPhaseSafe, refreshStats]);
+  // Fires when the engine ends the session. The mic is already cold by then (the engine
+  // releases it before reporting), so classification opens on a call that is truly over.
+  const engineEnded = useCallback(() => {
+    webrtcLiveRef.current = false;
+    if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
+  }, []);
+  useEffect(() => {
+    webrtc?.setCallHandlers?.({ onActive: engineActive, onEnded: engineEnded });
+  }, [webrtc, engineActive, engineEnded]);
   webrtcRef.current = webrtc;
+  // Readable synchronously from the key handler: while this is set, the banner owns the phone.
+  const ringingRef = useRef(null);
+  ringingRef.current = webrtc?.incomingCall || null;
 
   // Server-backed queue: filtering, ranking, and paging live on the server
   const queue = useServerQueue({ tab, q, limit: QUEUE_LIMIT });
@@ -374,6 +384,7 @@ export default function Dialer() {
   const startCall = useCallback(async () => {
     // One dial at a time, per tick and per request: mash C as hard as you like.
     if (dialLockRef.current) return;
+    if (ringingRef.current) return;   // the phone is ringing: answer or decline it first
     if (!active || phaseRef.current !== 'idle' || classifyRef.current) return;
     if (active.dnc) return toast('This prospect is marked Do Not Call.', 'error');
     if (!active.phone) {
@@ -480,6 +491,36 @@ export default function Dialer() {
     });
   }, [callId, active, setPhaseSafe, setClassifySafe]);
   webrtcFinishRef.current = openClassification;
+
+  // An inbound call that has been answered belongs to the cockpit from that moment: the same
+  // call bar, the same talk timer, the same M / D / H keys as an outbound dial. The call row
+  // was opened by the provider when the phone started ringing, so only the outcome is missing.
+  useEffect(() => {
+    if (!inbound?.answered || !inbound.callId) return;
+    if (callId === inbound.callId && phaseRef.current !== 'idle') return;
+    setCallId(inbound.callId);
+    setDial({ uri: null, full: null, protocol: 'webrtc', mode: 'webrtc', phone: inbound.callerNumber });
+    setLaunched(true);
+    if (phaseRef.current === 'idle') setPhaseSafe('active');
+  }, [inbound, callId, setPhaseSafe]);
+
+  // The far end hung up (or the agent did): straight into the same 1-8 disposition modal an
+  // outbound call ends in — same copilot, same follow-up prompt, same duration bookkeeping.
+  useEffect(() => {
+    if (!inboundEnded) return;
+    setInboundEnded(null);
+    setPhaseSafe('idle');
+    setLaunched(false);
+    setDtmfOpen(false);
+    if (!inboundEnded.callId || !inboundEnded.prospect) return;
+    setTargetStage(inboundEnded.prospect.stage || 'contacted');
+    setCustomNote(quickNoteRef.current.trim());
+    setClassifySafe({
+      callId: inboundEnded.callId,
+      duration: secRef.current,
+      prospect: inboundEnded.prospect,
+    });
+  }, [inboundEnded, setInboundEnded, setPhaseSafe, setClassifySafe]);
 
   // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
@@ -667,6 +708,9 @@ export default function Dialer() {
       // and C / 1-8 must keep working while it does.
       // OS key repeat (holding a key down) must not stack up calls or classifications.
       if (e.repeat) return;
+      // The banner owns the keyboard while the phone rings (it also stops propagation, this is
+      // the belt to that braces: a keystroke between two renders must not reach the dialer).
+      if (ringingRef.current) return;
       // Single-character shortcuts work regardless of Shift/CapsLock; named keys stay verbatim.
       const k = typeof e.key === 'string' && e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
@@ -798,11 +842,12 @@ export default function Dialer() {
   // In-browser mode reports the engine's own state, so the strip under the callbar says
   // "Ringing" only while it really is ringing, and shows the engine's error when it fails.
   const webState = webrtc.state;
+  const inboundActive = !!inbound?.answered;
   const inflightText = isWebrtc
     ? webState === 'registering' ? `Registering with ${softphone}…`
       : webState === 'ringing' ? `Ringing ${dial?.phone || active?.phone || ''}…`
         : webState === 'error' ? (webrtc.error || 'The in-browser call failed.')
-          : webState === 'active' ? (dry ? `Test mode: in-browser call simulated` : `In-browser call live with ${dial?.phone || active?.phone || ''}`)
+          : webState === 'active' ? (dry && !inboundActive ? `Test mode: in-browser call simulated` : `${inboundActive ? 'Inbound call' : 'In-browser call live'} with ${inboundActive ? (inbound?.prospect?.name || inbound?.callerNumber) : (dial?.phone || active?.phone || '')}`)
             : `Dialing ${dial?.phone || active?.phone || ''}…`
     : dry
       ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`}`
@@ -923,6 +968,30 @@ export default function Dialer() {
               </div>
             </div>
 
+            {/* SOFT PHONE STANDBY. A phone that is only registered while you dial cannot
+                receive a call, so the state of the registration is part of the cockpit, not a
+                setting buried two pages away. */}
+            {isWebrtc && (
+              <div className={`standby-strip ${webrtc.standby.state}`} title={webrtc.standby.reason || webrtc.standbyLabel}>
+                <span className="standby-dot" />
+                <span className="standby-txt">{webrtc.standbyLabel}</span>
+                {webrtc.standby.reason && <span className="standby-why">{webrtc.standby.reason}</span>}
+                {dry && (
+                  <span className="standby-hint" title="Test mode: i simulates an incoming call, Shift+I makes the caller hang up">
+                    <kbd className="chip-kbd">i</kbd> rings the phone
+                  </span>
+                )}
+              </div>
+            )}
+            {/* Two tabs, one phone: the tab that lost the ring says so instead of silently
+                swallowing the call. */}
+            {isWebrtc && webrtc.standbyNote && (
+              <div className="standby-strip busy" role="status">
+                <span className="standby-dot" />
+                <span className="standby-txt">{webrtc.standbyNote}</span>
+              </div>
+            )}
+
             {/* CALL BAR */}
             <div className={`glass callbar ${phase}`}>
               <div className="callbar-glow" />
@@ -1004,7 +1073,7 @@ export default function Dialer() {
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.94 }}
                         className={`call-btn ${phase === 'active' ? 'hangup-active' : phase}`}
-                        onClick={phase === 'active' ? hangUp : startCall}
+                        onClick={phase === 'active' ? hangUp : (inbound && !inbound.answered ? () => webrtc.answerInbound?.() : startCall)}
                         disabled={(phase === 'dialing') || active.dnc || !active.phone}
                         title={phase === 'active' ? "Hang up & Classify (H or C)" : active.phone ? "Call (C)" : "Add phone number to dial"}
                       >

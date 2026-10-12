@@ -4,7 +4,7 @@
 // in their headphones": the microphone, the peer connection, the audio sink, mute, touch-tones
 // and the session state machine. Dialer.jsx only renders what this reports.
 //
-// Two hard constraints shaped the design:
+// Three hard constraints shaped the design:
 //
 //   1. **The agent's call time is the only honest timer.** The previous behaviour put the
 //      dialer into an 'active' call the instant the server answered, so a session that never
@@ -15,10 +15,29 @@
 //   2. **Media APIs are absent in more places than you expect** — jsdom, headless browsers,
 //      an insecure origin (getUserMedia is HTTPS/localhost only), a denied permission. None
 //      of those may throw an unhandled exception; each degrades into a readable error state.
+//
+//   3. **A call can arrive, not just leave.** While the tab is open in WebRTC mode the engine
+//      sits in 'standby' on one persistent registration, so the number rings in the browser.
+//      The ring is synthesised (no assets, nothing to fetch), it is owned by exactly one tab
+//      (navigator.locks — two tabs must never fight over the speakers), and it is torn down on
+//      every single way out of 'incoming': answered, declined, cancelled by the caller, the
+//      mode switched, the tab closed.
+//
+// The state machine, in full:
+//
+//   idle ──▶ standby ──▶ incoming ──▶ active ──▶ ended ──▶ standby
+//                 │           └──▶ (declined / missed) ──▶ standby
+//                 └──▶ registering ──▶ dialing ──▶ ringing ──▶ active   (outbound)
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
+import { formatCallerNumber, holdCrossTabLock } from './utils.js';
+import { createRinger } from './utils/ringer.js';
 
-export const WEBRTC_STATES = ['idle', 'registering', 'dialing', 'ringing', 'active', 'ended', 'error'];
+export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
+
+// The lock every tab competes for before it makes a sound. Named here, next to the engine that
+// takes it, so the dial lock and the audio lock cannot drift apart.
+export const INBOUND_AUDIO_LOCK = 'pulse-inbound-audio';
 
 // The tones a keypad produces. Frequencies are the standard DTMF pairs.
 export const DTMF_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
@@ -51,11 +70,19 @@ export function mediaUnavailableReason() {
 
 /**
  * @param {object}  opts
- * @param {boolean} opts.enabled   - true only when telephony_mode === 'webrtc'
- * @param {function} opts.onActive - called once when audio is genuinely flowing
- * @param {function} opts.onEnded  - called once when the session is finished
+ * @param {boolean} opts.enabled    - true only when telephony_mode === 'webrtc'
+ * @param {boolean} [opts.dryRun]   - test mode: simulate, never touch the network
+ * @param {string}  [opts.countryCode] - default country code, for caller-ID display/matching
+ * @param {string}  [opts.micDevice]   - preferred input device id
+ * @param {function} opts.onActive     - called once when audio is genuinely flowing
+ * @param {function} opts.onEnded      - called once when the session is finished
+ * @param {function} [opts.onIncoming] - called when the phone rings in the tab
+ * @param {function} [opts.onIncomingEnded] - called when a ring ends unanswered
  */
-export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
+export default function useWebRtc({
+  enabled = false, dryRun = false, countryCode = '', micDevice = '',
+  onActive, onEnded, onIncoming, onIncomingEnded,
+} = {}) {
   const [state, setState] = useState('idle');
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);        // 0..1, drives the waveform
@@ -63,6 +90,10 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
   const [target, setTarget] = useState('');     // the number being called
   const [dtmfLog, setDtmfLog] = useState([]);   // tones sent, newest last
   const [micLabel, setMicLabel] = useState('');
+  const [incomingCall, setIncomingCall] = useState(null);   // { callerNumber, prospect, invitation, answer, decline, ... }
+  const [standby, setStandby] = useState({ state: 'off', reason: '' });
+  const [direction, setDirection] = useState(null);         // 'outbound' | 'inbound' while a call is live
+  const [standbyNote, setStandbyNote] = useState('');       // cross-tab message: "call in progress elsewhere"
 
   // Everything that must be released on hang-up lives in refs: React state is asynchronous,
   // and a hang-up has to stop audio *now*, not on the next render.
@@ -74,21 +105,52 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
   const rafRef = useRef(0);
   const simRef = useRef(0);
   const tonesRef = useRef([]);
-  const callbacksRef = useRef({ onActive, onEnded });
+  const callbacksRef = useRef({ onActive, onEnded, onIncoming, onIncomingEnded });
   const stateRef = useRef('idle');
   const mutedRef = useRef(false);
+  const enabledRef = useRef(enabled);
+  const ringerRef = useRef(null);
+  const incomingRef = useRef(null);      // the ringing call, readable synchronously (key handlers)
+  const inboundActiveRef = useRef(false);
+  const answeredInboundRef = useRef(null);   // the live inbound session, for hang-up/teardown
+  const lockRef = useRef(null);          // the held cross-tab audio lock, released on call end
+  const sipRef = useRef(null);           // the outbound session handle, so hang-up sends BYE
+  const unmountedRef = useRef(false);
+  // The INVITE payload needs answer/decline before those callbacks exist in source order, and
+  // an object handed to React must keep working across renders.
+  const answerInboundRef = useRef(null);
+  const declineInboundRef = useRef(null);
 
-  callbacksRef.current = { onActive, onEnded };
+  callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded };
+  enabledRef.current = enabled;
 
   const setStateSafe = useCallback((next) => {
     stateRef.current = next;
     setState(next);
   }, []);
 
+  // The ringer is created once and reused; every path that ends a call goes through stop().
+  if (!ringerRef.current && typeof window !== 'undefined') ringerRef.current = createRinger();
+
+  const stopRinger = useCallback(() => {
+    try { ringerRef.current?.stop(); } catch { /* a silent ringer is not an error */ }
+  }, []);
+
+  const releaseInboundLock = useCallback(() => {
+    const lock = lockRef.current;
+    lockRef.current = null;
+    if (lock) lock.release?.().catch?.(() => {});
+  }, []);
+
   // ---- teardown. Idempotent, and never throws. ----
   const releaseMedia = useCallback(() => {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     if (simRef.current) { clearInterval(simRef.current); simRef.current = 0; }
+
+    // The ringer is audio too: answering, hanging up, switching modes or unmounting mid-ring
+    // must all silence it, and 'stop' is the only thing allowed to touch those nodes.
+    stopRinger();
+    releaseInboundLock();
 
     try {
       if (pcRef.current) {
@@ -115,10 +177,19 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
     setLevel(0);
     setMuted(false);
     mutedRef.current = false;
-  }, []);
+  }, [releaseInboundLock, stopRinger]);
 
   // Release the microphone if the component unmounts mid-call.
-  useEffect(() => () => releaseMedia(), [releaseMedia]);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      releaseMedia();
+      // The tab is going away: leaving the registration open would have the provider ringing
+      // a browser that is no longer there.
+      import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => {});
+    };
+  }, [releaseMedia]);
 
   // ---- live microphone level, so the waveform shows the real room ----
   const startLevelMeter = useCallback((node) => {
@@ -163,8 +234,7 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
     const Ctx = audioContextCtor();
     if (!Ctx) return;
     try {
-      const ctx = audioContextCtor() ? new Ctx() : null;
-      if (!ctx) return;
+      const ctx = new Ctx();
       if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
       const gain = ctx.createGain();
       gain.gain.value = 0.06;                     // quiet: it is a cue, not a ringtone
@@ -185,18 +255,324 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
     } catch { /* audio cues are best-effort */ }
   }, []);
 
-  const start = useCallback(async (phone, { dryRun = false } = {}) => {
+  // ---- opening the microphone. One implementation for both directions. ----
+  const openMicrophone = useCallback(async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: micDevice ? { deviceId: { ideal: micDevice } } : true,
+    });
+    streamRef.current = stream;
+    try { setMicLabel(stream.getAudioTracks()[0]?.label || ''); } catch { /* label is optional */ }
+    startLevelMeter(stream);
+    return stream;
+  }, [micDevice, startLevelMeter]);
+
+  // ---- inbound ---------------------------------------------------------------------------
+  const finishActiveCall = useCallback((dir) => {
+    // Declared before hangUp uses it: closes the media and reports the end exactly once.
+    if (dir === 'inbound') { inboundActiveRef.current = false; answeredInboundRef.current = null; }
+    try { sipRef.current?.stop?.(); } catch { /* already gone */ }
+    sipRef.current = null;
+    releaseMedia();
+    setStateSafe('ended');
+    setDirection(null);
+    callbacksRef.current.onEnded?.(dir);
+    setTimeout(() => {
+      if (stateRef.current === 'ended') setStateSafe(enabledRef.current ? 'standby' : 'idle');
+    }, 400);
+  }, [releaseMedia, setStateSafe]);
+
+
+  // The ring ended before anybody picked up: the caller hung up (SIP CANCEL), the agent said
+  // no, or another tab owns the call. The ringer stops first — always first.
+  const endIncoming = useCallback((reason = 'canceled') => {
+    const entry = incomingRef.current;
+    if (!entry) return;
+    stopRinger();
+    incomingRef.current = null;
+    setIncomingCall(null);
+    releaseInboundLock();
+    setDirection(null);
+    setStateSafe(enabledRef.current ? 'standby' : 'idle');
+    callbacksRef.current.onIncomingEnded?.({ ...entry, reason });
+  }, [releaseInboundLock, setStateSafe, stopRinger]);
+
+  const handleIncoming = useCallback(async ({ invitation, callerNumber, accept, reject, terminate, onStateChange, simulated = false }) => {
+    // A second INVITE while the first is still ringing is the provider retrying, not a second
+    // caller. Answering two sessions would put two people in the agent's ears.
+    if (incomingRef.current) {
+      try { reject?.({ statusCode: 486 }); } catch { /* already gone */ }
+      return { ok: false, reason: 'already-ringing' };
+    }
+
+    // One ringer per machine. The tab that holds the audio lock takes the call; the others
+    // step aside and say so, instead of both of them competing for the speakers.
+    const lock = await holdCrossTabLock(INBOUND_AUDIO_LOCK);
+    if (unmountedRef.current) { await lock.release(); return { ok: false, reason: 'unmounted' }; }
+    if (!lock.held) {
+      setStandbyNote('Call in progress on another tab');
+      try { reject?.({ statusCode: 486 }); } catch { /* already gone */ }
+      return { ok: false, reason: 'another-tab' };
+    }
+    lockRef.current = lock;
+    setStandbyNote('');
+
+    const shown = formatCallerNumber(callerNumber, countryCode) || String(callerNumber || '').trim();
+    const entry = {
+      callerNumber: shown || 'Unknown',
+      rawNumber: String(callerNumber || '').trim(),
+      startedAt: new Date().toISOString(),
+      invitation: invitation || null,
+      simulated,
+      answered: false,
+      prospect: null,
+      matched: false,
+      provisional: false,
+      callId: null,
+      // The CRM half (prospect, call id) is filled in by the softphone provider as soon as the
+      // server answers; the media half lives here from the first ring.
+      //
+      // It mutates in place on purpose. The SIP state-change handler closes over this exact
+      // object to tell "my ring ended" from "some other ring ended"; replacing the object with
+      // a copy would break that comparison, and a far-end CANCEL would leave the phone ringing
+      // forever. React gets a fresh object for its own equality check.
+      attachCrm: (patch) => {
+        const current = incomingRef.current;
+        if (!current) return;
+        Object.assign(current, patch);
+        setIncomingCall({ ...current });
+      },
+      answer: () => answerInboundRef.current?.(),
+      decline: () => declineInboundRef.current?.(),
+      terminate: () => { try { terminate?.(); } catch { /* already gone */ } },
+    };
+    entry.onStateChange = onStateChange;
+    entry.accept = accept;
+    entry.reject = reject;
+    // Declining emits the local 'terminated' transition before the caller ever hears the 603.
+    // Without this, the teardown would report 'canceled' and the agent would be told the
+    // caller gave up when in fact they hung up on the caller.
+    entry.endReason = null;
+
+    incomingRef.current = entry;
+    setIncomingCall(entry);
+    setDirection(null);
+    setStateSafe('incoming');
+    setError('');
+    // Ring immediately — before any network round trip, because the agent has four seconds to
+    // decide and the CRM lookup must never be the thing that delays the sound.
+    try { ringerRef.current?.start(); } catch { /* a browser with no Web Audio still gets the call */ }
+
+    // The far end hanging up before Answer is a normal outcome, not an error: CANCEL / 487.
+    try {
+      onStateChange?.((s) => {
+        if (s === 'terminated') {
+          if (incomingRef.current === entry) endIncoming(entry.endReason || 'canceled');
+          else if (inboundActiveRef.current) { stopRinger(); finishActiveCall('inbound'); }
+        } else if (s === 'established' && !entry.answered) {
+          entry.answered = true;
+          inboundActiveRef.current = true;
+        }
+      });
+    } catch { /* no state machine: accept/reject below still drive the call */ }
+
+    callbacksRef.current.onIncoming?.(entry);
+    return { ok: true, entry };
+  }, [countryCode, endIncoming, setStateSafe, stopRinger]);
+
+  // Answering for real: the microphone must be live *before* the session is accepted, or the
+  // first seconds of the call are one-way silence.
+  const answerInbound = useCallback(async () => {
+    const entry = incomingRef.current;
+    if (!entry) return { ok: false, reason: 'no-incoming' };
+    stopRinger();
+    setStandbyNote('');
+
+    if (!entry.simulated && !mediaSupported()) {
+      const reason = mediaUnavailableReason();
+      setError(reason);
+      try { entry.reject?.({ statusCode: 486 }); } catch { /* ignore */ }
+      endIncoming('missed');
+      return { ok: false, reason };
+    }
+
+    try {
+      if (entry.simulated) {
+        startSimulatedLevel();
+      } else {
+        await openMicrophone();
+      }
+    } catch (e) {
+      const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      const reason = denied
+        ? 'Microphone permission was refused — the call was declined.'
+        : `Could not open the microphone: ${e?.message || e}`;
+      setError(reason);
+      // Answering without a microphone is a silent, dead call. Refuse it instead.
+      try { entry.reject?.({ statusCode: 486 }); } catch { /* ignore */ }
+      endIncoming('missed');
+      return { ok: false, reason, denied: !!denied };
+    }
+
+    try {
+      await entry.accept?.(streamRef.current);
+    } catch (e) {
+      releaseMedia();
+      const reason = `The incoming call could not be answered — ${e?.message || e}`;
+      setError(reason);
+      endIncoming('missed');
+      return { ok: false, reason };
+    }
+
+    // The ring is over. Clearing the ref is what lets the *next* call in: while it is set, the
+    // engine answers every fresh INVITE with 486 "busy" and the tab is deaf for the rest of the
+    // session. The session handle moves to sipRef so hang-up still sends the BYE.
+    const answered = { ...entry, answered: true };
+    incomingRef.current = null;
+    answeredInboundRef.current = answered;
+    try { entry.onStateChange = null; } catch { /* a frozen entry is fine too */ }
+    sipRef.current = { stop: () => { try { entry.terminate?.(); } catch { /* already gone */ } } };
+    setIncomingCall(null);          // the call bar takes it from here
+    inboundActiveRef.current = true;
+    setDirection('inbound');
+    setTarget(answered.callerNumber);
+    setStateSafe('active');
+    callbacksRef.current.onActive?.('inbound');
+    return { ok: true, entry: answered };
+  }, [endIncoming, openMicrophone, releaseMedia, setStateSafe, startSimulatedLevel, stopRinger]);
+
+  const declineInbound = useCallback(async () => {
+    const entry = incomingRef.current;
+    if (!entry) return { ok: false, reason: 'no-incoming' };
+    stopRinger();
+    entry.endReason = 'declined';      // set before reject: the teardown reads it synchronously
+    try { entry.reject?.({ statusCode: 603 }); } catch { /* ignore */ }
+    if (incomingRef.current === entry) endIncoming('declined');
+    return { ok: true };
+  }, [endIncoming, stopRinger]);
+
+  // The ring object can call these from the modal at any time, including between renders.
+  answerInboundRef.current = answerInbound;
+  declineInboundRef.current = declineInbound;
+
+  // Test mode: ring the tab without a provider, so the whole inbound path (modal, matching,
+  // ringer, answer, classification) can be exercised on a machine with no SIP gateway.
+  const simulateIncomingCall = useCallback((number = '20123456') => {
+    if (!enabled) return Promise.resolve({ ok: false, reason: 'not-webrtc' });
+    if (!dryRun) return Promise.resolve({ ok: false, reason: 'live-mode' });
+    const listeners = new Set();
+    const emit = (s) => { for (const fn of listeners) { try { fn(s); } catch { /* ignore */ } } };
+    const invitation = {
+      simulated: true,
+      remoteIdentity: { uri: { user: String(number) } },
+      state: 'Initial',
+      accept: async () => { emit('established'); },
+      reject: () => { emit('terminated'); },
+      terminate: () => { emit('terminated'); },
+      bye: () => { emit('terminated'); },
+    };
+    return handleIncoming({
+      invitation,
+      callerNumber: String(number),
+      simulated: true,
+      onStateChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+      accept: async () => { emit('established'); },
+      reject: () => { emit('terminated'); },
+      terminate: () => { emit('terminated'); },
+    });
+  }, [dryRun, enabled, handleIncoming]);
+
+  // The provider's handler closes over settings that arrive after the first render (country
+  // code, microphone). The UA must always call the *current* one, not the one it was built with.
+  const incomingHandlerRef = useRef(null);
+  incomingHandlerRef.current = handleIncoming;
+
+  // Test mode: the caller gives up. A real far-end CANCEL arrives as a SIP state change, which
+  // is the path this drives, so the modal teardown under test is the same one a live call uses.
+  const simulateCallerHangup = useCallback(() => {
+    const entry = incomingRef.current;
+    if (!entry?.simulated) return { ok: false, reason: 'no-incoming' };
+    try { entry.terminate?.(); } catch { /* the harness has already gone */ }
+    // Belt to the state-change braces: if no listener was wired, end the ring directly.
+    if (incomingRef.current === entry) endIncoming('canceled');
+    return { ok: true };
+  }, [endIncoming]);
+
+  // ---- the persistent registration -------------------------------------------------------
+  // A softphone that only registers when you dial cannot receive a call. While the tab is in
+  // WebRTC mode and no call is in flight, one UserAgent stays registered and listening.
+  useEffect(() => {
+    if (!enabled || dryRun) {
+      setStandby((s) => (s.state === 'off' ? s : { state: 'off', reason: '' }));
+      return undefined;
+    }
+    let cancelled = false;
+    setStandby({ state: 'registering', reason: '' });
+
+    (async () => {
+      let session;
+      try {
+        session = await api.webrtcSession();
+      } catch (e) {
+        if (!cancelled) setStandby({ state: 'unavailable', reason: e.message || 'The softphone session is unreachable.' });
+        return;
+      }
+      if (cancelled) return;
+      if (!session?.canRegister) {
+        setStandby({
+          state: 'unavailable',
+          reason: session?.configured
+            ? 'Turn on SIP credential handoff in Settings → Telephony to receive calls in the browser.'
+            : `The in-browser softphone is not configured yet (missing: ${(session?.missing || []).join(', ') || 'credentials'}).`,
+        });
+        return;
+      }
+      try {
+        const { initStandbySession } = await import('./webrtcSignalling.js');
+        if (cancelled) return;
+        await initStandbySession({
+          session,
+          onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
+          onState: (s, detail) => {
+            if (cancelled) return;
+            if (s === 'ready') setStandby({ state: 'ready', reason: '' });
+            else if (s === 'registering') setStandby({ state: 'registering', reason: '' });
+            else if (s === 'retrying') setStandby({ state: 'ready', reason: detail || '' });
+          },
+        });
+      } catch (e) {
+        if (!cancelled) setStandby({ state: 'unavailable', reason: e?.message || String(e) });
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [enabled, dryRun]);
+
+  // Switching the mode, or leaving the tab idle for good, must not leave a registration open.
+  useEffect(() => {
+    if (enabled) return undefined;
+    return () => {
+      // No-op when the session is already gone.
+      setStandby({ state: 'off', reason: '' });
+    };
+  }, [enabled]);
+
+  const start = useCallback(async (phone, { dryRun: callDryRun = false } = {}) => {
     if (!enabled) return { ok: false, reason: 'not-webrtc' };
-    if (stateRef.current !== 'idle' && stateRef.current !== 'ended' && stateRef.current !== 'error') {
+    const origin = stateRef.current;
+    // 'standby' is a resting state, not a call: an outbound dial from standby reuses the
+    // registration that is already open instead of performing a second handshake.
+    if (origin !== 'idle' && origin !== 'standby' && origin !== 'ended' && origin !== 'error') {
       return { ok: false, reason: 'busy' };
     }
+    if (incomingRef.current) return { ok: false, reason: 'busy' };   // the phone is ringing
 
     setError('');
     setDtmfLog([]);
     setTarget(phone);
+    setDirection('outbound');
     setStateSafe('registering');
 
-    if (dryRun) {
+    if (callDryRun) {
       // Test mode never touches the microphone. It plays a ringback, then pretends to connect.
       playTone([440, 480], 900);
       startSimulatedLevel();
@@ -204,7 +580,7 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
       const ring = setTimeout(() => setStateSafe('ringing'), 420);
       const live = setTimeout(() => {
         setStateSafe('active');
-        callbacksRef.current.onActive?.();
+        callbacksRef.current.onActive?.('outbound');
       }, 1400);
       tonesRef.current.push({ stop: () => { clearTimeout(dial); clearTimeout(ring); clearTimeout(live); } });
       return { ok: true, simulated: true };
@@ -237,9 +613,7 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
 
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: session.micDevice ? { deviceId: { ideal: session.micDevice } } : true,
-      });
+      stream = await openMicrophone();
     } catch (e) {
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
       const reason = denied
@@ -250,13 +624,8 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
       return { ok: false, reason };
     }
 
-    streamRef.current = stream;
-    try { setMicLabel(stream.getAudioTracks()[0]?.label || ''); } catch { /* label is optional */ }
-    startLevelMeter(stream);
-
     // A peer connection is created and the microphone attached even before signalling
-    // succeeds, so the session is ready the moment an offer comes back — and so the same
-    // object can carry an inbound leg if the provider rings us.
+    // succeeds, so the session is ready the moment an offer comes back.
     try {
       const PC = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
       if (PC) {
@@ -279,7 +648,7 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
         pc.oniceconnectionstatechange = () => {
           const s = pc.iceConnectionState;
           if (s === 'connected' || s === 'completed') {
-            if (stateRef.current !== 'active') { setStateSafe('active'); callbacksRef.current.onActive?.(); }
+            if (stateRef.current !== 'active') { setStateSafe('active'); callbacksRef.current.onActive?.('outbound'); }
           } else if (s === 'failed' || s === 'disconnected') {
             setError('The audio connection dropped.');
             setStateSafe('error');
@@ -293,14 +662,14 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
     // deliberately isolated behind this boundary: swap the adapter and the engine is unchanged.
     try {
       const { startSignalling } = await import('./webrtcSignalling.js');
-      await startSignalling({
+      sipRef.current = await startSignalling({
         session,
         remoteNumber: phone,
-        pc: pcRef.current,
         localStream: streamRef.current,
         onState: setStateSafe,
         onError: (msg) => { setError(msg); setStateSafe('error'); },
-        onActive: () => callbacksRef.current.onActive?.(),
+        onActive: () => callbacksRef.current.onActive?.('outbound'),
+        onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
       });
       return { ok: true, simulated: false };
     } catch (e) {
@@ -309,17 +678,14 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, playTone, startLevelMeter, startSimulatedLevel, setStateSafe]);
+  }, [enabled, handleIncoming, openMicrophone, playTone, setStateSafe, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
-    if (stateRef.current === 'idle') return;
-    releaseMedia();
-    setStateSafe('ended');
-    callbacksRef.current.onEnded?.();
-    // 'ended' is a reportable moment, not a resting state — settle back to idle so the next
-    // dial is a clean start.
-    setTimeout(() => { if (stateRef.current === 'ended') setStateSafe('idle'); }, 400);
-  }, [releaseMedia, setStateSafe]);
+    const current = stateRef.current;
+    if (current === 'idle' || current === 'standby') return;
+    const wasInbound = inboundActiveRef.current;
+    finishActiveCall(wasInbound ? 'inbound' : 'outbound');
+  }, [finishActiveCall]);
 
   const toggleMute = useCallback(() => {
     const next = !mutedRef.current;
@@ -354,25 +720,38 @@ export default function useWebRtc({ enabled = false, onActive, onEnded } = {}) {
 
   const reset = useCallback(() => {
     releaseMedia();
-    setStateSafe('idle');
+    setStateSafe(enabledRef.current ? 'standby' : 'idle');
     setError('');
     setDtmfLog([]);
     setTarget('');
+    setDirection(null);
   }, [releaseMedia, setStateSafe]);
 
   // Never leave audio running because the mode was switched mid-call.
   useEffect(() => {
-    if (!enabled && stateRef.current !== 'idle') reset();
-  }, [enabled, reset]);
+    if (enabled) return;
+    if (stateRef.current !== 'idle' || incomingRef.current) {
+      // Switching out of WebRTC mode mid-ring has to silence the ringer too.
+      stopRinger();
+      if (incomingRef.current) endIncoming('canceled');
+      reset();
+    }
+    import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => {});
+  }, [enabled, endIncoming, reset, stopRinger]);
 
   return useMemo(() => ({
-    state, muted, level, error, target, dtmfLog, micLabel,
+    state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
     active: state === 'active',
-    busy: state !== 'idle' && state !== 'ended' && state !== 'error',
+    ringing: state === 'incoming',
+    busy: state !== 'idle' && state !== 'standby' && state !== 'ended' && state !== 'error',
     supported: mediaSupported(),
     audioRef,
     start, hangUp, toggleMute, sendDtmf, reset,
-  }), [state, muted, level, error, target, dtmfLog, micLabel, start, hangUp, toggleMute, sendDtmf, reset]);
+    answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+  }), [
+    state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
+    start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+  ]);
 }
 
 // Enumerate the microphones/cameras the browser will admit to. Labels are blank until the

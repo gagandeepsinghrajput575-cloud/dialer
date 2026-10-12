@@ -26,10 +26,11 @@ process.env.PULSE_TEST = '1';
 const migrate = require(path.join(__dirname, '..', '..', 'server', 'db', 'migrate'));
 const settings = require(path.join(__dirname, '..', '..', 'server', 'repositories', 'settingsRepo'));
 
-// The release that shipped before the cutover had no version 7 to run; everything else is
+// The release that shipped before the cutover had no version 7 or later to run; everything else is
 // identical, including the purge that follows the migrations.
-const telnyx = migrate.MIGRATIONS.pop();
-if (!telnyx || telnyx.version !== 7) throw new Error('the Telnyx migration is not the last entry — update this helper');
+while (migrate.MIGRATIONS.length > 0 && migrate.MIGRATIONS[migrate.MIGRATIONS.length - 1].version >= 7) {
+  migrate.MIGRATIONS.pop();
+}
 const { applied, total } = migrate.run();
 
 // A real account from that era: the vendor default, an extension, its secret, a saved

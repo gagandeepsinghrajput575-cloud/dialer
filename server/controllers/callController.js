@@ -15,6 +15,14 @@ const patch = asyncHandler(async (req, res) => {
   res.json({ ok: true, prospect: result.prospect, call: result.call });
 });
 
+// POST /api/calls/inbound — the browser softphone received a SIP INVITE. Creates the ledger
+// row (matching the caller to a prospect, or provisioning a placeholder lead) and returns
+// everything the incoming-call modal renders.
+const inbound = asyncHandler(async (req, res) => res.json(callService.startInbound(req.body)));
+
+// POST /api/calls/:id/missed — the ring ended unanswered (far-end CANCEL, or Decline).
+const missed = asyncHandler(async (req, res) => res.json(callService.markInboundMissed(req.params.id, req.body)));
+
 const voicemailDrop = asyncHandler(async (req, res) => res.json(callService.voicemailDrop(req.params.id, req.body)));
 
 const discard = asyncHandler(async (req, res) => res.json(callService.discard(req.params.id)));
@@ -32,4 +40,4 @@ const summarize = asyncHandler(async (req, res) => {
   res.json({ ...result, call: saved });
 });
 
-module.exports = { start, patch, voicemailDrop, discard, summarize };
+module.exports = { start, inbound, missed, patch, voicemailDrop, discard, summarize };

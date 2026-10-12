@@ -3,10 +3,27 @@ const { db } = require('../db');
 
 const insert = (call) => {
   const info = db.prepare(
-    'INSERT INTO calls(prospect_id, status, dry_run, dial_uri, caller_id) VALUES(?,?,?,?,?)'
-  ).run(call.prospect_id, call.status || 'initiated', call.dry_run ? 1 : 0, call.dial_uri || null, call.caller_id || null);
+    'INSERT INTO calls(prospect_id, status, dry_run, dial_uri, caller_id, direction) VALUES(?,?,?,?,?,?)'
+  ).run(call.prospect_id, call.status || 'initiated', call.dry_run ? 1 : 0, call.dial_uri || null, call.caller_id || null,
+    call.direction === 'inbound' ? 'inbound' : 'outbound');
   return get(info.lastInsertRowid);
 };
+
+// An inbound ring. It shares every column with an outbound dial and differs only in direction
+// and in where the caller's number is kept: for an inbound call `caller_id` is the *caller*,
+// not the number we presented.
+const createInbound = ({ prospectId, callerId = '', status = 'ringing', dryRun = false } = {}) =>
+  insert({ prospect_id: prospectId, status, dry_run: dryRun, caller_id: callerId, direction: 'inbound' });
+
+// The same ring can be delivered more than once (a forked INVITE, a retry after a dropped
+// socket). An unanswered inbound row for this caller inside the window *is* that ring.
+const findOpenInbound = (callerId, withinSec = 120) =>
+  db.prepare(
+    `SELECT * FROM calls
+     WHERE direction = 'inbound' AND status = 'ringing' AND caller_id = ?
+       AND started_at >= datetime('now', ?)
+     ORDER BY id DESC LIMIT 1`
+  ).get(callerId, `-${withinSec} seconds`) || null;
 const get = (id) => db.prepare('SELECT * FROM calls WHERE id = ?').get(id);
 const remove = (id) => db.prepare('DELETE FROM calls WHERE id = ?').run(id);
 
@@ -53,4 +70,6 @@ const recent = (limit = 8, extraWhere = '') =>
      WHERE c.status != 'failed' AND c.status != 'discarded' ${extraWhere} ORDER BY c.id DESC LIMIT ?`
   ).all(limit);
 
-module.exports = { insert, get, remove, patch, listByProspect, lastByProspect, all, since, countSince, recent, PATCH_COLUMNS };
+module.exports = {
+  insert, createInbound, findOpenInbound, get, remove, patch, listByProspect, lastByProspect, all, since, countSince, recent, PATCH_COLUMNS,
+};

@@ -12,6 +12,8 @@ import SettingsPage from './pages/Settings.jsx';
 import Drawer from './components/Drawer.jsx';
 import Toasts from './components/Toasts.jsx';
 import OutboxModal from './components/OutboxModal.jsx';
+import IncomingCallModal from './components/IncomingCallModal.jsx';
+import { SoftphoneProvider } from './softphone.jsx';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -23,7 +25,17 @@ const NAV = [
 ];
 const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipeline: Pipeline, import: ImportPage, settings: SettingsPage };
 
+// The softphone wraps the whole shell: one engine, one registration, and an incoming call
+// rings on every page — a callback does not wait for the agent to be looking at the dialer.
 export default function App() {
+  return (
+    <SoftphoneProvider>
+      <Shell />
+    </SoftphoneProvider>
+  );
+}
+
+function Shell() {
   const { view, setView, settings, stats, prospects } = useStore();
   // Object.hasOwn, not PAGES[view]: a hash like "#constructor" or "#__proto__" resolves
   // through the prototype chain to a truthy non-component, and React then renders a blank
@@ -88,6 +100,9 @@ export default function App() {
       <Drawer />
       {/* Root-level so Settings, the composer and the "captured" toast can all open it. */}
       <OutboxModal />
+      {/* Root-level for the same reason, and because the phone does not care which page you
+          are on when somebody calls back. */}
+      <IncomingCallModal />
       <Toasts />
     </div>
   );

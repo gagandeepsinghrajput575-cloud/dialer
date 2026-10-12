@@ -129,7 +129,7 @@ function shutdown() {
   if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } tmpDir = null; }
 }
 
-const TOTAL = 37;
+const TOTAL = 38;
 
 async function run() {
   console.log('--- Pulse Dialer: VOIP.SO + softphone verification suite ---');
@@ -779,7 +779,15 @@ async function run() {
   process.stdout.write(inboundUnit.stdout || '');
   if (inboundUnit.status !== 0) throw new Error(`inbound engine unit tests failed:\n${inboundUnit.stderr || inboundUnit.stdout}`);
   assert.match(inboundUnit.stdout, /inbound engine checks passed/);
-  ok('repository, migration, backup, telephony, copilot and inbound-engine unit checks all green');
+
+  // Import matcher: the contract between a lead sheet's headers and the fields it fills.
+  const importUnit = spawnSync(process.execPath, [path.join(__dirname, 'unit', 'import-map.test.js')], {
+    cwd: REPO, env: { ...process.env, PULSE_TEST: '1' }, encoding: 'utf8',
+  });
+  process.stdout.write(importUnit.stdout || '');
+  if (importUnit.status !== 0) throw new Error(`import mapping unit tests failed:\n${importUnit.stderr || importUnit.stdout}`);
+  assert.match(importUnit.stdout, /mapping checks passed/);
+  ok('repository, migration, backup, telephony, copilot, inbound-engine and import-mapping unit checks all green');
 
   // ---------------------------------------------------------------- hardening unit layer
   step(29, TOTAL, 'Hardening unit layer (fuzzing, timezones, injection, fault tolerance)');
@@ -1255,6 +1263,109 @@ async function run() {
   for (const p of [...mette.json, ...anders.json]) await req('DELETE', `/api/prospects/${p.id}`);
   ok('email + phone duplicate detection, including within a single file and across case');
 
+
+  // ---------------------------------------------------------------- enriched lead sheets
+  step(38, TOTAL, 'Enriched lead sheets — registry columns, notes and no silent data loss');
+
+  // A sheet of the shape this feature exists for: Danish headers, an owner column, marketing
+  // notes, and a pile of registry metadata (CVR, protection, provenance links). The mapping is
+  // the one the header matcher produces — posted explicitly so this group tests the server half
+  // of the contract (the matcher itself is pinned in test/unit/import-map.test.js).
+  const enrichedRows = [
+    {
+      'Owner Name(s)': 'Bent Kristensen', 'Company Name': 'Kristensen Tag & Facade',
+      'Category': 'Tagdækker', 'Phone': '20770011', 'E-mail': 'bent@kristensen-tag.dk',
+      'Marketing Notes': 'Ringe tilbage efter 15 — er på taget om formiddagen', 'Website': 'https://kristensen-tag.dk',
+      'Location': 'Roskilde', 'CVR': '41234567', 'CVR Advertising Protection': 'Ja',
+      'Current CVR Status': 'Aktiv', 'Owner Source URL(s)': 'https://www.proff.dk/firma/kristensen-tag/41234567',
+      'Phone Source URL(s)': 'https://www.krak.dk/kristensen-tag', 'Marketing Outreach Flag': 'Ja',
+    },
+    {
+      'Owner Name(s)': 'Lone Bertelsen', 'Company Name': 'Bertelsen VVS',
+      'Category': 'VVS-montør', 'Phone': '20770012', 'E-mail': 'lone@bertelsen-vvs.dk',
+      'Marketing Notes': '', 'Website': '', 'Location': 'Køge', 'CVR': '41234568',
+      'CVR Advertising Protection': 'Nej', 'Current CVR Status': 'Aktiv',
+      'Owner Source URL(s)': '', 'Phone Source URL(s)': '', 'Marketing Outreach Flag': '',
+    },
+  ];
+  const enrichedMapping = {
+    name: 'Owner Name(s)', company: 'Company Name', title: 'Category', phone: 'Phone',
+    email: 'E-mail', notes: 'Marketing Notes', website: 'Website', location: 'Location',
+  };
+  const enrichedImport = await req('POST', '/api/prospects/bulk', { rows: enrichedRows, mapping: enrichedMapping, skipDuplicates: true });
+  assert.strictEqual(enrichedImport.status, 200);
+  assert.strictEqual(enrichedImport.json.added, 2, 'both enriched rows import');
+  assert.strictEqual(enrichedImport.json.noted, 1, 'exactly the row that carried notes got a note (the blank one did not)');
+  ok('an enriched sheet imports and the notes column is reported as attached');
+
+  const found = await req('GET', '/api/prospects/search?q=bent%40kristensen-tag.dk&limit=3');
+  assert.strictEqual(found.json.length, 1);
+  const bent = await req('GET', `/api/prospects/${found.json[0].id}`);
+  assert.strictEqual(bent.json.name, 'Bent Kristensen', 'the owner column became the name');
+  assert.strictEqual(bent.json.company, 'Kristensen Tag & Facade');
+  assert.strictEqual(bent.json.title, 'Tagdækker', 'the trade/category column became the job title');
+  assert.strictEqual(bent.json.location, 'Roskilde');
+  assert.strictEqual(bent.json.website, 'https://kristensen-tag.dk', 'the real website column is the website');
+  ok('name, company, trade, city and website all land in their proper fields');
+
+  // Nothing from the sheet may be silently dropped: every unmapped column is in `extra`.
+  const sheetExtra = bent.json.extra || {};
+  assert.strictEqual(sheetExtra.CVR, '41234567', 'the CVR number is kept verbatim');
+  assert.strictEqual(sheetExtra['CVR Advertising Protection'], 'Ja');
+  assert.strictEqual(sheetExtra['Current CVR Status'], 'Aktiv');
+  assert.strictEqual(sheetExtra['Owner Source URL(s)'], 'https://www.proff.dk/firma/kristensen-tag/41234567');
+  assert.strictEqual(sheetExtra['Phone Source URL(s)'], 'https://www.krak.dk/kristensen-tag');
+  assert.strictEqual(sheetExtra['Marketing Outreach Flag'], 'Ja');
+  assert.strictEqual(sheetExtra['Marketing Notes'], undefined, 'the notes column is not duplicated into the metadata blob');
+  assert.strictEqual(sheetExtra.Website, undefined, 'and neither is a mapped contact field');
+  assert.strictEqual(sheetExtra['E-mail'], undefined);
+  ok('every registry column round-trips into the prospect metadata, and mapped fields are not duplicated');
+
+  // The notes column is prospecting history and has to be readable on the call.
+  assert.strictEqual(bent.json.notes.length, 1, 'the marketing note arrived in the activity feed');
+  assert.match(bent.json.notes[0].body, /Ringe tilbage efter 15/, 'verbatim, not summarised or truncated');
+  const lone = await req('GET', '/api/prospects/search?q=lone%40bertelsen-vvs.dk&limit=3');
+  const loneDetail = await req('GET', `/api/prospects/${lone.json[0].id}`);
+  assert.strictEqual(loneDetail.json.notes.length, 0, 'an empty notes cell creates no empty note');
+  assert.strictEqual(loneDetail.json.extra['CVR'], '41234568');
+  assert.strictEqual(loneDetail.json.extra['CVR Advertising Protection'], 'Nej', 'a "Nej" is stored so the cockpit can say so');
+  ok('notes land in the feed, empty note cells are skipped, and a "Nej" flag is preserved');
+
+  // A note that would break the notes API must not break the import.
+  const longNote = 'A'.repeat(25000);
+  const clipped = await req('POST', '/api/prospects/bulk', {
+    rows: [{ Navn: 'Note Grænse', Telefon: '20770013', 'Marketing Notes': longNote }],
+    mapping: { name: 'Navn', phone: 'Telefon', notes: 'Marketing Notes' },
+    skipDuplicates: true,
+  });
+  assert.strictEqual(clipped.status, 200, 'an over-long note does not fail the import');
+  assert.strictEqual(clipped.json.added, 1);
+  const clippedHit = await req('GET', '/api/prospects/search?q=Note%20Gr%C3%A6nse&limit=3');
+  const clippedRow = await req('GET', `/api/prospects/${clippedHit.json[0].id}`);
+  assert.ok(clippedRow.json.notes[0].body.length <= 20000, `the note was clipped to what the API allows (${clippedRow.json.notes[0].body.length})`);
+  ok('an over-long note is clipped to the note API\\u2019s own limit instead of failing the whole import');
+
+  // Same file twice: the second run must not create a duplicate, and must not double the notes.
+  const reimport = await req('POST', '/api/prospects/bulk', { rows: enrichedRows, mapping: enrichedMapping, skipDuplicates: true });
+  assert.strictEqual(reimport.json.added, 0, 're-importing the same sheet adds nobody');
+  assert.strictEqual(reimport.json.dupes, 2, 'both rows are recognised as duplicates');
+  const afterRepeat = await req('GET', `/api/prospects/${found.json[0].id}`);
+  assert.strictEqual(afterRepeat.json.notes.length, 1, 'and the note was not attached a second time');
+  ok('re-importing the same sheet is a no-op for both prospects and notes');
+
+  // A sheet with no phone at all still imports (the matcher returns what it finds), and a sheet
+  // where every row is a joker is rejected by the row-level guards rather than stored as junk.
+  const junkRows = await req('POST', '/api/prospects/bulk', {
+    rows: [{ Navn: 'Total', Telefon: '' }, { Navn: '', Telefon: '' }],
+    mapping: { name: 'Navn', phone: 'Telefon' },
+    skipDuplicates: true,
+  });
+  assert.strictEqual(junkRows.json.added, 0, 'header rows and blank rows are counted as empty, not imported');
+  assert.ok(junkRows.json.empty >= 2, `both junk rows are ignored (${junkRows.json.empty})`);
+  ok('header rows and blank rows are counted, never imported as prospects');
+
+  for (const p of [found.json[0], lone.json[0], clippedHit.json[0]]) await req('DELETE', `/api/prospects/${p.id}`);
+  ok('enriched fixtures cleaned up');
 
   // ---------------------------------------------------------------- inbound calls
   step(37, TOTAL, 'Inbound calls — the phone rings in the browser, the ledger stays honest');

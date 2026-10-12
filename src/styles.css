@@ -177,9 +177,38 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .mini-stats > div { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 11px 6px; border-radius: 14px; background: rgba(255,255,255,0.03); border: 1px solid var(--line); color: var(--muted); }
 .mini-stats b { color: var(--text); font-size: 14px; }
 .mini-stats span { font-size: 11px; }
-.extra h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 8px; }
+/* Registry metadata from an imported sheet. Collapsed by default: the dialer's job is the
+   Call button, and eight CVR rows standing between the agent and it is a layout tax. */
+.registry { border-top: 1px solid var(--line); padding-top: 12px; }
+.registry-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+  border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12.5px; font-weight: 600; text-align: left;
+  transition: background 0.15s, border-color 0.15s;
+}
+.registry-toggle:hover { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.16); }
+.registry-toggle:focus-visible { outline: 2px solid var(--b); outline-offset: 2px; }
+.registry-caret { flex: none; transition: transform 0.18s ease; }
+.registry-caret.open { transform: rotate(180deg); }
+.registry-label { display: flex; align-items: center; gap: 6px; color: var(--text); min-width: 0; }
+.registry-label em { font-style: normal; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+.registry-pills { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; border: 1px solid transparent; white-space: nowrap; }
+.pill-cvr { background: rgba(34, 211, 238, 0.14); border-color: rgba(34, 211, 238, 0.4); color: #a5f3fc; font-variant-numeric: tabular-nums; }
+.pill-protected { background: rgba(251, 191, 36, 0.16); border-color: rgba(251, 191, 36, 0.5); color: #fde68a; }
+.pill-quiet { background: rgba(255, 255, 255, 0.06); border-color: var(--line); color: var(--muted); font-weight: 600; }
+.registry-body { overflow: hidden; }
+.registry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 10px; }
+.registry-item { padding: 9px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.03); border: 1px dashed var(--line); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.registry-item label { font-size: 11px; color: var(--muted); }
+.registry-item span { word-break: break-word; }
+.registry-link { display: inline-flex; align-items: center; gap: 4px; color: #a5f3fc; text-decoration: none; word-break: break-all; }
+.registry-link:hover { text-decoration: underline; }
+.registry-link:focus-visible { outline: 2px solid var(--b); outline-offset: 2px; border-radius: 4px; }
+
+/* Kept for the drawer and tablet breakpoints that already target these names. */
 .extra-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.extra-item { padding: 9px 12px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px dashed var(--line); display: flex; flex-direction: column; min-width: 0; }
+.extra-item { padding: 9px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.03); border: 1px dashed var(--line); display: flex; flex-direction: column; min-width: 0; }
 .extra-item label { font-size: 11px; color: var(--muted); }
 .extra-item span { word-break: break-word; }
 .dnc-toggle { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12.5px; cursor: pointer; }
@@ -190,7 +219,12 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .panel-title svg { color: #a78bfa; }
 .panel-title em { font-style: normal; font-size: 11px; color: var(--muted); background: rgba(255,255,255,0.08); padding: 1px 8px; border-radius: 99px; font-weight: 600; }
 .note-compose { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-.note-compose textarea, .form input, .form select, .search input, .map-row select { width: 100%; background: rgba(0,0,0,0.25); border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+.note-compose textarea, .form input, .form select, .search input, .map-auto {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; color: #a5f3fc;
+  background: rgba(34, 211, 238, 0.14); border: 1px solid rgba(34, 211, 238, 0.35);
+}
+.map-row select { width: 100%; background: rgba(0,0,0,0.25); border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
 .note-compose textarea { min-height: 110px; resize: vertical; line-height: 1.5; }
 .note-compose textarea:focus, .form input:focus, .map-row select:focus { border-color: rgba(139,92,246,0.65); box-shadow: 0 0 0 3px rgba(139,92,246,0.18); }
 .note-list { margin-top: 14px; display: flex; flex-direction: column; gap: 9px; max-height: 380px; overflow: auto; }
@@ -209,7 +243,7 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .drawer-top { display: flex; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .drawer-top .btn { flex: 1; }
 .drawer-body { overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 22px; }
-.drawer .info-grid, .drawer .extra-grid { grid-template-columns: 1fr; }
+.drawer .info-grid, .drawer .extra-grid, .drawer .registry-grid { grid-template-columns: 1fr; }
 .modal { position: fixed; z-index: 42; left: 50%; top: 50%; translate: -50% -50%; width: min(520px, 94vw); background: #0f1224; padding: 22px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
@@ -405,7 +439,7 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .dropzone p { color: var(--muted); }
 .map-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 .map-list { display: grid; gap: 9px; margin: 14px 0; }
-.map-row { display: grid; grid-template-columns: 130px 18px 1fr; align-items: center; gap: 10px; }
+.map-row { display: grid; grid-template-columns: 130px 18px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .map-row select { padding: 8px 10px; }
 .map-row select option { background: #12162e; }
 .check-row { display: flex; align-items: center; gap: 10px; margin: 14px 0; color: var(--muted); }
@@ -462,7 +496,7 @@ input[type='date'].inline-edit { color-scheme: dark; }
   .queue-list { max-height: 260px; }
   .side-right { grid-template-columns: 1fr; }
   .outcomes { grid-template-columns: repeat(2, 1fr); }
-  .info-grid, .extra-grid, .form.two, .map-grid { grid-template-columns: 1fr; }
+  .info-grid, .extra-grid, .registry-grid, .form.two, .map-grid { grid-template-columns: 1fr; }
   .goal, .funnel, .week, .pipe-mini, .recent { grid-column: span 12; }
 }
 
@@ -797,6 +831,7 @@ button.banner-email-chip:disabled { cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   .q-skel-avatar, .q-skel-lines i { animation: none; }
   .queue-skeleton { opacity: 0.6; }
+  .registry-caret { transition: none; }
 }
 
 /* ---------- touch targets ----------
@@ -1146,4 +1181,17 @@ button, a, label, summary, input, select, textarea,
   .incoming-wave i { animation: none !important; transform: scaleY(0.35); }
   .standby-strip .standby-dot { animation: none; }
   .incoming-scrim { backdrop-filter: none; }
+}
+
+/* Narrow-width mapping rows: 130px label + arrow + select + pill does not fit a phone, and the
+   header names in these sheets are long. The label goes above the field, the decorative arrow
+   goes away, and the select gets the full width. */
+@media (max-width: 720px) {
+  .map-list { gap: 12px; }
+  .map-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; }
+  .map-row > span { grid-column: 1 / -1; font-weight: 600; }
+  .map-row > .muted { display: none; }
+  .map-row select { grid-column: 1; min-width: 0; }
+  .registry-toggle { flex-wrap: wrap; row-gap: 6px; }
+  .registry-pills { margin-left: 0; justify-content: flex-start; }
 }

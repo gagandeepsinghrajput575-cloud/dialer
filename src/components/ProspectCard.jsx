@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import { Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock } from 'lucide-react';
+import React, { useId, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import {
+  Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock,
+  ChevronDown, ExternalLink, ShieldX,
+} from 'lucide-react';
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
 import { outcomeMeta, timeAgo } from '../utils.js';
+import { clip, extraInsights, isUrlValue } from '../registry.js';
 import EmailComposer from './EmailComposer.jsx';
 
 function CopyBtn({ text }) {
@@ -29,6 +33,79 @@ function Row({ icon: Icon, label, children, extra }) {
   );
 }
 
+// Registry metadata from an enriched lead sheet: CVR number, advertising-protection flag,
+// source links, whatever else the sheet carried. Collapsed by default — an agent who has to
+// scroll past eight registry rows to reach the Call button is being slowed down by data they
+// did not ask for — with the two commercially important facts surfaced as pills on the trigger,
+// so "this company is ad-protected" is visible without opening anything.
+function RegistryDetails({ insights }) {
+  const [open, setOpen] = useState(false);
+  const reduce = useReducedMotion();
+  // useId keeps two cards for the same prospect (dialer + drawer) from minting the same DOM id.
+  const panelId = `registry-${useId().replace(/:/g, '')}`;
+  const { count, entries, cvr, adProtected, protectionNote, urlCount } = insights;
+
+  return (
+    <div className="registry">
+      <button
+        type="button"
+        className="registry-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={panelId}
+      >
+        <ChevronDown size={15} className={`registry-caret ${open ? 'open' : ''}`} aria-hidden />
+        <span className="registry-label">
+          More details &amp; registry data <em>{count}</em>
+        </span>
+        <span className="registry-pills">
+          {cvr && <span className="pill pill-cvr" title="Danish company registration number (CVR)">CVR {cvr}</span>}
+          {adProtected && (
+            <span className="pill pill-protected" title={protectionNote}>
+              <ShieldX size={12} /> Ad-protected
+            </span>
+          )}
+          {!cvr && !adProtected && urlCount > 0 && <span className="pill pill-quiet">{urlCount} link{urlCount === 1 ? '' : 's'}</span>}
+        </span>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={panelId}
+            className="registry-body"
+            initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+            animate={reduce ? { opacity: 1 } : { height: 'auto', opacity: 1 }}
+            exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+            transition={{ duration: reduce ? 0.12 : 0.2, ease: 'easeOut' }}
+          >
+            <div className="registry-grid">
+              {entries.map((e) => (
+                <div key={e.key} className="registry-item">
+                  <label>{e.key}</label>
+                  {e.isUrl ? (
+                    <a
+                      href={e.value}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="registry-link"
+                      title={e.value}
+                    >
+                      {clip(e.value)} <ExternalLink size={11} aria-hidden />
+                    </a>
+                  ) : (
+                    <span>{isUrlValue(e.value) ? clip(e.value) : e.value}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 // `onSent` is optional: the card is rendered by the dialer, the drawer and the prospects
 // table, and each of those owns a different timeline to refresh.
 export default function ProspectCard({ p, big = false, onSent }) {
@@ -36,8 +113,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
   const [mailing, setMailing] = useState(false);
   if (!p) return null;
   const save = (field) => (val) => updateProspect(p.id, { [field]: val });
-  const extra = p.extra || {};
-  const extraKeys = Object.keys(extra);
+  const insights = extraInsights(p.extra);
   const lastOut = outcomeMeta(p.last_outcome);
 
   return (
@@ -91,16 +167,7 @@ export default function ProspectCard({ p, big = false, onSent }) {
         <div>{lastOut ? <i className="dot" style={{ background: lastOut.color }} /> : <i className="dot" />}<b>{lastOut ? lastOut.label : '—'}</b><span>last result</span></div>
       </div>
 
-      {extraKeys.length > 0 && (
-        <div className="extra">
-          <h4>More details</h4>
-          <div className="extra-grid">
-            {extraKeys.map((k) => (
-              <div key={k} className="extra-item"><label>{k}</label><span>{String(extra[k])}</span></div>
-            ))}
-          </div>
-        </div>
-      )}
+      {insights.count > 0 && <RegistryDetails insights={insights} />}
 
       <label className="dnc-toggle">
         <input type="checkbox" checked={!!p.dnc} onChange={(e) => updateProspect(p.id, { dnc: e.target.checked })} />

@@ -6,6 +6,7 @@ const calls = require('../repositories/callRepo');
 const settings = require('../repositories/settingsRepo');
 const telephony = require('./telephonyService');
 const backup = require('../db/backup');
+const { db } = require('../db');
 const { ApiError } = require('../middleware/errorHandler');
 const { STAGES, FIELDS } = require('../config/defaults');
 const { parseSqlTime } = require('./format');
@@ -13,6 +14,10 @@ const { parseSqlTime } = require('./format');
 const { cleanStr } = telephony;
 
 const JUNK_NAMES = new Set(['total', 'grand total', 'subtotal', 'average', 'summary', 'count', 'page 1', 'rows', 'name', 'full name', 'prospect', 'unnamed']);
+// Matches the note schema's own ceiling (20000), so an import can never write a note the API
+// would have refused.
+const NOTE_MAX = 20000;
+
 const JUNK_PATTERN = /^(total|grand total|subtotal|average|summary|count|page \d+.*|sheet\d*|workbook.*|rows?|name|full name|prospect|unnamed|untitled|header|notes)$/i;
 
 // The dialer needs to know a number is premium-rate BEFORE it logs a call, so the flag
@@ -91,6 +96,13 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
   const prepared = [];
   let dupes = 0, empty = 0, badPhones = 0;
 
+  // A "Marketing Notes" / "Noter" column is prospecting history, not a contact field: it
+  // belongs in the activity feed where the agent will see it on the call. It must also be
+  // excluded from `extra` (mappedCols does that) — without this branch the text would be
+  // dropped on the floor, because `notes` is not one of FIELDS.
+  const notesCol = mapping.notes || '';
+  const noteFor = (row) => (notesCol ? cleanStr(row[notesCol]).slice(0, NOTE_MAX) : '');
+
   for (const row of rows) {
     const v = {};
     for (const f of FIELDS) v[f] = mapping[f] ? cleanStr(row[mapping[f]]) : '';
@@ -123,13 +135,24 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
       const cleaned = cleanStr(val);
       if (!mappedCols.has(k) && cleaned !== '') extra[k] = cleaned;
     }
-    prepared.push({ ...v, extra });
+    prepared.push({ ...v, extra, note: noteFor(row) });
     if (v.phone) existing.add(v.phone);
     if (emailKey) existingEmails.add(emailKey);   // so dupes within the same file are caught too
   }
 
   const added = prepared.length ? prospects.bulkInsert(prepared) : 0;
-  return { added, dupes, empty, badPhones, backup: backupInfo };
+
+  // Notes go in after the insert because they need the ids, and in one transaction because a
+  // 5,000-row sheet with notes on every row must not be 5,000 separate commits.
+  const withNotes = notesCol ? prepared.filter((r) => r.id && r.note) : [];
+  const noted = withNotes.length
+    ? db.transaction(() => {
+      for (const r of withNotes) notes.insert(r.id, r.note);
+      return withNotes.length;
+    })()
+    : 0;
+
+  return { added, dupes, empty, badPhones, noted, backup: backupInfo };
 }
 
 const DEMO = [

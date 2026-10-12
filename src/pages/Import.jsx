@@ -3,28 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, PhoneCall, Download } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
-
-const TARGETS = [
-  { id: 'name', label: 'Full name', re: /^(full[\s_-]*)?name$|contact[\s_-]*name|prospect/i },
-  { id: 'first_name', label: 'First name', re: /first[\s_-]*name|fname|given/i },
-  { id: 'last_name', label: 'Last name', re: /last[\s_-]*name|lname|surname|family/i },
-  { id: 'phone', label: 'Phone number', re: /phone|mobile|cell|number|contact[\s_-]*no|tel|whatsapp/i },
-  { id: 'email', label: 'Email', re: /e-?mail/i },
-  { id: 'company', label: 'Company', re: /company|organi[sz]ation|business|employer|firm/i },
-  { id: 'title', label: 'Job title', re: /title|designation|role|position/i },
-  { id: 'location', label: 'Location', re: /location|city|address|country|region|state/i },
-  { id: 'website', label: 'Website', re: /website|url|web|domain|linkedin/i },
-];
-
-function guess(headers) {
-  const m = {};
-  const used = new Set();
-  for (const t of TARGETS) {
-    const h = headers.find((x) => !used.has(x) && t.re.test(x));
-    if (h) { m[t.id] = h; used.add(h); }
-  }
-  return m;
-}
+import { IMPORT_TARGETS as TARGETS, canImport, extrasOf, guessMapping, isRegistryHeader } from '../importMap.js';
 
 const SAMPLE = 'Name,Phone,Email,Company,Title,City,Notes from list\nMette Jensen,20123456,mette@nordiclogistik.dk,Nordic Logistik,Driftschef,København,Met at expo\nAnders Nielsen,+4522345678,anders@brightlab.dk,BrightLab ApS,Founder,Aarhus,Referred by Sofie\n';
 
@@ -35,6 +14,9 @@ export default function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [data, setData] = useState(null);
   const [mapping, setMapping] = useState({});
+  // What the matcher guessed before anybody touched it: the "auto" pill is only honest while
+  // the row still holds that guess.
+  const [guessed, setGuessed] = useState({});
   const [skipDupes, setSkipDupes] = useState(true);
   const [result, setResult] = useState(null);
   const inp = useRef(null);
@@ -45,7 +27,8 @@ export default function ImportPage() {
     try {
       const d = await api.parseFile(file);
       if (!d.rows.length) throw new Error('That file has no rows.');
-      setData(d); setMapping(guess(d.headers)); setStep(1);
+      const auto = guessMapping(d.headers);
+      setData(d); setMapping(auto); setGuessed(auto); setStep(1);
     } catch (e) { toast(e.message, 'error'); }
     setBusy(false);
   }, [toast]);
@@ -66,9 +49,12 @@ export default function ImportPage() {
     a.download = 'sample-prospects.csv'; a.click();
   };
 
-  const hasKey = mapping.phone || mapping.name || mapping.first_name || mapping.email;
-  const mappedHeaders = new Set(Object.values(mapping));
-  const extras = data ? data.headers.filter((h) => !mappedHeaders.has(h)) : [];
+  const hasKey = canImport(mapping);
+  const extras = data ? extrasOf(data.headers, mapping) : [];
+  // Registry columns (CVR, protection flags, source URLs) are filed as metadata rather than
+  // shown as "unmapped" — they were never contact fields in the first place.
+  const registryExtras = extras.filter(isRegistryHeader);
+  const otherExtras = extras.filter((h) => !isRegistryHeader(h));
 
   return (
     <div className="import-page">
@@ -100,14 +86,27 @@ export default function ImportPage() {
                 {TARGETS.map((t, i) => (
                   <motion.div key={t.id} className="map-row" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.03 }}>
                     <span>{t.label}</span><ArrowRight size={14} className="muted" />
-                    <select value={mapping[t.id] || ''} onChange={(e) => setMapping({ ...mapping, [t.id]: e.target.value || undefined })}>
+                    <select
+                      value={mapping[t.id] || ''}
+                      aria-label={`Column for ${t.label}`}
+                      onChange={(e) => setMapping({ ...mapping, [t.id]: e.target.value || undefined })}
+                    >
                       <option value="">— skip —</option>
                       {data.headers.map((h) => <option key={h} value={h}>{h}</option>)}
                     </select>
+                    {mapping[t.id] && guessed[t.id] === mapping[t.id] && (
+                      <span className="map-auto" title="Matched automatically from the column name">auto</span>
+                    )}
                   </motion.div>
                 ))}
               </div>
-              {extras.length > 0 && <p className="muted small">These other columns will be saved under "More details": {extras.join(', ')}</p>}
+              {otherExtras.length > 0 && <p className="muted small">Saved under "More details": {otherExtras.join(', ')}</p>}
+              {registryExtras.length > 0 && (
+                <p className="muted small">
+                  Kept as registry data (CVR, protection flags and source links live there, not in the contact fields): {registryExtras.join(', ')}
+                </p>
+              )}
+              {mapping.notes && <p className="muted small">“{mapping.notes}” becomes the first note on every prospect.</p>}
               <label className="check-row"><input type="checkbox" checked={skipDupes} onChange={(e) => setSkipDupes(e.target.checked)} /> Skip numbers that are already in the app</label>
               <div className="row gap end">
                 <button className="btn" onClick={() => { setStep(0); setData(null); }}><ArrowLeft size={15} /> Back</button>
@@ -130,7 +129,7 @@ export default function ImportPage() {
           <motion.div key="s2" className="glass done-card" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }}>
             <motion.div className="done-ico" initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 260, damping: 14, delay: 0.1 }}><Check size={38} strokeWidth={3} /></motion.div>
             <h2>{result.added} prospects imported</h2>
-            <p className="muted">{result.dupes} duplicates skipped · {result.empty} empty rows ignored</p>
+            <p className="muted">{result.dupes} duplicates skipped · {result.empty} empty rows ignored{result.noted ? ` · ${result.noted} notes attached` : ''}</p>
             <div className="row gap center-row">
               <button className="btn" onClick={() => { setStep(0); setData(null); }}>Import another</button>
               <button className="btn primary glow" onClick={() => setView('dialer')}><PhoneCall size={16} /> Start dialing</button>

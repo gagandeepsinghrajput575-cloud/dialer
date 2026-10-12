@@ -103,7 +103,11 @@ function bulkInsert(rows) {
   const tx = db.transaction((list) => {
     let n = 0;
     for (const r of list) {
-      ins.run(r.name, r.phone, r.email, r.company, r.title, r.location, r.website, JSON.stringify(r.extra || {}));
+      const info = ins.run(r.name, r.phone, r.email, r.company, r.title, r.location, r.website, JSON.stringify(r.extra || {}));
+      // The id is stamped back onto the caller's own row object: an import that carries a
+      // "Marketing Notes" column has to attach a note per prospect, and the only moment the
+      // id exists is right here. The return value stays a count for everybody else.
+      r.id = Number(info.lastInsertRowid);
       n++;
     }
     return n;

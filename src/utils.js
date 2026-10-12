@@ -117,6 +117,69 @@ export function withCrossTabLock(key, fn) {
   });
 }
 
+// The same mutex, held instead of raced: an inbound call needs the lock for its whole
+// lifetime (ringing -> answered -> hung up), because that lock is what stops a second tab
+// from ringing over the top of the first one. `release()` is idempotent.
+export async function holdCrossTabLock(key, lockManager = (typeof navigator !== 'undefined' ? navigator.locks : null)) {
+  if (!lockManager || typeof lockManager.request !== 'function') {
+    // No Lock API (older engines, jsdom): the tab rings. A second tab is not a case we can
+    // detect here, and refusing to ring at all would be worse than ringing twice.
+    return { held: true, noApi: true, reason: null, release: async () => {} };
+  }
+
+  let decide;
+  const decision = new Promise((resolve) => { decide = resolve; });
+  let releaseHeld = () => {};
+  const heldUntil = new Promise((resolve) => { releaseHeld = resolve; });
+  let released = false;
+
+  try {
+    lockManager.request(key, { ifAvailable: true }, (lock) => {
+      if (!lock) { decide(false); return undefined; }
+      decide(true);
+      return heldUntil;     // the lock is held for as long as the call lasts
+    }).catch(() => decide(false));
+  } catch {
+    decide(false);
+  }
+
+  const held = await decision;
+  if (!held) return { held: false, noApi: false, reason: 'another-tab', release: async () => {} };
+  return {
+    held: true,
+    noApi: false,
+    reason: null,
+    release: async () => { if (!released) { released = true; releaseHeld(); } },
+  };
+}
+
+// Two numbers are the same person when their national significant digits agree. The caller ID
+// in a SIP From header may be '+4520123456', '004520123456' or '20123456' depending on the
+// carrier, and the row on file may have been imported with or without the country code.
+export const phoneDigits = (value) => String(value || '').replace(/\D/g, '');
+
+export function samePhone(a, b) {
+  const da = phoneDigits(a);
+  const db = phoneDigits(b);
+  if (da.length < 8 || db.length < 8) return false;   // shorter than a Danish number: too weak to match
+  if (da === db) return true;
+  return da.slice(-8) === db.slice(-8);               // same national number, different country-code style
+}
+
+// Best-effort E.164 for *display and matching* — the server normalizes authoritatively on the
+// way into the database. Never invents a country code, and never rewrites a foreign number as
+// if it were Danish.
+export function formatCallerNumber(raw, countryCode = '') {
+  const digits = phoneDigits(raw);
+  if (!digits) return '';
+  const cc = phoneDigits(countryCode);
+  if (raw.toString().trim().startsWith('+')) return `+${digits}`;
+  if (digits.startsWith('00') && digits.length > 2) return `+${digits.slice(2)}`;
+  if (cc && digits.startsWith(cc) && digits.length > cc.length + 4) return `+${digits}`;
+  if (cc && digits.length === 8) return `+${cc}${digits}`;   // national format, country code known
+  return digits;
+}
+
 // Hand the dial URI to the OS so the registered softphone (Zoiper, Linphone, Telephone)
 // dials out immediately.
 //

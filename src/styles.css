@@ -179,6 +179,20 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .mini-stats span { font-size: 11px; }
 /* Registry metadata from an imported sheet. Collapsed by default: the dialer's job is the
    Call button, and eight CVR rows standing between the agent and it is a layout tax. */
+/* The cleared-the-list state. It replaces nothing: the list above stays visible so the agent
+   can still see who they called, which is the whole point of finishing a tab. */
+.queue-done {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 10px;
+  padding: 16px 14px; border-radius: 16px; text-align: center;
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.12), rgba(34, 211, 238, 0.08));
+  border: 1px solid rgba(52, 211, 153, 0.32); color: var(--text);
+}
+.queue-done svg { color: var(--ok); }
+.queue-done b { font-size: 13.5px; }
+.queue-done span { font-size: 12px; color: var(--muted); }
+.queue-done small { font-size: 11px; color: var(--muted); opacity: 0.85; }
+.queue-cleared { color: var(--ok); font-weight: 700; }
+
 .registry { border-top: 1px solid var(--line); padding-top: 12px; }
 .registry-toggle {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
@@ -832,6 +846,7 @@ button.banner-email-chip:disabled { cursor: not-allowed; }
   .q-skel-avatar, .q-skel-lines i { animation: none; }
   .queue-skeleton { opacity: 0.6; }
   .registry-caret { transition: none; }
+  .queue-done { animation: none; }
 }
 
 /* ---------- touch targets ----------

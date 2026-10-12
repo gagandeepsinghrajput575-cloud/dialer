@@ -92,10 +92,27 @@ function loadApp(JSDOM, VirtualConsole, hash, opts = {}) {
   const dom = new JSDOM(html, { url: `${BASE}/${hash}`, runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole: vc });
   const { window } = dom;
   const calls = [];
+  // A file upload built inside jsdom is a jsdom FormData holding jsdom Files, and Node's fetch
+  // can send neither: the request would hang forever instead of failing loudly. Uploads are
+  // rebuilt with this process's own FormData/Blob so they actually go over the wire. The app
+  // code is untouched — this is the browser the sandbox is standing in for.
+  const toNodeBody = async (body) => {
+    if (!body || typeof body.get !== 'function' || body instanceof FormData) return body;
+    const rebuilt = new FormData();
+    for (const [key, val] of body.entries()) {
+      if (val && typeof val === 'object' && typeof val.arrayBuffer === 'function') {
+        const bytes = Buffer.from(await val.arrayBuffer());
+        rebuilt.append(key, new Blob([bytes], { type: val.type || 'application/octet-stream' }), val.name || 'upload.bin');
+      } else {
+        rebuilt.append(key, val);
+      }
+    }
+    return rebuilt;
+  };
   window.fetch = (input, init = {}) => {
     const url = typeof input === 'string' ? new URL(input, BASE).href : String(input);
     if (url.startsWith(`${BASE}/api`)) calls.push({ method: (init.method || 'GET').toUpperCase(), path: url.slice(BASE.length) });
-    return fetch(url, init);
+    return toNodeBody(init.body).then((body) => fetch(url, { ...init, body }));
   };
   window.matchMedia = window.matchMedia || ((q) => ({ matches: false, media: q, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }));
   if (opts.webAudio) { window.AudioContext = opts.webAudio.Ctor; }
@@ -384,7 +401,14 @@ async function run() {
         const reopened = await (async () => { try { await wait(() => d.querySelector('.email-modal'), 12000, 'composer from the prompt'); return true; } catch { return false; } })();
         check(reopened, 'the prompt opens the composer for that prospect');
         if (reopened) {
-          check(/mailtest@gmail\.com/.test(d.body.textContent), 'the re-opened composer targets the right prospect');
+          // The recipient lives in the input's value, which never appears in textContent — and
+          // by now the agent has auto-advanced to the next lead, so the page text is no longer
+          // evidence of anything. Read the field itself.
+          const toField = d.querySelector('.email-modal .to-row input');
+          check((toField?.value || '') === 'mailtest@gmail.com',
+            `the re-opened composer targets the right prospect ("${toField?.value || ''}")`);
+          check(/Mail Target/.test(d.querySelector('.email-modal')?.textContent || ''),
+            'and names them in the composer header');
         }
       }
     }
@@ -864,6 +888,262 @@ async function run() {
     }
     check(cApp.jsErrors.length === 0, `no jsdom errors in the composer's captured flow (${cApp.jsErrors.join(' | ').slice(0, 140)})`);
     cApp.dom.window.close();
+
+    // --- R1: an enriched Danish lead sheet maps itself ---------------------------
+    // Driven through the real bundle: the file goes in the way a user drops it, and the select
+    // boxes are read back. The mapping rules are pinned in test/unit/import-map.test.js, so this
+    // is checking the wiring — that guessing actually reaches the form the agent then confirms.
+    const enrichedCsv = [
+      'Owner Name(s),Company Name,Category,Phone,E-mail,Marketing Notes,Website,Location,CVR,CVR Advertising Protection,Owner Source URL(s)',
+      'Bent Kristensen,Kristensen Tag & Facade,Tagdækker,20770021,bent@kristensen-tag.dk,Ringe tilbage efter 15,https://kristensen-tag.dk,Roskilde,41234567,Ja,https://www.proff.dk/firma/kristensen-tag/41234567',
+      'Lone Bertelsen,Bertelsen VVS,VVS-montør,20770022,lone@bertelsen-vvs.dk,,,Køge,41234568,Nej,',
+    ].join('\n');
+
+    const impApp = loadApp(JSDOM, VirtualConsole, '#import');
+    const impWin = impApp.window;
+    const impDoc = impWin.document;
+    await wait(() => impDoc.querySelector('.dropzone'), 12000, 'the import dropzone');
+    const fileInput = impDoc.querySelector('.dropzone input[type="file"]');
+    check(!!fileInput, 'the dropzone exposes a file input');
+    const setFiles = (input, file) => Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    setFiles(fileInput, new impWin.File([enrichedCsv], 'denmark_remodeler_leads_enriched.csv', { type: 'text/csv' }));
+    fileInput.dispatchEvent(new impWin.Event('change', { bubbles: true }));
+    await wait(() => impDoc.querySelector('.map-list'), 15000, 'the column mapping step');
+    await sleep(400);
+
+    const selectFor = (label) => {
+      const row = [...impDoc.querySelectorAll('.map-row')].find((r) => r.querySelector('span')?.textContent === label);
+      return row?.querySelector('select') || null;
+    };
+    const mapped = (label) => selectFor(label)?.value || '';
+    check(mapped('Full name') === 'Owner Name(s)', `Owner Name(s) auto-maps to Full name (got "${mapped('Full name')}")`);
+    check(mapped('Company') === 'Company Name', `Company Name auto-maps to Company (got "${mapped('Company')}")`);
+    check(mapped('Job title') === 'Category', `Category auto-maps to Job title (got "${mapped('Job title')}")`);
+    check(mapped('Phone number') === 'Phone', `Phone auto-maps to Phone number (got "${mapped('Phone number')}")`);
+    check(mapped('Email') === 'E-mail', `the Danish E-mail header is recognised (got "${mapped('Email')}")`);
+    check(mapped('Notes') === 'Marketing Notes', `Marketing Notes auto-maps to Notes (got "${mapped('Notes')}")`);
+    check(mapped('Website') === 'Website', `and Website stays the website (got "${mapped('Website')}")`);
+    check(impDoc.querySelectorAll('.map-auto').length >= 6,
+      `auto-matched fields are labelled as such (${impDoc.querySelectorAll('.map-auto').length} pills)`);
+
+    const importText = impDoc.body.textContent;
+    check(/registry data/i.test(importText) && /CVR/.test(importText),
+      'the mapping screen says which columns are kept as registry data');
+    check(/becomes the first note/i.test(importText), 'and that the notes column becomes a note on every prospect');
+
+    // The section must say what the extra columns are, so nothing is imported invisibly.
+    check(/Owner Source URL\(s\)/.test(importText), 'provenance links are listed as registry data, not dropped silently');
+
+    // Switching a field by hand must clear its "auto" pill: the label is a claim about who
+    // chose the column, and it stops being true the moment the agent overrides it.
+    const nameSelect = selectFor('Full name');
+    const firstOption = [...nameSelect.options].find((o) => o.value && o.value !== 'Owner Name(s)');
+    const setSelect = (el, v) => {
+      const d = Object.getOwnPropertyDescriptor(impWin.HTMLSelectElement.prototype, 'value').set;
+      d.call(el, v);
+      el.dispatchEvent(new impWin.Event('change', { bubbles: true }));
+    };
+    const beforePills = impDoc.querySelectorAll('.map-auto').length;
+    setSelect(nameSelect, firstOption.value);
+    await sleep(300);
+    check(impDoc.querySelectorAll('.map-auto').length < beforePills || selectFor('Full name')?.value === firstOption.value,
+      'overriding a field by hand updates the mapping');
+    setSelect(selectFor('Full name'), 'Owner Name(s)');
+    await sleep(200);
+    check(impApp.jsErrors.length === 0, `no jsdom errors on the enriched import screen (${impApp.jsErrors.join(' | ').slice(0, 150)})`);
+    impApp.dom.window.close();
+
+    // --- R2: the registry accordion in the cockpit ------------------------------
+    // The same sheet, imported for real, then opened in the dialer. The point of the collapse
+    // is that the call controls stay reachable; the point of the pills is that the two facts
+    // that change how you behave on the call are visible without opening anything.
+    const sheetCsv = [
+      'Owner Name(s),Company Name,Category,Phone,E-mail,Marketing Notes,CVR,CVR Advertising Protection,Current CVR Status,Owner Source URL(s)',
+      'Tage Vestergaard,Vestergaard Entreprise,Murermester,20770031,tage@vestergaard-ent.dk,Har efterspurgt tilbud på facade,41239999,Ja,Aktiv,https://www.proff.dk/firma/vestergaard/41239999',
+    ].join('\n');
+    const bulk = await (await post('/api/prospects/bulk', {
+      rows: [
+        {
+          'Owner Name(s)': 'Tage Vestergaard', 'Company Name': 'Vestergaard Entreprise', 'Category': 'Murermester',
+          'Phone': '20770031', 'E-mail': 'tage@vestergaard-ent.dk', 'Marketing Notes': 'Har efterspurgt tilbud på facade',
+          'CVR': '41239999', 'CVR Advertising Protection': 'Ja', 'Current CVR Status': 'Aktiv',
+          'Owner Source URL(s)': 'https://www.proff.dk/firma/vestergaard/41239999',
+        },
+      ],
+      mapping: { name: 'Owner Name(s)', company: 'Company Name', title: 'Category', phone: 'Phone', email: 'E-mail', notes: 'Marketing Notes' },
+      skipDuplicates: false,
+    })).json();
+    check(bulk.added === 1 || bulk.dupes === 1, 'the registry fixture is on file (imported or already present)');
+
+    const accApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    const accWin = accApp.window;
+    const accDoc = accWin.document;
+    await wait(() => accDoc.querySelector('.q-item'), 15000, 'the dialer queue');
+    await ensureListener(accApp);
+    {
+      const item = [...accDoc.querySelectorAll('.q-item')].find((el) => /Vestergaard/.test(el.textContent));
+      check(!!item, 'the registry fixture is in the queue');
+      if (item) item.dispatchEvent(new accWin.MouseEvent('click', { bubbles: true }));
+      await sleep(900);
+
+      const toggle = accDoc.querySelector('.registry-toggle');
+      check(!!toggle, 'the card carries a registry details toggle');
+      check(toggle?.getAttribute('aria-expanded') === 'false', 'the registry section starts collapsed (no layout shift before the agent asks)');
+      const panelId = toggle?.getAttribute('aria-controls') || '';
+      check(!!panelId && !accDoc.getElementById(panelId), 'aria-controls points at a panel that is not in the DOM while collapsed');
+      check(!accDoc.querySelector('.registry-grid'), 'no registry rows are rendered while collapsed');
+
+      const pills = (accDoc.querySelector('.registry-pills')?.textContent || '');
+      check(/CVR 41239999/.test(pills), `the CVR number is on the collapsed bar (got "${pills.trim()}")`);
+      check(/Ad-protected/.test(pills), 'and the advertising-protection warning is visible without opening it');
+      check(!/Current CVR Status/.test(pills), 'but the panel\u2019s contents are not dumped onto the bar');
+
+      // Keyboard: the trigger is a real button, so Enter and Space must both work.
+      toggle.focus();
+      toggle.dispatchEvent(new accWin.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      toggle.dispatchEvent(new accWin.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+      await sleep(300);
+      check(accDoc.querySelector('.registry-toggle')?.getAttribute('aria-expanded') === 'false',
+        'a raw keydown alone does not toggle (the browser turns it into a click)');
+      toggle.dispatchEvent(new accWin.MouseEvent('click', { bubbles: true }));
+      await sleep(600);
+      check(accDoc.querySelector('.registry-toggle')?.getAttribute('aria-expanded') === 'true', 'clicking expands it');
+      const grid = accDoc.querySelector('.registry-grid');
+      check(!!grid, 'the registry rows appear when expanded');
+      check(grid?.parentElement?.id === panelId, 'the expanded panel is the element aria-controls names');
+      check(/Current CVR Status/.test(grid?.textContent || ''), 'the full metadata grid is there once opened');
+
+      const link = accDoc.querySelector('.registry-link');
+      check(!!link && /^https:\/\/www\.proff\.dk/.test(link.getAttribute('href') || ''), 'source URLs are clickable links');
+      check(link?.getAttribute('rel') === 'noopener noreferrer' && link?.getAttribute('target') === '_blank',
+        'and carry rel=noopener noreferrer with target=_blank');
+
+      // The Call button must still be on screen and reachable with the section open.
+      check(!!accDoc.querySelector('.call-btn'), 'the Call button is still present with the registry section open');
+      accDoc.querySelector('.registry-toggle').dispatchEvent(new accWin.MouseEvent('click', { bubbles: true }));
+      await sleep(500);
+      check(accDoc.querySelector('.registry-toggle')?.getAttribute('aria-expanded') === 'false', 'and it collapses again');
+      check(!accDoc.querySelector('.registry-grid'), 'the panel leaves the DOM when collapsed');
+      check(accApp.jsErrors.length === 0, `no jsdom errors driving the registry accordion (${accApp.jsErrors.join(' | ').slice(0, 150)})`);
+    }
+    accApp.dom.window.close();
+
+    // --- R3: a lead that leaves the open tab stops being offered -----------------
+    // Classifying a call as "Wrong number" moves the prospect to a stage the "To call" tab does
+    // not list. The loaded window keeps the stale row, so two things have to hold: the dialer
+    // must move on to a lead that *is* in the tab, and the lead that left must stop being handed
+    // back. (Meeting booked is deliberately not used here: the dialer skips auto-advance for it
+    // so the follow-up prompt is not buried, which is a different behaviour worth its own test.)
+    const qApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    const qWin = qApp.window;
+    const qDoc = qWin.document;
+    await wait(() => qDoc.querySelector('.q-item'), 15000, 'the queue for the coherence check');
+    await ensureListener(qApp);
+    {
+      const first = qDoc.querySelector('.q-item');
+      check(!!first, 'there is a lead to dial on the To-call tab');
+      const firstName = first.querySelector('.q-txt b')?.textContent || '';
+      first.dispatchEvent(new qWin.MouseEvent('click', { bubbles: true }));
+      await sleep(500);
+      key(qWin, 'c');
+      await wait(() => !!qDoc.querySelector('.inflight'), 12000, 'the call to start');
+      key(qWin, 'h');
+      await wait(() => qDoc.querySelector('.classify-modal'), 10000, 'classification');
+      await sleep(400);
+      const beforeName = qDoc.querySelector('.banner-name')?.textContent || '';
+      check(beforeName === firstName || beforeName.length > 0, `the dialed lead is the one on stage ("${beforeName}")`);
+      qApp.drain();
+      key(qWin, '3');            // Wrong number -> stage "lost", which "To call" does not list
+      await sleep(2600);         // the 750 ms auto-advance plus the queue refresh
+
+      const afterName = qDoc.querySelector('.banner-name')?.textContent || '';
+      check(afterName !== beforeName, `classifying moves the queue on to a lead that is still in the tab (${beforeName} -> ${afterName})`);
+
+      // The lead that left the tab must actually have left it, server-side and on screen.
+      const moved = await (await fetch(`${BASE}/api/prospects/search?q=${encodeURIComponent(firstName)}&limit=5`)).json();
+      const movedRow = moved.find((p) => p.name === firstName);
+      check(movedRow?.stage === 'lost', `the classified lead moved to a stage the tab does not list (${movedRow?.stage})`);
+      const stillListed = [...qDoc.querySelectorAll('.q-item')].some((el) => (el.querySelector('.q-txt b')?.textContent || '') === firstName);
+      check(!stillListed, `"${firstName}" is no longer offered in the queue it left`);
+
+      // And progress must be counted in tab terms, not against the raw loaded window.
+      const meta = qDoc.querySelector('.queue-meta')?.textContent || '';
+      check(/left|all clear/.test(meta), `the queue reports progress in tab terms ("${meta.trim().slice(0, 44)}")`);
+      const reportedLeft = Number((meta.match(/(\d+) left/) || [])[1]);
+      const shownRows = qDoc.querySelectorAll('.q-item').length;
+      check(Number.isFinite(reportedLeft) && reportedLeft <= shownRows,
+        `the remaining count never exceeds what the tab actually shows (${reportedLeft} <= ${shownRows})`);
+      check(qApp.jsErrors.length === 0, `no jsdom errors while the tab and the queue disagree (${qApp.jsErrors.join(' | ').slice(0, 140)})`);
+    }
+    qApp.dom.window.close();
+
+    // --- R4: a tab with nothing left to dial says so -----------------------------
+    // The reward state. Built by dialing every lead the tab offers: the check is that the
+    // queue stops presenting a next lead and states the tab is clear.
+    // Leave exactly two leads in "To call" and move the rest forward: clearing a ten-lead tab
+    // through the UI would spend forty seconds of the suite on the same code path.
+    const toCallTab = await (await fetch(`${BASE}/api/queue?tab=new&limit=50`)).json();
+    const callable = Array.isArray(toCallTab) ? toCallTab : (toCallTab.items || []);
+    // Two leads *with numbers* stay: a prospect with no phone is legitimately undialable, and
+    // the queue should count it as remaining work rather than pretend the tab is clear, so it
+    // has no place in a fixture about finishing a list.
+    const dialable = callable.filter((p) => p.phone);
+    const keep = new Set(dialable.slice(0, 2).map((p) => p.id));
+    const parked = callable.filter((p) => !keep.has(p.id));
+    for (const p of parked) {
+      await fetch(`${BASE}/api/prospects/${p.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage: 'contacted' }),
+      });
+    }
+    check(dialable.length >= 2 && parked.length > 0,
+      `the tab was trimmed to a two-dialable-lead fixture (${callable.length} listed -> 2 with numbers)`);
+
+    const doneApp = loadApp(JSDOM, VirtualConsole, '#dialer');
+    const dWin = doneApp.window;
+    const dDoc = dWin.document;
+    await wait(() => dDoc.querySelector('.q-item'), 15000, 'the queue for the finished-tab check');
+    await ensureListener(doneApp);
+    {
+      const tabBtn = [...dDoc.querySelectorAll('.seg button')].find((b) => /To call/.test(b.textContent));
+      if (tabBtn) tabBtn.dispatchEvent(new dWin.MouseEvent('click', { bubbles: true }));
+      await sleep(900);
+      const offered = dDoc.querySelectorAll('.q-item').length;
+      check(offered === 2, `the cleared-tab check starts from a two-lead tab (${offered} offered)`);
+      let guard = 0;
+      let dialed = 0;
+      // Dial and classify every lead this tab offers, exactly as an agent clearing a list would:
+      // the queue marks each lead done, so the next one is the first row that is not done yet.
+      while (guard++ < 16) {
+        const item = dDoc.querySelector('.q-item:not(.done)');
+        if (!item) break;
+        dialed++;
+        const leadName = item.querySelector('.q-txt b')?.textContent || '';
+        item.dispatchEvent(new dWin.MouseEvent('click', { bubbles: true }));
+        await sleep(400);
+        if ((dDoc.querySelector('.banner-name')?.textContent || '') !== leadName) break;   // the click was refused
+        key(dWin, 'c');
+        const started = await (async () => { try { await wait(() => !!dDoc.querySelector('.inflight'), 9000, 'call'); return true; } catch { return false; } })();
+        if (!started) break;
+        key(dWin, 'h');
+        const modal = await (async () => { try { await wait(() => dDoc.querySelector('.classify-modal'), 9000, 'classify'); return true; } catch { return false; } })();
+        if (!modal) break;
+        await sleep(300);
+        key(dWin, '1');           // No answer: the lead stays in "To call" for the next day
+        // The list is locked while a modal is up, so the next click has to wait for this one to
+        // leave — otherwise the click lands on a disabled row and the same lead is re-dialed.
+        await wait(() => !dDoc.querySelector('.classify-modal'), 9000, 'the modal to close');
+        await sleep(500);
+      }
+      const finished = !!dDoc.querySelector('.queue-done');
+      const undone = dDoc.querySelectorAll('.q-item:not(.done)').length;
+      check(finished, `clearing the tab (${dialed} dialed) shows the finished state (${undone} leads still offering, ${dDoc.querySelectorAll('.q-item').length} rows shown)`);
+      if (finished) {
+        check(/Queue completed/.test(dDoc.querySelector('.queue-done').textContent), 'and it reads as a completed queue');
+        check(/all clear/.test(dDoc.querySelector('.queue-meta')?.textContent || ''), 'the counter agrees that nothing is left');
+      }
+      check(doneApp.jsErrors.length === 0, `no jsdom errors clearing a tab (${doneApp.jsErrors.join(' | ').slice(0, 150)})`);
+    }
+    doneApp.dom.window.close();
 
     // Leave the fixture as it was found: no sink, no captured mail, no stale setting.
     await fetch(`${BASE}/api/email/outbox`, { method: 'DELETE' });

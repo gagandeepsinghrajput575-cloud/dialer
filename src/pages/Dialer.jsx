@@ -18,7 +18,7 @@ import QueueList from '../components/QueueList.jsx';
 import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import useServerQueue from '../useServerQueue.js';
-import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueTab, stepIndex, tabForProspect } from '../queue.js';
+import { QUEUE_TABS, QUEUE_LIMIT, isCallableInTab, pickNextId, queueProgress, queueTab, stepIndex, tabForProspect } from '../queue.js';
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
@@ -334,23 +334,23 @@ export default function Dialer() {
     setActiveId(null);
   }, [toast]);
 
-  // Candidate calculation for the next prospect in queue
+  // Candidate calculation for the next prospect in queue.
+  //
+  // Only leads that still belong to the open tab count. Classifying a call moves the prospect to
+  // a stage this tab does not list, and the loaded window is only a snapshot — walking it blind
+  // means auto-advancing onto a lead the tab no longer contains, and worse, handing the agent a
+  // queue that never reads as finished. When the tab runs out, this returns null on purpose:
+  // staying put on the last call is right, silently jumping back to an already-dialed lead is not.
   const getNextProspectId = useCallback((currentQueue, currentProspectId) => {
     const list = Array.isArray(currentQueue) ? currentQueue : (items || []);
     if (!currentProspectId || !list.length) return null;
-    const currentIdx = list.findIndex((p) => p.id === currentProspectId);
-    if (currentIdx === -1) return list[0]?.id || null;
-    for (let step = 1; step < list.length; step++) {
-      const candidate = list[(currentIdx + step) % list.length];
-      if (candidate && candidate.id !== currentProspectId && !done.has(candidate.id)) {
-        return candidate.id;
-      }
-    }
-    if (list.length > 1) {
-      return list[(currentIdx + 1) % list.length]?.id || null;
-    }
-    return null;
-  }, [items, done]);
+    // Note the case this must *not* refuse: the lead that just left the tab. Classifying a call
+    // as "Meeting booked" moves it out of "To call" — that is the normal path, and it is exactly
+    // when the agent needs the next lead. The walk filters candidates by the tab's own rule and
+    // falls back to the first one still in it; only a tab with nothing left yields null.
+    const { id } = pickNextId(list, currentProspectId, done, (p) => isCallableInTab(p, tab));
+    return id || null;
+  }, [items, done, tab]);
 
   const go = useCallback((dir) => {
     if (phaseRef.current !== 'idle' || classifyRef.current) return toast('Finish or classify this call first.', 'error');
@@ -562,10 +562,12 @@ export default function Dialer() {
         // prospect by the time they click, so the prompt cannot re-derive it from `active`.
         setFollowUp({ id: pid, name: modal.prospect.name, email: modal.prospect.email, noteText: noteToSave });
       }
+      // Move to the next lead *before* the refresh, not 750 ms after it. The refresh drops
+      // leads that no longer belong to the open tab, and while the classified lead is still the
+      // active one it resolves through `pinned` — which drags the tab along with it, so an agent
+      // who books a meeting gets thrown out of "To call" and loses their place in the list.
+      if (autoNext && outcomeId !== 'meeting_booked' && nextId) setActiveId(nextId);
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
-        later(() => setActiveId(nextId), 750);
-      }
     } catch (e) {
       toast(e.message, 'error');
     } finally {
@@ -605,10 +607,10 @@ export default function Dialer() {
       if (shouldOfferFollowUp(outcome, null) && active.email) {
         setFollowUp({ id: finished, name: active.name, email: active.email, noteText: noteToSave });
       }
+      // Same ordering as the modal path: advance first, then refresh, so the lead that just
+      // left the tab is never the one the queue is still pointing at.
+      if (autoNext && outcome !== 'meeting_booked' && nextId) setActiveId(nextId);
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcome !== 'meeting_booked' && nextId) {
-        later(() => setActiveId(nextId), 750);
-      }
     } catch (e) {
       clearQuickNote(noteToSave); // give the note back so the agent does not lose it
       toast(e.message, 'error');
@@ -760,6 +762,9 @@ export default function Dialer() {
   }
 
   const calling = phase !== 'idle';
+  // How far through the open tab the agent is. Drives both the "N left" hint and the
+  // cleared-the-list state, and only ever counts leads this tab still contains.
+  const progress = queueProgress(items, done, tab);
   const dry = settings?.dry_run === '1';
   const softphone = softphoneLabel(settings?.telephony_mode);
   const cc = ccLabel(settings?.default_country_code);
@@ -802,13 +807,18 @@ export default function Dialer() {
         </div>
         <div className="queue-meta">
           <span>{total || items.length} in queue</span>
-          <span>{done.size} dialed</span>
+          {/* Leads this tab can still dial, not the raw loaded count: a lead that moved to
+              another stage is not one of this tab's calls any more. */}
+          {progress.allDone
+            ? <span className="queue-cleared">{progress.dialed} dialed · all clear</span>
+            : <span>{progress.remaining} left · {progress.dialed} dialed</span>}
           <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
         </div>
         <QueueList
           items={items}
           activeId={active?.id ?? null}
           done={done}
+          progress={progress}
           locked={calling || !!classifyModal}
           total={total}
           hasMore={hasMore}

@@ -662,6 +662,40 @@ async function run() {
     check(iApp.jsErrors.length === 0, `no jsdom errors driving an inbound call (${iApp.jsErrors.join(' | ').slice(0, 170)})`);
     iApp.dom.window.close();
 
+    // --- I8: a caller who is not in the CRM --------------------------------------
+    // Nobody recognises every number. The ring must not fail, must not show the record it
+    // could not find, and must say plainly that answering creates a new lead. The stale list
+    // in the tab is what makes this reproducible: the tab rings from a number the server no
+    // longer knows, which is exactly the stranger-calls-in case.
+    // The test-mode ring dials the first prospect with a number *in the app's own list*, so the
+    // victim has to be picked the same way — from GET /api/prospects, not from the queue tab.
+    const list = await (await fetch(`${BASE}/api/prospects`)).json();
+    const ghost = (Array.isArray(list) ? list : list.items || []).find((p) => p.phone);
+    check(!!ghost?.id && !!ghost?.phone, `the fixture list has a prospect to ring from (${ghost?.name || 'none'})`);
+    const uAudio = fakeWebAudio();
+    const uApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: uAudio });
+    await wait(() => uApp.window.document.querySelector('.q-item'), 15000, 'unknown-caller queue');
+    await ensureListener(uApp);
+    await sleep(500);
+    // The tab keeps the prospect in memory; the database forgets it.
+    await fetch(`${BASE}/api/prospects/${ghost.id}`, { method: 'DELETE' });
+    const uDoc = uApp.window.document;
+    uApp.drain();
+    key(uApp.window, 'i');
+    await wait(() => uDoc.querySelector('.incoming-call'), 8000, 'the unknown-caller ring');
+    await sleep(600);
+    check(/Unknown caller/.test(uDoc.querySelector('.incoming-sub')?.textContent || ''),
+      `an unrecognised number reads as an unknown caller ("${(uDoc.querySelector('.incoming-sub')?.textContent || '').trim()}")`);
+    check((uDoc.querySelector('.incoming-number')?.textContent || '').replace(/\D/g, '').includes(String(ghost.phone).replace(/\D/g, '').slice(-8)),
+      `the banner still shows the number that is ringing (${uDoc.querySelector('.incoming-number')?.textContent || ''})`);
+    check(/Answering creates a new lead/.test(uDoc.querySelector('.incoming-hint')?.textContent || ''),
+      'and tells the agent what answering will do');
+    check(!!uDoc.querySelector('.incoming-actions .incoming-answer'), 'Answer stays available for a stranger');
+    key(uApp.window, 'Escape');
+    await wait(() => !uDoc.querySelector('.incoming-call'), 8000, 'the stranger ring to close');
+    check(uAudio.ringing() === 0, 'and the unknown-caller ring is silenced like any other');
+    uApp.dom.window.close();
+
     // --- I7: a reduced-motion user still gets the call --------------------------
     // The ring cadence is drawn, so "no animation" must not mean "no banner": the bars go
     // static and the keyboard/audio path is unchanged.

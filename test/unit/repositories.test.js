@@ -94,6 +94,65 @@ async function run() {
   assert.strictEqual(notes.get(note.id).body, 'Vil gerne have en demo i næste uge.');
   ok('call + note repos: insert, patch, filters, updates');
 
+  // ---- inbound call ledger (migration 8) ----
+  // Inbound calls share the calls table; `direction` is what keeps them from being read as
+  // outbound dials by the funnel. The column is additive with a default, so upgrading a live
+  // database cannot rewrite a single existing row.
+  const directionCol = db.prepare('PRAGMA table_info(calls)').all().find((c) => c.name === 'direction');
+  assert.ok(directionCol, 'calls.direction exists after migration 8');
+  assert.strictEqual(directionCol.dflt_value, "'outbound'", "the column default is the literal 'outbound'");
+  assert.strictEqual(directionCol.notnull, 1, 'direction is NOT NULL');
+  assert.ok(migrate.MIGRATIONS.some((m) => m.version === 8 && m.name === 'calls-direction-inbound'),
+    'migration 8 is the inbound-direction migration');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) c FROM calls WHERE direction IS NULL").get().c, 0,
+    'every row written before the migration reads back as outbound');
+  assert.strictEqual(calls.get(call.id).direction, 'outbound', 'the outbound dialer still writes direction=outbound');
+
+  // A caller the CRM already knows: matched by normalised number, no new prospect invented.
+  const known = callService.startInbound({ callerPhone: '20123456' });
+  assert.strictEqual(known.matched, true, 'an existing prospect is matched by phone');
+  assert.strictEqual(known.provisional, false, 'a matched caller provisions nothing');
+  assert.strictEqual(known.prospect.id, p.id, 'the match is the real prospect');
+  assert.strictEqual(known.callerId, '+4520123456', 'the caller number is normalised the same way dialing normalises');
+  assert.strictEqual(known.call.direction, 'inbound');
+  assert.strictEqual(known.call.status, 'ringing');
+  assert.strictEqual(known.call.prospect_id, p.id);
+  const again = callService.startInbound({ callerPhone: '+45 20 12 34 56' });
+  assert.strictEqual(again.callId, known.callId, 'a re-delivered SIP INVITE reuses the same ringing row');
+
+  // A caller nobody knows: one provisional lead, still exposed to the UI so the agent can see
+  // who is ringing before answering.
+  const before = callService.todaysDials();
+  const unknown = callService.startInbound({ callerPhone: '+45 31 88 99 00' });
+  assert.strictEqual(unknown.matched, false, 'an unknown caller does not pretend to match');
+  assert.strictEqual(unknown.provisional, true, 'an unknown caller gets a provisional lead');
+  assert.strictEqual(unknown.prospect.phone, '+4531889900');
+  assert.strictEqual(unknown.prospect.extra.inbound, true, 'the provisional lead is marked as an inbound call');
+  assert.strictEqual(prospects.count(), 4, 'the provisional lead is a single new row');
+  assert.throws(() => callService.startInbound({ callerPhone: 'hej med dig' }), /caller number/i,
+    'a call with no usable number is refused rather than logged against a junk row');
+
+  // Declined / missed before pickup: the ring never became a conversation, so it must not
+  // count as a dial — and the provisional lead is removed so spam cannot pollute the CRM.
+  const missed = callService.markInboundMissed(unknown.callId, { reason: 'missed' });
+  assert.strictEqual(missed.call.status, 'missed');
+  assert.strictEqual(missed.call.duration_sec, 0);
+  assert.ok(missed.call.ended_at, 'a missed call is closed out, not left ringing forever');
+  assert.strictEqual(prospects.get(unknown.prospect.id), undefined, 'the provisional lead is cleaned up');
+  assert.strictEqual(prospects.count(), 3);
+  assert.strictEqual(callService.todaysDials(), before, 'a missed inbound call is not a dial');
+  const already = callService.markInboundMissed(unknown.callId, { reason: 'missed' });
+  assert.strictEqual(already.alreadyResolved, true, 'marking the same ring twice is a no-op');
+
+  // Answered inbound calls run the exact outbound classification path: the same PATCH, the
+  // same stage machine, the same duration bookkeeping.
+  const answered = callService.startInbound({ callerPhone: '+4520123456' });
+  const classified = callService.classify(answered.callId, { outcome: 'conversation', duration_sec: 91 });
+  assert.strictEqual(classified.call.outcome, 'conversation');
+  assert.strictEqual(classified.call.duration_sec, 91);
+  assert.strictEqual(classified.call.direction, 'inbound', 'classification never rewrites the direction');
+  ok('inbound ledger: migration 8, match/provision, idempotent ring, missed cleanup, classification');
+
   // ---- telephony service ----
   const cases = [
     ['20123456', '+4520123456'], ['20 12 34 56', '+4520123456'], ['+45 20 12 34 56', '+4520123456'],

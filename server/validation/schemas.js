@@ -57,6 +57,19 @@ const bulkImport = z.object({
 
 const callStart = z.object({ tzOffset: z.coerce.number().optional() });
 
+// The browser softphone posts the caller ID from the SIP From header. Kept as a loose string
+// on purpose: the *server* normalizes it (telephonyService), so a client can never talk the
+// dialer into storing an unnormalized number or a junk value.
+const callInbound = z.object({
+  callerPhone: z.string().trim().min(1, 'A caller number is required').max(64),
+  prospectId: z.coerce.number().int().positive().optional(),
+});
+
+const callMissed = z.object({
+  reason: z.enum(['missed', 'declined']).optional().default('missed'),
+  duration_sec: seconds.optional(),
+});
+
 const callPatch = z.object({
   outcome: z.enum(OUTCOMES).optional(),
   duration_sec: seconds.optional(),
@@ -170,7 +183,7 @@ const queueQuery = z.object({
 
 module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,
-  callPatch, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
+  callPatch, callInbound, callMissed, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
 };

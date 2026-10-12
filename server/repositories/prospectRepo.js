@@ -64,6 +64,17 @@ function stageCounts() {
 
 const phones = () => new Set(db.prepare("SELECT phone FROM prospects WHERE phone != ''").all().map((r) => r.phone));
 
+// Exact-number lookup, used when the phone rings: the caller ID from the SIP From header,
+// normalised by the same rules as a dial, against the numbers on file. Every row this app
+// writes is stored normalised (+4520123456), so an exact match is the honest comparison —
+// deliberately no fuzzy/`LIKE %digits%` fallback, which would happily match a *different*
+// customer who happens to share a suffix and show the agent the wrong notes mid-call.
+const findByPhone = (phone) => {
+  const s = String(phone || '').trim();
+  if (!s) return null;
+  return toApi(db.prepare('SELECT * FROM prospects WHERE phone = ? ORDER BY id DESC LIMIT 1').get(s));
+};
+
 // LIKE treats % and _ as wildcards, so a search for "%" used to match every row.
 const escapeLike = (s) => String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
 
@@ -113,7 +124,7 @@ const emails = () => new Set(
 );
 
 module.exports = {
-  emails,
+  emails, findByPhone,
   toApi, list, get, raw, count, dncCount, insert, update, touch, remove, clearAll,
   markCalled, unmarkCalled, stageCounts, phones, search, followUpsDue, bulkInsert,
   COLUMNS, escapeLike, BULK_CHUNK,

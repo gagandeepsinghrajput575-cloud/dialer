@@ -42,6 +42,10 @@ const MIGRATIONS = [
   { version: 5, name: 'purge-legacy-settings', up: () => purgeUnknownSettings() },
   // The local mail sink's ledger. A pure addition, so it cannot disturb a database in use.
   { version: 6, name: 'outbox-local-mail-sink', up: () => db.exec(OUTBOX_SQL) },
+  // Inbound calls land in the same ledger as outbound ones. A column with a default is an
+  // O(1), rewrite-free ALTER on SQLite, so every row a running database already holds keeps
+  // reading back as 'outbound' — nothing to backfill, nothing to lose.
+  { version: 8, name: 'calls-direction-inbound', up: () => addColumn('calls', 'direction', "TEXT NOT NULL DEFAULT 'outbound'") },
 ];
 
 function run() {

@@ -2,14 +2,25 @@
 // discards and the daily-dial safety rails.
 const calls = require('../repositories/callRepo');
 const prospects = require('../repositories/prospectRepo');
+const notes = require('../repositories/noteRepo');
 const settings = require('../repositories/settingsRepo');
 const telephony = require('./telephonyService');
+const prospectService = require('./prospectService');
 const { ApiError } = require('../middleware/errorHandler');
 const { OUTCOMES } = require('../config/defaults');
 const { db } = require('../db');
 
 // While in test mode show test calls; once live, exclude them from analytics.
-const statsFilter = (alias = '') => (settings.getBool('dry_run') ? '' : `AND ${alias}dry_run = 0`);
+//
+// A call that never left 'ringing' is not a dial: the phone rang and the agent missed it (or
+// declined it). Counting those would inflate the dial count every time somebody dials the
+// wrong extension, and the funnel is the one number an outbound team trusts.
+const statsFilter = (alias = '') => {
+  const parts = [];
+  if (!settings.getBool('dry_run')) parts.push(`${alias}dry_run = 0`);
+  parts.push(`NOT (${alias}direction = 'inbound' AND ${alias}status IN ('ringing', 'missed', 'declined'))`);
+  return `AND ${parts.join(' AND ')}`;
+};
 const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
 const sqlNow = () => sqlTime(new Date());
 
@@ -106,6 +117,107 @@ function start(prospectId, { tzOffset = null } = {}) {
         ? 'VOIP.SO SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
         : null),
   };
+}
+
+// ---- inbound calls -------------------------------------------------------------------------
+// The browser softphone is registered and listening; the provider delivers an INVITE and the
+// client tells us who is calling. Two things have to happen, atomically: resolve the person,
+// and put a row in the ledger that still makes sense if the tab dies mid-ring.
+//
+// A withheld or unparseable caller ID is refused rather than stored as junk — an inbound log
+// full of "Unknown" rows is worse than an honest gap, and the UI keeps ringing either way.
+function inboundCallerId(raw) {
+  const s = telephony.cleanStr(raw);
+  if (!s) return '';
+  const normalized = telephony.normalizePhone(s);
+  if (normalized) return normalized;
+  // A SIP address is a legitimate caller identity even though it has no digits.
+  return /^(sip|tel):/i.test(s) || s.includes('@') ? s : '';
+}
+
+// Only ever true for a placeholder row this app created when a stranger rang. It is not a
+// real lead: it exists so the agent can see who is calling, and may be deleted again.
+const isProvisionalLead = (p) => !!(p && p.extra && p.extra.provisional);
+
+function startInbound({ callerPhone = '', prospectId = null } = {}) {
+  const callerId = inboundCallerId(callerPhone);
+  if (!callerId) throw ApiError.badRequest('A caller number is required to log an inbound call.');
+
+  // The same ring can be delivered twice (a forked INVITE, a retry after a dropped socket).
+  // An unanswered inbound row for this caller inside the window *is* that ring.
+  const open = calls.findOpenInbound(callerId);
+  if (open) {
+    const existing = prospects.get(open.prospect_id);
+    return {
+      ok: true, reused: true, callId: open.id, call: open, direction: 'inbound', callerId,
+      matched: !!existing && !isProvisionalLead(existing),
+      provisional: isProvisionalLead(existing),
+      prospect: existing ? prospectService.detail(existing.id) : null,
+    };
+  }
+
+  const dry = settings.getBool('dry_run');
+  const resolved = db.transaction(() => {
+    let p = null;
+    let matched = false;
+    let provisional = false;
+    if (prospectId) {
+      p = prospects.get(prospectId);
+      if (!p) throw ApiError.notFound('Prospect not found');
+      matched = true;
+    } else {
+      p = prospects.findByPhone(callerId);
+      matched = !!p;
+    }
+    // Nobody on file: a placeholder lead, so the modal can show a real number and answering
+    // can become a real prospect in one click instead of the agent retyping the number.
+    if (!p) {
+      p = prospects.insert({ name: callerId, phone: callerId, stage: 'new', extra: { inbound: true, provisional: true } });
+      provisional = true;
+    }
+    return { call: calls.createInbound({ prospectId: p.id, callerId, status: 'ringing', dryRun: dry }), prospectId: p.id, matched, provisional };
+  })();
+
+  return {
+    ok: true, reused: false,
+    callId: resolved.call.id, call: resolved.call, direction: 'inbound', callerId,
+    matched: resolved.matched, provisional: resolved.provisional,
+    prospect: prospectService.detail(resolved.prospectId),
+  };
+}
+
+// Terminal state for a ring that was never picked up: the prospect hung up (CANCEL), or the
+// agent pressed Decline. Idempotent, because a CANCEL and a declined button can race.
+function markInboundMissed(callId, { reason = 'missed', duration_sec = 0 } = {}) {
+  const id = Number(callId);
+  const call = Number.isInteger(id) && id > 0 ? calls.get(id) : null;
+  if (!call) {
+    // A ring that was already swept has no row left to close — its placeholder lead and this
+    // ledger row went together. A far-end CANCEL and a Decline click can both land, so the
+    // replay has to read as "nothing left to do" instead of erroring a UI that is already
+    // tearing the call down. A bad id is still a 404.
+    if (Number.isInteger(id) && id > 0) return { ok: true, alreadyResolved: true, cleanedUp: true, call: null, missing: true };
+    throw ApiError.notFound('Call not found');
+  }
+  if (call.direction !== 'inbound') throw ApiError.badRequest('Only an inbound call can be missed.');
+  if (call.status !== 'ringing') return { ok: true, alreadyResolved: true, cleanedUp: false, call };
+
+  const lead = prospects.get(call.prospect_id);
+  // Sweeping a placeholder lead is only safe while it is still *only* a placeholder: this
+  // ring, and nothing else. One note or one earlier call and it is somebody's real record,
+  // which must survive a missed call years later.
+  const history = calls.listByProspect(call.prospect_id, 5);
+  const hasNotes = lead ? notes.listByProspect(call.prospect_id).length > 0 : false;
+  const cleanedUp = isProvisionalLead(lead) && history.length === 1 && !hasNotes;
+
+  const status = reason === 'declined' ? 'declined' : 'missed';
+  const updated = db.transaction(() => {
+    const row = calls.patch(call.id, { status, ended_at: sqlNow(), duration_sec: Math.max(0, Math.round(duration_sec || 0)) });
+    if (cleanedUp) prospects.remove(call.prospect_id);
+    return row;
+  })();
+
+  return { ok: true, alreadyResolved: false, cleanedUp, status, call: updated };
 }
 
 const OUTCOME_LABEL = {
@@ -205,5 +317,7 @@ function suggestFollowUp(outcome, from = new Date()) {
 
 module.exports = {
   statsFilter, sqlTime, sqlNow, getStartOfDay, todaysDials,
-  start, classify, voicemailDrop, discard, remove, suggestFollowUp, applyOutcomeStage, OUTCOME_LABEL, FOLLOW_UP_DAYS, FOLLOW_UP_TIME,
+  start, startInbound, markInboundMissed, inboundCallerId, isProvisionalLead,
+  classify, voicemailDrop, discard, remove, suggestFollowUp, applyOutcomeStage,
+  OUTCOME_LABEL, FOLLOW_UP_DAYS, FOLLOW_UP_TIME,
 };

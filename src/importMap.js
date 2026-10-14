@@ -101,9 +101,16 @@ export const IMPORT_TARGETS = [
   },
   {
     id: 'name', label: 'Full name', priority: 10,
+    primaryAliases: ['bestpublicdecisionmaker', 'publicdecisionmaker'],
     aliases: ['bestpublicdecisionmaker', 'publicdecisionmaker', 'name', 'fullname', 'fuldenavn', 'ownername', 'ownernames', 'owner', 'owners', 'contactname', 'kontaktperson', 'kunde', 'kundenavn', 'navn', 'ejer', 'ejere', 'ejernavn', 'indehaver', 'indehavere', 'beslutningstager', 'decisionmaker', 'decisionmakers'],
     re: /best[\s_-]*public[\s_-]*decision[\s_-]*maker|name|navn|owner|ejer|indehaver|kontaktperson|kunde|decision[\s_-]*maker/i,
     loose: /(best[\s_-]*public[\s_-]*decision[\s_-]*maker|navn|name|owner|ejer|indehaver|decision[\s_-]*maker)/i,
+  },
+  {
+    id: 'pronunciation', label: 'Pronunciation Guide', priority: 11,
+    aliases: ['pronunciation', 'pronounce', 'udtale', 'fonetisk', 'phonetic', 'phonetics'],
+    re: /pronunciat|udtale|phonetic/i,
+    loose: /(pronunciat|udtale|phonetic)/i,
   },
 ];
 

@@ -14,9 +14,9 @@ const dncCount = () => db.prepare('SELECT COUNT(*) c FROM prospects WHERE dnc = 
 
 function insert(p) {
   const info = db.prepare(
-    'INSERT INTO prospects(name,phone,email,company,title,location,website,extra,stage) VALUES(?,?,?,?,?,?,?,?,?)'
+    'INSERT INTO prospects(name,phone,email,company,title,location,website,extra,stage,pronunciation) VALUES(?,?,?,?,?,?,?,?,?,?)'
   ).run(p.name || '', p.phone || '', p.email || '', p.company || '', p.title || '', p.location || '', p.website || '',
-    JSON.stringify(p.extra || {}), STAGES.includes(p.stage) ? p.stage : 'new');
+    JSON.stringify(p.extra || {}), STAGES.includes(p.stage) ? p.stage : 'new', p.pronunciation || '');
   return get(info.lastInsertRowid);
 }
 
@@ -28,7 +28,7 @@ const bindable = (v) => (typeof v === 'boolean' ? (v ? 1 : 0) : v);
 // instead of being interpolated from whatever a caller passes.
 const COLUMNS = new Set([
   'name', 'phone', 'email', 'company', 'title', 'location', 'website', 'extra', 'stage',
-  'dnc', 'follow_up_at', 'call_count', 'last_called_at', 'last_outcome',
+  'dnc', 'follow_up_at', 'call_count', 'last_called_at', 'last_outcome', 'pronunciation',
 ]);
 
 function update(id, patch) {

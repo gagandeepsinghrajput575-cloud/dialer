@@ -16,6 +16,7 @@ router.post('/bulk', validate(s.bulkImport), c.bulk);
 // covers them exactly like every other mutation.
 router.post('/bulk-stage', validate(s.bulkStage), c.bulkStage);
 router.post('/bulk-delete', validate(s.bulkDelete), c.bulkDelete);
+router.post('/pronunciations/batch', c.batchPronunciations);
 router.post('/clear', c.clearAll);
 
 router.get('/:id', c.detail);

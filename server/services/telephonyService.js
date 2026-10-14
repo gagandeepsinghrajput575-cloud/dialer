@@ -341,6 +341,123 @@ function numberKind(phone) {
   return { ...match, national: `${head} ${national.slice(2, 4)} ${national.slice(4, 6)} ${national.slice(6, 8)}` };
 }
 
+// ---- FlyNumber Hybrid VoIP Architecture ----
+// FlyNumber handles inbound callbacks at $0/min via native SIP (sip.flynumber.com)
+// while Telnyx handles outbound dialing stamped with the verified Copenhagen DID.
+const FLYNUMBER_SIP_DEFAULT = 'sip.flynumber.com';
+const COPENHAGEN_DEFAULT_DID = '+4532331610';
+
+function flynumberConfig() {
+  const did = normalizePhone(settings.get('flynumber_did') || COPENHAGEN_DEFAULT_DID) || COPENHAGEN_DEFAULT_DID;
+  const status = String(settings.get('flynumber_status') || 'pending').toLowerCase();
+  const sipHost = String(settings.get('flynumber_sip_server') || '').trim() || FLYNUMBER_SIP_DEFAULT;
+  const sipUser = String(settings.get('flynumber_sip_user') || '').trim();
+  const hasPassword = !!String(settings.get('flynumber_sip_password') || '').trim();
+  const linphoneConfigured = settings.getBool('flynumber_linphone_configured');
+  const telnyxVerified = settings.getBool('telnyx_caller_id_verified');
+  const inboundMode = String(settings.get('inbound_routing_mode') || 'webrtc');
+  const isWebRtcMode = inboundMode === 'webrtc' || String(settings.get('telephony_mode') || '').toLowerCase() === 'webrtc';
+
+  const telnyxUser = String(settings.get('telnyx_sip_user') || '').trim();
+  const telnyxHost = sipServer();
+  const webrtcForwardingUri = telnyxUser ? `sip:${telnyxUser}@${telnyxHost}` : '';
+  const linphoneSipAddress = sipUser ? `sip:${sipUser}@${sipHost}` : '';
+
+  const bridgeSteps = isWebRtcMode ? [
+    {
+      step: 1,
+      id: 'activation',
+      title: 'FlyNumber DID Activation',
+      description: 'FlyNumber compliance review verifies B2B profile; status transitions from Pending to Active',
+      completed: status === 'active',
+      status: status === 'active' ? 'active' : 'pending',
+    },
+    {
+      step: 2,
+      id: 'forwarding',
+      title: 'Route FlyNumber to Built-in App',
+      description: webrtcForwardingUri
+        ? `In FlyNumber, set Call Forwarding on ${did} to SIP URI: ${webrtcForwardingUri}`
+        : `Enter your Telnyx SIP username above to generate your FlyNumber SIP forwarding address`,
+      completed: linphoneConfigured || (!!telnyxUser && !!settings.get('telnyx_sip_password')),
+      status: (linphoneConfigured || (telnyxUser && settings.get('telnyx_sip_password'))) ? 'configured' : 'waiting_credentials',
+    },
+    {
+      step: 3,
+      id: 'telnyx_verify',
+      title: 'Telnyx Verification Call & PIN',
+      description: `Telnyx calls ${did}, rings directly inside this browser tab, automated voice speaks 6-digit PIN`,
+      completed: telnyxVerified,
+      status: telnyxVerified ? 'verified' : 'pending_call',
+    },
+    {
+      step: 4,
+      id: 'caller_id_override',
+      title: 'Set Caller ID Override on Telnyx',
+      description: `Use verified ${did} as outbound caller ID for all Danish cold-calling campaigns`,
+      completed: telnyxVerified && normalizePhone(settings.get('caller_id')) === did,
+      status: (telnyxVerified && normalizePhone(settings.get('caller_id')) === did) ? 'active' : 'pending_override',
+    },
+  ] : [
+    {
+      step: 1,
+      id: 'activation',
+      title: 'FlyNumber DID Activation',
+      description: 'FlyNumber compliance review verifies B2B profile; status transitions from Pending to Active',
+      completed: status === 'active',
+      status: status === 'active' ? 'active' : 'pending',
+    },
+    {
+      step: 2,
+      id: 'linphone',
+      title: 'Connect Linphone to FlyNumber SIP',
+      description: `Input server (${sipHost}), username, and password into Linphone softphone`,
+      completed: linphoneConfigured && hasPassword,
+      status: (linphoneConfigured && hasPassword) ? 'configured' : 'waiting_credentials',
+    },
+    {
+      step: 3,
+      id: 'telnyx_verify',
+      title: 'Telnyx Verification Call & PIN',
+      description: `Telnyx calls ${did}, rings your Linphone for free, automated voice speaks 6-digit PIN`,
+      completed: telnyxVerified,
+      status: telnyxVerified ? 'verified' : 'pending_call',
+    },
+    {
+      step: 4,
+      id: 'caller_id_override',
+      title: 'Set Caller ID Override on Telnyx',
+      description: `Use verified ${did} as outbound caller ID for all Danish cold-calling campaigns`,
+      completed: telnyxVerified && normalizePhone(settings.get('caller_id')) === did,
+      status: (telnyxVerified && normalizePhone(settings.get('caller_id')) === did) ? 'active' : 'pending_override',
+    },
+  ];
+
+  const completedCount = bridgeSteps.filter((s) => s.completed).length;
+
+  return {
+    did,
+    status,
+    sipHost,
+    sipUser,
+    hasPassword,
+    linphoneConfigured,
+    telnyxVerified,
+    inboundMode,
+    isWebRtcMode,
+    webrtcForwardingUri,
+    linphoneSipAddress,
+    bridgeSteps,
+    completedCount,
+    totalSteps: bridgeSteps.length,
+    allCompleted: completedCount === bridgeSteps.length,
+    monthlyCost: '$2.95',
+    inboundCost: '$0.00 / min (Free Unlimited Inbound SIP)',
+    carrier: 'FlyNumber (Inbound) + Telnyx (Outbound)',
+    reputation: '180.dk Clean · Zero Spam Reports',
+  };
+}
+
 module.exports = {
   cleanStr, normalizePhone, protocol, mode, buildDialUri, buildDialUriFull, sipConfigured,
   numberKind, DK_SPECIAL_RANGES,
@@ -348,4 +465,5 @@ module.exports = {
   partsIn, tzOffsetMinutes, zonedTimeToUtc, zonedDate, MIN_DIGITS, MAX_POOL,
   webrtcWsUrl, webrtcServer, buildWebRtcUri, webrtcReadiness, webrtcSession,
   sipServer, TELNYX_SIP_DOMAIN, TELNYX_WEBRTC_WS,
+  flynumberConfig, FLYNUMBER_SIP_DEFAULT, COPENHAGEN_DEFAULT_DID,
 };

@@ -60,6 +60,7 @@ export const api = {
   parseFile: (file) => { const f = new FormData(); f.append('file', file); return req('POST', '/api/import/parse', f, true); },
   aiAnalyzeLead: (b) => req('POST', '/api/import/ai-analyze', b),
   bulk: (b) => req('POST', '/api/prospects/bulk', b),
+  batchPronounce: (b) => req('POST', '/api/prospects/pronunciations/batch', b || {}),
   // Multi-select actions from the prospects table. Both are atomic server-side, and both
   // answer with what was actually changed rather than what was asked for.
   bulkStage: (ids, stage) => req('POST', '/api/prospects/bulk-stage', { ids, stage }),
@@ -168,4 +169,8 @@ export const api = {
   recordingAiChat: (callId, body) => req('POST', `/api/recordings/${callId}/ai-chat`, body),
   getRecordingScript: () => req('GET', '/api/recordings/script'),
   updateRecordingScript: (script) => req('PUT', '/api/recordings/script', { script }),
+
+  // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
+  flynumber: () => req('GET', '/api/telephony/flynumber'),
+  saveFlynumber: (data) => req('POST', '/api/telephony/flynumber', data),
 };

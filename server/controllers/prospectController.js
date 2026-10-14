@@ -19,6 +19,7 @@ const remove = asyncHandler(async (req, res) => { prospectService.remove(req.par
 const clearAll = asyncHandler(async (req, res) => { prospectService.clearAll(); res.json({ ok: true }); });
 
 const bulk = asyncHandler(async (req, res) => res.json(await prospectService.bulkImport(req.body)));
+const batchPronunciations = asyncHandler(async (req, res) => res.json(await prospectService.bulkPronunciations(req.body)));
 
 // Bulk management from the prospects table. Both are atomic in the service layer, and both
 // report what they actually changed so the UI never claims more than it did.
@@ -52,4 +53,4 @@ const exportData = asyncHandler(async (req, res) => {
   res.send(csv);
 });
 
-module.exports = { list, detail, create, patch, remove, clearAll, bulk, bulkStage, bulkDelete, search, queue, followUps, demo, exportData };
+module.exports = { list, detail, create, patch, remove, clearAll, bulk, bulkStage, bulkDelete, batchPronunciations, search, queue, followUps, demo, exportData };

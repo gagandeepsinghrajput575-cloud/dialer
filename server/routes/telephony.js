@@ -20,4 +20,8 @@ router.get('/voicemail-greeting/file', c.greetingFile);
 router.post('/prospects/:id/follow-up', validate(s.followUpSchedule), c.scheduleFollowUp);
 router.post('/prospects/:id/follow-up-email', validate(s.emailRender), c.followUpEmail);
 
+// FlyNumber Copenhagen Inbound DID & Verification Bridge
+router.get('/flynumber', c.flynumber);
+router.post('/flynumber', c.updateFlynumber);
+
 module.exports = router;

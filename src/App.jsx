@@ -1,6 +1,6 @@
 import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { LayoutDashboard, PhoneCall, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical, Headphones } from 'lucide-react';
+import { LayoutDashboard, PhoneCall, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical, Headphones, PanelLeftClose, PanelLeft } from 'lucide-react';
 import { useStore } from './store.jsx';
 import { softphoneLabel } from './utils.js';
 import Dashboard from './pages/Dashboard.jsx';
@@ -39,6 +39,18 @@ export default function App() {
 
 function Shell() {
   const { view, setView, settings, stats, prospects } = useStore();
+  const [collapsed, setCollapsed] = React.useState(() => {
+    try { return localStorage.getItem('pulse_sidebar_collapsed') === '1'; } catch { return false; }
+  });
+
+  const toggleSidebar = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('pulse_sidebar_collapsed', next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
   // Object.hasOwn, not PAGES[view]: a hash like "#constructor" or "#__proto__" resolves
   // through the prototype chain to a truthy non-component, and React then renders a blank
   // page (verified: 0 nodes for "#constructor", 69 for a normal route).
@@ -47,18 +59,39 @@ function Shell() {
   const today = stats?.today;
 
   return (
-    <div className="shell">
+    <div className={`shell ${collapsed ? 'collapsed-sidebar' : ''}`}>
       <div className="aurora" aria-hidden>
         <span className="blob b1" /><span className="blob b2" /><span className="blob b3" />
       </div>
 
-      <aside className="sidebar">
+      <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`} aria-label="Main Navigation">
         <div className="brand">
-          <div className="logo"><Activity size={20} strokeWidth={2.6} /></div>
-          <div>
-            <div className="brand-name">Pulse</div>
-            <div className="brand-sub">Dialer + CRM</div>
+          <div
+            className="logo"
+            onClick={toggleSidebar}
+            style={{ cursor: 'pointer' }}
+            title={collapsed ? "Expand sidebar menu" : "Collapse sidebar menu"}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleSidebar()}
+          >
+            <Activity size={20} strokeWidth={2.6} />
           </div>
+          {!collapsed && (
+            <div className="brand-info">
+              <div className="brand-name">Pulse</div>
+              <div className="brand-sub">Dialer + CRM</div>
+            </div>
+          )}
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            onClick={toggleSidebar}
+            title={collapsed ? "Expand sidebar menu" : "Collapse sidebar menu"}
+            aria-label={collapsed ? "Expand sidebar menu" : "Collapse sidebar menu"}
+          >
+            {collapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
+          </button>
         </div>
 
         <nav className="nav">
@@ -66,29 +99,36 @@ function Shell() {
             const Icon = n.icon;
             const active = view === n.id;
             return (
-              <button key={n.id} className={`nav-item ${active ? 'active' : ''}`} onClick={() => setView(n.id)}>
+              <button
+                key={n.id}
+                className={`nav-item ${active ? 'active' : ''}`}
+                onClick={() => setView(n.id)}
+                title={collapsed ? `${n.label}${n.id === 'prospects' ? ` (${prospects.length})` : ''}` : undefined}
+              >
                 {active && <motion.span layoutId="navpill" className="nav-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
                 <Icon size={18} />
-                <span>{n.label}</span>
+                {!collapsed && <span>{n.label}</span>}
                 {n.id === 'prospects' && <em className="count">{prospects.length}</em>}
               </button>
             );
           })}
         </nav>
 
-        <div className="side-foot">
-          {today && (
-            <div className="mini-goal">
-              <div className="mini-goal-top"><span>Today</span><b>{today.dials}<small>/{stats.goal || '–'}</small></b></div>
-              <div className="bar"><motion.i initial={{ width: 0 }} animate={{ width: `${Math.min(100, stats.goal ? (today.dials / stats.goal) * 100 : 0)}%` }} transition={{ duration: 0.8, ease: 'easeOut' }} /></div>
-              <span className="mini-goal-sub">dials toward your goal</span>
+        {!collapsed && (
+          <div className="side-foot">
+            {today && (
+              <div className="mini-goal">
+                <div className="mini-goal-top"><span>Today</span><b>{today.dials}<small>/{stats.goal || '–'}</small></b></div>
+                <div className="bar"><motion.i initial={{ width: 0 }} animate={{ width: `${Math.min(100, stats.goal ? (today.dials / stats.goal) * 100 : 0)}%` }} transition={{ duration: 0.8, ease: 'easeOut' }} /></div>
+                <span className="mini-goal-sub">dials toward your goal</span>
+              </div>
+            )}
+            <div className={`mode-chip ${dry ? 'dry' : 'live'}`} onClick={() => setView('settings')} title="Change in Settings">
+              <span className="dot" />
+              {dry ? <><FlaskConical size={13} /> Test mode: simulated calls</> : <><Headphones size={13} /> Live: {softphoneLabel(settings?.telephony_mode)} dials directly</>}
             </div>
-          )}
-          <div className={`mode-chip ${dry ? 'dry' : 'live'}`} onClick={() => setView('settings')} title="Change in Settings">
-            <span className="dot" />
-            {dry ? <><FlaskConical size={13} /> Test mode: simulated calls</> : <><Headphones size={13} /> Live: {softphoneLabel(settings?.telephony_mode)} dials directly</>}
           </div>
-        </div>
+        )}
       </aside>
 
       <main className="main">

@@ -2,12 +2,13 @@ import React, { useId, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   Phone, Mail, MapPin, Globe, Building2, Copy, Check, CalendarClock, ShieldAlert, PhoneCall, Clock,
-  ChevronDown, ExternalLink, ShieldX,
+  ChevronDown, ExternalLink, ShieldX, Volume2,
 } from 'lucide-react';
 import { useStore } from '../store.jsx';
 import { Avatar, Editable, StagePicker } from './ui.jsx';
 import { outcomeMeta, phoneIssue, emailIssue, timeAgo } from '../utils.js';
 import { clip, extraInsights, isUrlValue } from '../registry.js';
+import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
 import EmailComposer from './EmailComposer.jsx';
 
 function CopyBtn({ text }) {
@@ -137,38 +138,54 @@ export default function ProspectCard({ p, big = false, onSent }) {
     extraData = p.extra;
   }
   const inferredName = p.name || extraData['Best Public Decision-Maker'] || extraData['Owner Name(s)'] || extraData['Kontaktperson'] || extraData['Navn'] || '';
+  const displayName = p.name || inferredName;
+  const pronunciation = p.pronunciation || (displayName ? getDanishPronunciation(displayName) : '');
 
   return (
     <motion.div className={`pcard ${big ? 'big' : ''}`} key={p.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
-      <div className="pcard-head">
-        <Avatar name={p.name || inferredName || p.company} size={big ? 72 : 56} seed={p.id + (p.name || inferredName || '')} />
-        <div className="pcard-title">
-          <div className="row gap center-row" style={{ alignItems: 'baseline' }}>
-            <Editable
-              className="h-name"
-              value={p.name}
-              placeholder={inferredName ? `Name (Found: ${inferredName})` : "Name"}
-              onSave={save('name')}
-            />
-            {(!p.name && inferredName) && (
-              <button
-                type="button"
-                className="btn xs link-btn"
-                style={{ fontSize: '11px', padding: '1px 6px', height: '20px', color: 'var(--cyan, #38bdf8)' }}
-                title={`Click to save "${inferredName}" as name`}
-                onClick={() => save('name')(inferredName)}
-              >
-                Use "{inferredName}"
-              </button>
-            )}
-          </div>
-          <div className="sub-line">
-            <Editable className="h-sub" value={p.title} placeholder="Job title" onSave={save('title')} />
-            <span className="dot-sep">·</span>
-            <Editable className="h-sub" value={p.company} placeholder="Company" onSave={save('company')} />
+      <div className="pcard-head" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 12 }}>
+        <div className="row gap" style={{ alignItems: 'center' }}>
+          <Avatar name={p.name || inferredName || p.company} size={big ? 64 : 52} seed={p.id + (p.name || inferredName || '')} />
+          <div className="pcard-title" style={{ flex: 1, minWidth: 0 }}>
+            <div className="row gap sm center-row" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+              <Editable
+                className="h-name"
+                value={p.name}
+                placeholder={inferredName ? `Name (Found: ${inferredName})` : "Name"}
+                onSave={save('name')}
+              />
+              {pronunciation && (
+                <button
+                  type="button"
+                  className="pronounce-chip sm"
+                  onClick={() => speakPronunciation(displayName, pronunciation)}
+                  title="Click to hear Danish pronunciation in English phonetics"
+                >
+                  <Volume2 size={11} /> {pronunciation}
+                </button>
+              )}
+              {(!p.name && inferredName) && (
+                <button
+                  type="button"
+                  className="btn xs link-btn"
+                  style={{ fontSize: '11px', padding: '1px 6px', height: '20px', color: 'var(--cyan, #38bdf8)' }}
+                  title={`Click to save "${inferredName}" as name`}
+                  onClick={() => save('name')(inferredName)}
+                >
+                  Use "{inferredName}"
+                </button>
+              )}
+            </div>
+            <div className="sub-line">
+              <Editable className="h-sub" value={p.title} placeholder="Job title" onSave={save('title')} />
+              <span className="dot-sep">·</span>
+              <Editable className="h-sub" value={p.company} placeholder="Company" onSave={save('company')} />
+            </div>
           </div>
         </div>
-        <StagePicker value={p.stage} onChange={save('stage')} />
+        <div>
+          <StagePicker value={p.stage} onChange={save('stage')} />
+        </div>
       </div>
 
       <div className="info-grid">

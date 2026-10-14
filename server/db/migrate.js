@@ -96,7 +96,27 @@ const MIGRATIONS = [
   { version: 10, name: 'backfill-prospect-company-from-extra', up: (d) => backfillProspectCompanyFromExtra(d) },
   // AI Recording coaching sessions and persistent multi-turn chat message history.
   { version: 11, name: 'recording-ai-chats', up: (d) => d.exec(RECORDING_CHATS_SQL) },
+  // English phonetic pronunciation guide for non-native Danish callers.
+  {
+    version: 12,
+    name: 'prospects-pronunciation',
+    up: (d) => {
+      addColumn('prospects', 'pronunciation', "TEXT NOT NULL DEFAULT ''");
+      backfillProspectPronunciations(d);
+    },
+  },
 ];
+
+function backfillProspectPronunciations(d) {
+  const danishPhonetics = require('../services/danishPhonetics');
+  const rows = d.prepare("SELECT id, name FROM prospects WHERE name != '' AND (pronunciation = '' OR pronunciation IS NULL)").all();
+  if (!rows.length) return;
+  const update = d.prepare("UPDATE prospects SET pronunciation = ? WHERE id = ?");
+  for (const r of rows) {
+    const p = danishPhonetics.getPronunciation(r.name);
+    if (p) update.run(p, r.id);
+  }
+}
 
 function extractMapsInfo(url) {
   if (!url) return null;

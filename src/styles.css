@@ -55,7 +55,8 @@ kbd { font-family: inherit; font-size: 11px; padding: 1px 6px; border-radius: 6p
 .link-btn:hover { color: var(--text); }
 
 /* shell */
-.shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100%; position: relative; }
+.shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100%; position: relative; transition: grid-template-columns 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+.shell.collapsed-sidebar { grid-template-columns: 72px minmax(0, 1fr); }
 .aurora { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
 .blob { position: absolute; border-radius: 50%; filter: blur(110px); opacity: 0.38; }
 .b1 { width: 520px; height: 520px; background: #6d28d9; top: -160px; left: 160px; animation: float1 22s ease-in-out infinite; }
@@ -68,11 +69,62 @@ kbd { font-family: inherit; font-size: 11px; padding: 1px 6px; border-radius: 6p
   position: sticky; top: 0; height: 100vh; z-index: 5; padding: 22px 14px 16px;
   display: flex; flex-direction: column; gap: 22px;
   background: rgba(10, 12, 22, 0.72); backdrop-filter: blur(20px); border-right: 1px solid var(--line);
+  transition: padding 0.2s ease;
+}
+.sidebar.collapsed {
+  padding: 20px 10px 16px;
+  align-items: center;
+}
+.sidebar.collapsed .brand {
+  padding: 0;
+  justify-content: center;
+  width: 100%;
+}
+.sidebar.collapsed .sidebar-toggle-btn {
+  display: none;
+}
+.sidebar.collapsed .nav {
+  width: 100%;
+  align-items: center;
+}
+.sidebar.collapsed .nav-item {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 12px;
+}
+.sidebar.collapsed .nav-item .count {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 1px 4px;
+  font-size: 9px;
+  min-width: 14px;
+  text-align: center;
 }
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 8px; }
+.brand-info { display: flex; flex-direction: column; }
 .logo { width: 38px; height: 38px; border-radius: 12px; background: var(--grad); display: grid; place-items: center; color: #fff; box-shadow: 0 8px 24px rgba(139, 92, 246, 0.45); }
 .brand-name { font-weight: 800; font-size: 18px; letter-spacing: -0.02em; line-height: 1.1; }
 .brand-sub { font-size: 11.5px; color: var(--muted); }
+.sidebar-toggle-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  transition: all 0.15s ease;
+}
+.sidebar-toggle-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+}
 .nav { display: flex; flex-direction: column; gap: 3px; }
 .nav-item { position: relative; display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 12px; color: var(--muted); font-weight: 500; transition: color 0.15s; text-align: left; }
 .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.04); }
@@ -460,8 +512,10 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .eyebrow { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); font-weight: 700; }
 .callbar.active .eyebrow { color: #6ee7b7; }
 .callbar.dialing .eyebrow { color: #fcd34d; }
-.callnum { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.callwho { color: var(--muted); }
+.callwho { color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.callwho-name { font-weight: 700; color: var(--text); font-size: 16px; }
+.callwho-company { font-size: 13px; color: #a5b4fc; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+.callwho-phone { font-size: 13px; color: var(--muted); }
 .callctl { display: flex; align-items: center; gap: 18px; }
 .callctl .row.gap { gap: 22px; }
 .timer { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted); min-width: 78px; text-align: right; }
@@ -496,6 +550,18 @@ input[type='date'].inline-edit { color-scheme: dark; }
 .inflight-txt { letter-spacing: 0.01em; }
 .inflight-uri { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 8px; background: rgba(0,0,0,0.35); border: 1px solid var(--line); color: var(--text); }
 .inflight .btn.xs { margin-left: auto; }
+.inflight-target-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 99px;
+  font-size: 12.5px;
+}
+.inflight-target-name { font-weight: 700; color: #fff; }
+.inflight-target-company { font-size: 11px; color: #c4b5fd; background: rgba(255, 255, 255, 0.09); padding: 1px 7px; border-radius: 6px; font-weight: 600; }
 .call-actions { margin-top: 10px; flex-wrap: wrap; }
 .softphone-link { margin-left: auto; }
 .softphone-link:hover { color: #a5b4fc; }
@@ -623,6 +689,13 @@ input[type='date'].inline-edit { color-scheme: dark; }
   padding: 3px 10px;
   border-radius: 99px;
   border: 1px solid rgba(139, 92, 246, 0.3);
+}
+.banner-name-row .pronounce-chip {
+  font-size: 13px;
+  padding: 4px 12px;
+  gap: 6px;
+  background: rgba(34, 211, 238, 0.15);
+  border: 1px solid rgba(34, 211, 238, 0.4);
 }
 .banner-contacts {
   display: flex;
@@ -2222,4 +2295,200 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
     max-height: none;
   }
 }
+
+/* ---- FlyNumber Hybrid VoIP Architecture & Inbound Hub ---- */
+.flynumber-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.flynumber-badges {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cph-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+}
+
+.cph-pill.clean {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #4ade80;
+}
+
+.cph-pill.pending {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+}
+
+.rate-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+}
+
+.bridge-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  margin-bottom: 20px;
+}
+
+.bridge-step-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.2s ease;
+}
+
+.bridge-step-card:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(56, 189, 248, 0.25);
+}
+
+.bridge-step-card.completed {
+  border-color: rgba(34, 197, 94, 0.25);
+  background: rgba(34, 197, 94, 0.03);
+}
+
+.bridge-step-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.bridge-step-card.completed .bridge-step-num {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.bridge-step-body {
+  flex: 1;
+}
+
+.bridge-step-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  color: #f1f5f9;
+  margin-bottom: 4px;
+}
+
+.bridge-step-desc {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.linphone-quick-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px dashed rgba(56, 189, 248, 0.3);
+  margin-top: 10px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #38bdf8;
+}
+
+/* Phonetic Pronunciation Chips & Badges */
+.pronounce-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  color: #67e8f9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease-in-out;
+  text-decoration: none;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+
+.pronounce-chip:hover {
+  background: rgba(34, 211, 238, 0.22);
+  border-color: rgba(34, 211, 238, 0.65);
+  color: #a5f3fc;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.25);
+  transform: translateY(-0.5px);
+}
+
+.pronounce-chip:active {
+  transform: scale(0.97);
+}
+
+.pronounce-chip.sm {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  gap: 4px;
+}
+
+.pronounce-badge-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.18), rgba(34, 211, 238, 0.18));
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  color: #c084fc;
+  font-size: 11.5px;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(168, 85, 247, 0.15);
+}
+
+
 

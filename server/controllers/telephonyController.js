@@ -54,4 +54,51 @@ const scheduleFollowUp = asyncHandler(async (req, res) => {
   res.json({ ok: true, prospect: followUpService.schedule(req.params.id, req.body.at) });
 });
 
-module.exports = { businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting, greetingFile, followUpEmail, scheduleFollowUp };
+// GET /api/telephony/flynumber
+const flynumber = asyncHandler(async (req, res) => res.json(telephony.flynumberConfig()));
+
+// POST /api/telephony/flynumber
+const updateFlynumber = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  if (body.flynumber_status !== undefined) {
+    const s = String(body.flynumber_status).toLowerCase();
+    if (!['pending', 'active'].includes(s)) throw ApiError.badRequest('Status must be "pending" or "active"');
+    settings.set('flynumber_status', s);
+  }
+  if (body.flynumber_did !== undefined) {
+    const cleanDid = telephony.normalizePhone(body.flynumber_did);
+    if (!cleanDid) throw ApiError.badRequest('Invalid Copenhagen DID phone number');
+    settings.set('flynumber_did', cleanDid);
+  }
+  if (body.flynumber_sip_server !== undefined) {
+    settings.set('flynumber_sip_server', String(body.flynumber_sip_server).trim());
+  }
+  if (body.flynumber_sip_user !== undefined) {
+    settings.set('flynumber_sip_user', String(body.flynumber_sip_user).trim());
+  }
+  if (body.flynumber_sip_password) {
+    settings.set('flynumber_sip_password', String(body.flynumber_sip_password).trim());
+  }
+  if (body.flynumber_linphone_configured !== undefined) {
+    settings.set('flynumber_linphone_configured', body.flynumber_linphone_configured ? '1' : '0');
+  }
+  if (body.telnyx_caller_id_verified !== undefined) {
+    const verified = body.telnyx_caller_id_verified ? '1' : '0';
+    settings.set('telnyx_caller_id_verified', verified);
+    if (verified === '1') {
+      const did = telephony.normalizePhone(settings.get('flynumber_did') || '+4532331610');
+      if (!settings.get('caller_id') || body.set_as_caller_id) {
+        settings.set('caller_id', did);
+      }
+    }
+  }
+  if (body.inbound_routing_mode !== undefined) {
+    settings.set('inbound_routing_mode', String(body.inbound_routing_mode));
+  }
+  res.json({ ok: true, config: telephony.flynumberConfig() });
+});
+
+module.exports = {
+  businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting,
+  greetingFile, followUpEmail, scheduleFollowUp, flynumber, updateFlynumber
+};

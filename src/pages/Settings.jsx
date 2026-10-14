@@ -3,10 +3,12 @@ import { motion } from 'framer-motion';
 import {
   Save, Loader2, Trash2, ShieldCheck, FlaskConical, PhoneCall, Target,
   Headphones, KeyRound, Radio, Globe, PlayCircle, DatabaseBackup, Download, FileJson, FileSpreadsheet,
-  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle, Inbox, ServerOff, Sparkles
+  Mail, Plug, Video, Mic, MicOff, Volume2, AlertTriangle, Inbox, ServerOff, Sparkles,
+  PhoneIncoming, Building2, Copy, Bell
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
+import { useSoftphone } from '../softphone.jsx';
 import { Switch } from '../components/ui.jsx';
 import { dispatchDialUri, softphoneLabel } from '../utils.js';
 import { listAudioDevices } from '../useWebRtc.js';
@@ -102,6 +104,7 @@ function MicTester({ deviceId, onGranted }) {
 
 export default function SettingsPage() {
   const { settings, refreshSettings, toast, refreshProspects, refreshStats, openOutbox } = useStore();
+  const softphoneEngine = useSoftphone();
   const [f, setF] = useState(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -114,7 +117,7 @@ export default function SettingsPage() {
   const [testingSmtp, setTestingSmtp] = useState(false);
 
   useEffect(() => {
-    if (settings && !f) setF({ ...settings, telnyx_sip_password: '', telnyx_api_key: '', dry_run: settings.dry_run === '1' });
+    if (settings && !f) setF({ ...settings, telnyx_sip_password: '', telnyx_api_key: '', flynumber_sip_password: '', dry_run: settings.dry_run === '1' });
   }, [settings, f]);
 
   const loadBackups = useCallback(async () => {
@@ -188,7 +191,7 @@ export default function SettingsPage() {
     try {
       await api.saveSettings(f);
       await refreshSettings();
-      setF((x) => ({ ...x, telnyx_sip_password: '', telnyx_api_key: '' }));
+      setF((x) => ({ ...x, telnyx_sip_password: '', telnyx_api_key: '', flynumber_sip_password: '' }));
       toast('Settings saved');
       refreshStats();
     } catch (e) { toast(e.message, 'error'); }
@@ -431,6 +434,251 @@ export default function SettingsPage() {
           )}
         </ol>
       </motion.section>
+
+      {/* FLYNUMBER COPENHAGEN INBOUND DID & HYBRID ARCHITECTURE HUB */}
+      {(() => {
+        const isWebRtcInbound = (f.inbound_routing_mode || 'webrtc') === 'webrtc' || f.telephony_mode === 'webrtc';
+        const telnyxForwardingUri = f.telnyx_sip_user ? `sip:${f.telnyx_sip_user}@${f.telnyx_sip_server || 'sip.telnyx.com'}` : '';
+
+        return (
+          <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
+            <div className="panel-title">
+              <PhoneIncoming size={16} /> FlyNumber Inbound &amp; Copenhagen Line (+45 32 33 16 10)
+              <em>$0/min inbound via FlyNumber SIP</em>
+            </div>
+
+            <div className="flynumber-banner">
+              <div>
+                <div className="flynumber-badges">
+                  <span className="cph-pill"><Building2 size={13} /> +45 32 33 16 10</span>
+                  <span className={`cph-pill ${f.flynumber_status === 'active' ? 'clean' : 'pending'}`}>
+                    {f.flynumber_status === 'active' ? '✓ Line ACTIVE' : '⏳ Pending Carrier Review'}
+                  </span>
+                  <span className="cph-pill clean">180.dk Clean</span>
+                  <span className="cph-pill" style={{ background: 'rgba(99, 102, 241, 0.12)', borderColor: 'rgba(99, 102, 241, 0.3)', color: '#818cf8' }}>
+                    {isWebRtcInbound ? '🎧 In-Browser Ringing' : '🖥️ Linphone Desktop'}
+                  </span>
+                </div>
+                <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+                  Copenhagen business landline DID ($2.95/mo). Outbound dials via Telnyx wholesale; all prospect return calls route for free ($0.00/min) directly into {isWebRtcInbound ? 'this browser tab' : 'Linphone'}.
+                </p>
+              </div>
+              <div className="flynumber-badges">
+                <span className="rate-badge">Monthly: $2.95</span>
+                <span className="rate-badge" style={{ color: '#4ade80' }}>Inbound: $0.00/min</span>
+                <button
+                  type="button"
+                  className="btn sm primary"
+                  onClick={() => {
+                    setF({ ...f, caller_id: '+45 32 33 16 10' });
+                    toast('Outbound caller ID set to Copenhagen line (+45 32 33 16 10)');
+                  }}
+                  title="Stamp this Copenhagen DID on all outbound calls"
+                >
+                  Use as Outbound CLI
+                </button>
+              </div>
+            </div>
+
+            <div className="panel-title sub" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+              <span><Globe size={15} /> Inbound Destination &amp; Call Routing</span>
+              <div className="tab-pills" style={{ display: 'inline-flex', gap: 6 }}>
+                <button
+                  type="button"
+                  className={`btn sm ${isWebRtcInbound ? 'primary' : ''}`}
+                  onClick={() => setF({ ...f, inbound_routing_mode: 'webrtc', telephony_mode: 'webrtc' })}
+                >
+                  <Globe size={13} /> Built-in Browser App (WebRTC)
+                </button>
+                <button
+                  type="button"
+                  className={`btn sm ${!isWebRtcInbound ? 'primary' : ''}`}
+                  onClick={() => setF({ ...f, inbound_routing_mode: 'flynumber_sip' })}
+                >
+                  <Headphones size={13} /> External Softphone (Linphone)
+                </button>
+              </div>
+            </div>
+
+            {isWebRtcInbound ? (
+              <div className="inbound-webrtc-card" style={{ background: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: 12, padding: '16px 20px', margin: '14px 0 20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                  <div>
+                    <b style={{ color: '#38bdf8', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Globe size={16} /> 100% In-Browser Inbound Enabled (Zero Extra Apps)
+                    </b>
+                    <p className="muted small" style={{ margin: '6px 0 0 0' }}>
+                      FlyNumber forwards return calls to your Telnyx SIP connection. Telnyx streams incoming audio via WebRTC straight into this browser tab at <b>$0.00/min</b>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    style={{ background: 'rgba(56, 189, 248, 0.15)', borderColor: 'rgba(56, 189, 248, 0.4)', color: '#38bdf8' }}
+                    onClick={() => {
+                      if (softphoneEngine?.simulateIncomingCall) {
+                        softphoneEngine.simulateIncomingCall('+45 32 33 16 10');
+                        toast('In-browser ringer triggered! Press Enter to answer.');
+                      } else {
+                        toast('Softphone ringer is ready in WebRTC mode.');
+                      }
+                    }}
+                  >
+                    <Bell size={13} /> Test In-Browser Ringer
+                  </button>
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: '#94a3b8', display: 'block', marginBottom: 6 }}>
+                    FlyNumber Call Forwarding Destination (SIP URI)
+                  </label>
+                  <div className="linphone-quick-box" style={{ display: 'flex', alignItems: 'center', background: 'rgba(15, 23, 42, 0.7)', borderRadius: 8, padding: '8px 12px', border: '1px solid rgba(255, 255, 255, 0.1)' }}>
+                    <span style={{ fontFamily: 'monospace', fontSize: 13, color: f.telnyx_sip_user ? '#f8fafc' : '#fbbf24', flex: 1 }}>
+                      {f.telnyx_sip_user ? telnyxForwardingUri : '⚠️ Enter your Telnyx SIP username above to generate your forwarding address'}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn sm primary"
+                      disabled={!f.telnyx_sip_user}
+                      style={{ padding: '4px 12px', fontSize: 12 }}
+                      onClick={() => {
+                        navigator.clipboard?.writeText(telnyxForwardingUri);
+                        toast('Copied FlyNumber Forwarding SIP URI');
+                      }}
+                    >
+                      <Copy size={13} /> Copy for FlyNumber
+                    </button>
+                  </div>
+                  <small className="muted" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                    <b>In FlyNumber Console:</b> Select <code>+45 32 33 16 10</code> → <b>Call Forwarding</b> → Choose <b>SIP URI</b> → Paste this address.
+                  </small>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="panel-title sub"><KeyRound size={15} /> FlyNumber Inbound SIP Credentials <em>sip.flynumber.com</em></div>
+                {settings.has_flynumber_password && (
+                  <div className="banner ok"><ShieldCheck size={15} /> FlyNumber SIP secret is saved locally. Leave blank to keep it.</div>
+                )}
+                <div className="form two">
+                  <label>Inbound SIP server<input value={f.flynumber_sip_server || 'sip.flynumber.com'} onChange={set('flynumber_sip_server')} placeholder="sip.flynumber.com" autoComplete="off" /></label>
+                  <label>Inbound SIP username<input value={f.flynumber_sip_user || ''} onChange={set('flynumber_sip_user')} placeholder="FlyNumber Account SIP User" autoComplete="off" /></label>
+                  <label>Inbound SIP password<input type="password" value={f.flynumber_sip_password || ''} onChange={set('flynumber_sip_password')} placeholder={settings.has_flynumber_password ? '•••••••• (saved, leave blank to keep)' : 'FlyNumber SIP password'} autoComplete="new-password" /></label>
+                  <label>
+                    Linphone Quick-Connect Address
+                    <div className="linphone-quick-box">
+                      <span>{f.flynumber_sip_user ? `sip:${f.flynumber_sip_user}@${f.flynumber_sip_server || 'sip.flynumber.com'}` : 'sip:<username>@sip.flynumber.com'}</span>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        style={{ padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => {
+                          const addr = f.flynumber_sip_user ? `sip:${f.flynumber_sip_user}@${f.flynumber_sip_server || 'sip.flynumber.com'}` : 'sip.flynumber.com';
+                          navigator.clipboard?.writeText(addr);
+                          toast('Copied Linphone SIP address');
+                        }}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </label>
+                </div>
+              </>
+            )}
+
+            <div className="panel-title sub" style={{ marginTop: 18 }}><Headphones size={15} /> The Bridge: 4 Steps to Free Inbound &amp; Verified Outbound</div>
+            <div className="bridge-wizard">
+              <div className={`bridge-step-card ${f.flynumber_status === 'active' ? 'completed' : ''}`}>
+                <div className="bridge-step-num">1</div>
+                <div className="bridge-step-body">
+                  <div className="bridge-step-title">
+                    <span>1. FlyNumber Line Activation</span>
+                    <button
+                      type="button"
+                      className={`btn sm ${f.flynumber_status === 'active' ? 'ok' : ''}`}
+                      onClick={() => {
+                        const next = f.flynumber_status === 'active' ? 'pending' : 'active';
+                        setF({ ...f, flynumber_status: next });
+                      }}
+                    >
+                      {f.flynumber_status === 'active' ? '✓ Line is Active' : 'Mark as Active'}
+                    </button>
+                  </div>
+                  <div className="bridge-step-desc">
+                    FlyNumber compliance verifies the Danish B2B service description (Scalix Elite). Status changes from "Pending" to "Active".
+                  </div>
+                </div>
+              </div>
+
+              <div className={`bridge-step-card ${f.flynumber_linphone_configured === '1' ? 'completed' : ''}`}>
+                <div className="bridge-step-num">2</div>
+                <div className="bridge-step-body">
+                  <div className="bridge-step-title">
+                    <span>{isWebRtcInbound ? '2. Route FlyNumber to Built-in App' : '2. Connect Linphone Softphone'}</span>
+                    <button
+                      type="button"
+                      className={`btn sm ${f.flynumber_linphone_configured === '1' ? 'ok' : ''}`}
+                      onClick={() => setF({ ...f, flynumber_linphone_configured: f.flynumber_linphone_configured === '1' ? '0' : '1' })}
+                    >
+                      {f.flynumber_linphone_configured === '1' ? (isWebRtcInbound ? '✓ Forwarding Active' : '✓ Linphone Logged In') : (isWebRtcInbound ? 'Mark as Forwarded' : 'Mark as Connected')}
+                    </button>
+                  </div>
+                  <div className="bridge-step-desc">
+                    {isWebRtcInbound
+                      ? `In FlyNumber portal, set Call Forwarding on +45 32 33 16 10 to SIP URI: ${telnyxForwardingUri || 'sip:<telnyx_user>@sip.telnyx.com'}. Return calls will ring inside this browser tab.`
+                      : `Add SIP account in Linphone with domain ${f.flynumber_sip_server || 'sip.flynumber.com'}, username, and secret. Confirm registration is green.`
+                    }
+                  </div>
+                </div>
+              </div>
+
+              <div className={`bridge-step-card ${f.telnyx_caller_id_verified === '1' ? 'completed' : ''}`}>
+                <div className="bridge-step-num">3</div>
+                <div className="bridge-step-body">
+                  <div className="bridge-step-title">
+                    <span>3. Trigger Telnyx Verification Call</span>
+                    <button
+                      type="button"
+                      className={`btn sm ${f.telnyx_caller_id_verified === '1' ? 'ok' : ''}`}
+                      onClick={() => setF({ ...f, telnyx_caller_id_verified: f.telnyx_caller_id_verified === '1' ? '0' : '1' })}
+                    >
+                      {f.telnyx_caller_id_verified === '1' ? '✓ PIN Verified' : 'Confirm 6-Digit PIN'}
+                    </button>
+                  </div>
+                  <div className="bridge-step-desc">
+                    {isWebRtcInbound
+                      ? 'In Telnyx Portal, click "Verify via Call" on +45 32 33 16 10. This browser tab will ring immediately for free! Click Answer, note the 6-digit PIN, and enter into Telnyx.'
+                      : 'In Telnyx Portal, click "Verify via Call" on +45 32 33 16 10. Linphone rings for free over FlyNumber SIP. Answer call, note 6-digit PIN, and enter into Telnyx.'
+                    }
+                  </div>
+                </div>
+              </div>
+
+              <div className={`bridge-step-card ${f.caller_id === '+45 32 33 16 10' || f.caller_id === '+4532331610' ? 'completed' : ''}`}>
+                <div className="bridge-step-num">4</div>
+                <div className="bridge-step-body">
+                  <div className="bridge-step-title">
+                    <span>4. Set Outbound Caller ID Override</span>
+                    <button
+                      type="button"
+                      className="btn sm primary"
+                      onClick={() => {
+                        setF({ ...f, caller_id: '+45 32 33 16 10' });
+                        toast('Outbound caller ID set to Copenhagen DID');
+                      }}
+                    >
+                      Set +45 32 33 16 10
+                    </button>
+                  </div>
+                  <div className="bridge-step-desc">
+                    With ownership verified, Telnyx stamps every outbound dial with your clean Copenhagen office number (+45 32 33 16 10).
+                  </div>
+                </div>
+              </div>
+            </div>
+          </motion.section>
+        );
+      })()}
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.18 }}>
         <div className="panel-title"><Target size={16} /> Daily targets</div>

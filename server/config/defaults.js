@@ -93,6 +93,15 @@ const DEFAULTS = {
   webrtc_credential_handoff: '0',
   webrtc_mic_device: '', // preferred microphone deviceId ('' = browser default)
   webrtc_speaker_device: '', // preferred output deviceId ('' = browser default)
+  // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
+  flynumber_did: '+4532331610',
+  flynumber_status: 'pending', // 'pending' | 'active'
+  flynumber_sip_server: 'sip.flynumber.com',
+  flynumber_sip_user: '',
+  flynumber_sip_password: '', // secret — local DB only, masked from browser
+  flynumber_linphone_configured: '0',
+  telnyx_caller_id_verified: '0',
+  inbound_routing_mode: 'flynumber_sip', // 'flynumber_sip' | 'linphone' | 'disabled'
   // ---- UI ----
   sound_cues: '0',
 };
@@ -104,6 +113,7 @@ const SETTING_KEYS = Object.keys(DEFAULTS);
 const SECRET_KEYS = {
   telnyx_sip_password: 'has_password',
   telnyx_api_key: 'has_api_key',
+  flynumber_sip_password: 'has_flynumber_password',
   ai_api_key: 'has_ai_key',
   smtp_pass: 'has_smtp_pass',
 };
@@ -112,7 +122,7 @@ const STAGES = ['new', 'contacted', 'interested', 'followup', 'meeting', 'won', 
 const OUTCOMES = ['no_answer', 'voicemail', 'wrong_number', 'gatekeeper', 'hung_up', 'conversation', 'meeting_booked', 'dnc'];
 const PICKUP = ['gatekeeper', 'hung_up', 'conversation', 'meeting_booked'];
 const CONVO = ['conversation', 'meeting_booked'];
-const FIELDS = ['name', 'phone', 'email', 'company', 'title', 'location', 'website'];
+const FIELDS = ['name', 'phone', 'email', 'company', 'title', 'location', 'website', 'pronunciation'];
 
 const SOFTPHONE_PROTOCOLS = ['sip', 'tel'];
 const TELEPHONY_MODES = ['softphone', 'webrtc'];
@@ -128,6 +138,11 @@ const ENV_SEEDS = {
   telnyx_connection_id: 'TELNYX_CONNECTION_ID',
   caller_id: 'TELNYX_CALLER_ID',
   caller_id_pool: 'TELNYX_CALLER_ID_POOL',
+  flynumber_did: 'FLYNUMBER_DID',
+  flynumber_status: 'FLYNUMBER_STATUS',
+  flynumber_sip_server: 'FLYNUMBER_SIP_SERVER',
+  flynumber_sip_user: 'FLYNUMBER_SIP_USER',
+  flynumber_sip_password: 'FLYNUMBER_SIP_PASSWORD',
   ai_api_key: 'PULSE_AI_API_KEY',
   ai_provider: 'PULSE_AI_PROVIDER',
   ai_model: 'PULSE_AI_MODEL',

@@ -2,13 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Search, Phone, Plus, Upload, Users, ShieldAlert, X, Download, Trash2, Loader2, Mail,
-  CheckSquare, Layers, ArrowRightLeft,
+  CheckSquare, Layers, ArrowRightLeft, Volume2,
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { Avatar, Empty, StageBadge } from '../components/ui.jsx';
 import EmailComposer from '../components/EmailComposer.jsx';
 import { STAGES, timeAgo } from '../utils.js';
+import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
 
 function AddModal({ onClose }) {
   const { refreshProspects, refreshStats, toast, setDrawerId } = useStore();
@@ -248,7 +249,30 @@ export default function Prospects() {
                         aria-label={`Select ${p.name || 'prospect'}`}
                       />
                     </td>
-                    <td><div className="cell-who"><Avatar name={p.name || p.company} size={36} seed={p.id + p.name} /><div><b>{p.name || '(no name)'}</b><span>{[p.title, p.company].filter(Boolean).join(' · ') || '—'}</span></div></div></td>
+                    <td>
+                      <div className="cell-who">
+                        <Avatar name={p.name || p.company} size={36} seed={p.id + p.name} />
+                        <div>
+                          <div className="row gap xs" style={{ alignItems: 'center' }}>
+                            <b>{p.name || '(no name)'}</b>
+                            {(p.pronunciation || (p.name && getDanishPronunciation(p.name))) && (
+                              <button
+                                type="button"
+                                className="pronounce-chip sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  speakPronunciation(p.name, p.pronunciation || getDanishPronunciation(p.name));
+                                }}
+                                title="Click to hear pronunciation guide"
+                              >
+                                <Volume2 size={11} /> {p.pronunciation || getDanishPronunciation(p.name)}
+                              </button>
+                            )}
+                          </div>
+                          <span>{[p.title, p.company].filter(Boolean).join(' · ') || '—'}</span>
+                        </div>
+                      </div>
+                    </td>
                     <td className="mono">{p.phone || '—'}</td>
                     <td className="trunc">{p.email || '—'}</td>
                     <td>{p.dnc ? <span className="dnc-badge sm"><ShieldAlert size={12} /> DNC</span> : <StageBadge stage={p.stage} />}</td>

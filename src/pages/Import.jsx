@@ -1,9 +1,10 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, PhoneCall, Download, Sparkles, KeyRound, X } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, ArrowRight, ArrowLeft, Check, Loader2, PhoneCall, Download, Sparkles, KeyRound, X, Volume2 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { IMPORT_TARGETS as TARGETS, canImport, extrasOf, guessMapping, isRegistryHeader } from '../importMap.js';
+import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
 
 const SAMPLE = 'Name,Phone,Email,Company,Title,City,Notes from list\nMette Jensen,20123456,mette@nordiclogistik.dk,Nordic Logistik,Driftschef,København,Met at expo\nAnders Nielsen,+4522345678,anders@brightlab.dk,BrightLab ApS,Founder,Aarhus,Referred by Sofie\n';
 
@@ -14,6 +15,7 @@ export default function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSummary, setAiSummary] = useState('');
+  const [pronounceCount, setPronounceCount] = useState(0);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [customKey, setCustomKey] = useState('');
   const [saveKey, setSaveKey] = useState(true);
@@ -33,6 +35,19 @@ export default function ImportPage() {
       const d = await api.parseFile(file);
       if (!d.rows.length) throw new Error('That file has no rows.');
       const auto = guessMapping(d.headers);
+
+      // Instantly generate phonetic English pronunciations for the full sheet
+      const nameCol = auto.name || auto.first_name || d.headers.find(h => /name|navn|owner|ejer|beslutning/i.test(h));
+      let count = 0;
+      for (const r of d.rows) {
+        const rawName = nameCol ? String(r[nameCol] || '') : '';
+        if (rawName && !r.pronunciation) {
+          r.pronunciation = getDanishPronunciation(rawName);
+          count++;
+        }
+      }
+      setPronounceCount(count);
+
       setData(d); setMapping(auto); setGuessed(auto); setStep(1);
     } catch (e) { toast(e.message, 'error'); }
     setBusy(false);
@@ -174,11 +189,47 @@ export default function ImportPage() {
               </div>
             </div>
             <div className="glass pad-lg">
-              <div className="panel-title">Preview</div>
+              <div className="panel-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Preview</span>
+                {pronounceCount > 0 && (
+                  <span className="pronounce-badge-ai" title="AI & phonetic English pronunciations generated instantly on sheet load">
+                    <Volume2 size={13} /> {pronounceCount} Pronunciations Ready
+                  </span>
+                )}
+              </div>
               <div className="preview-scroll">
                 <table className="table compact">
-                  <thead><tr>{data.headers.slice(0, 6).map((h) => <th key={h}>{h}</th>)}</tr></thead>
-                  <tbody>{data.rows.slice(0, 6).map((r, i) => <tr key={i}>{data.headers.slice(0, 6).map((h) => <td key={h} className="trunc">{String(r[h])}</td>)}</tr>)}</tbody>
+                  <thead>
+                    <tr>
+                      {data.headers.slice(0, 6).map((h) => <th key={h}>{h}</th>)}
+                      <th>Pronunciation (English)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.rows.slice(0, 6).map((r, i) => {
+                      const nameVal = r[mapping.name || ''] || r[mapping.first_name || ''] || r.Name || r['Best Public Decision-Maker'] || r['Navn'] || '';
+                      const phon = r.pronunciation || (nameVal ? getDanishPronunciation(nameVal) : '');
+                      return (
+                        <tr key={i}>
+                          {data.headers.slice(0, 6).map((h) => <td key={h} className="trunc">{String(r[h] ?? '')}</td>)}
+                          <td>
+                            {phon ? (
+                              <button
+                                type="button"
+                                className="pronounce-chip sm"
+                                onClick={() => speakPronunciation(nameVal, phon)}
+                                title="Click to hear English pronunciation"
+                              >
+                                <Volume2 size={11} /> {phon}
+                              </button>
+                            ) : (
+                              <span className="muted small">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
                 </table>
               </div>
             </div>

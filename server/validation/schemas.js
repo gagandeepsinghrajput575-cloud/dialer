@@ -160,6 +160,15 @@ const settingsUpdate = z.object({
   webrtc_credential_handoff: boolish.optional(),
   webrtc_mic_device: str(200).optional(),
   webrtc_speaker_device: str(200).optional(),
+  // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
+  flynumber_did: str(64).optional(),
+  flynumber_status: str(32).optional(),
+  flynumber_sip_server: str(200).optional(),
+  flynumber_sip_user: str(200).optional(),
+  flynumber_sip_password: str(500).optional(),
+  flynumber_linphone_configured: boolish.optional(),
+  telnyx_caller_id_verified: boolish.optional(),
+  inbound_routing_mode: str(64).optional(),
 });
 
 const followUpSchedule = z.object({ at: datetime() });

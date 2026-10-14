@@ -7,7 +7,7 @@ import {
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
   Headphones, RotateCw, FlaskConical, Wifi, Send,
   Mic, MicOff, Radio, Grid3x3, Trophy, LayoutDashboard, Repeat, Trash2,
-  ChevronDown, ExternalLink, ShieldX, MapPin
+  ChevronDown, ExternalLink, ShieldX, MapPin, Volume2, Globe
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -22,6 +22,7 @@ import useServerQueue from '../useServerQueue.js';
 import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueProgress, queueTab, stepIndex, tabForProspect } from '../queue.js';
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, getProspectDisplayName, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 import { extraInsights, clip, isUrlValue } from '../registry.js';
+import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
 
@@ -140,7 +141,7 @@ function QuickAddModal({ onClose, onAdded }) {
   );
 }
 
-function ExtraDetailsAccordion({ prospect }) {
+function ExtraDetailsAccordion({ prospect, onUpdate }) {
   const [open, setOpen] = useState(false);
   const insights = useMemo(() => extraInsights(prospect?.extra), [prospect?.extra]);
   const panelId = `dialer-extra-${prospect?.id || 'curr'}`;
@@ -158,7 +159,9 @@ function ExtraDetailsAccordion({ prospect }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
-  if (!insights || insights.count === 0) return null;
+  if (!prospect) return null;
+
+  const totalCount = (insights?.count || 0) + (prospect.location ? 1 : 0) + (prospect.website ? 1 : 0) + (prospect.follow_up_at ? 1 : 0);
 
   return (
     <div className="registry registry-cockpit" aria-label="Extra prospect details and registry metadata">
@@ -172,16 +175,26 @@ function ExtraDetailsAccordion({ prospect }) {
       >
         <ChevronDown size={15} className={`registry-caret ${open ? 'open' : ''}`} aria-hidden />
         <span className="registry-label">
-          <b>Extra Details &amp; Registry Info</b> <em>{insights.count}</em>
+          <b>Extra Details &amp; Registry Info</b> <em>{totalCount}</em>
         </span>
         <span className="registry-pills">
-          {insights.cvr && <span className="pill pill-cvr" title="Danish company registration number (CVR)">CVR {insights.cvr}</span>}
-          {insights.adProtected && (
+          {insights?.cvr && <span className="pill pill-cvr" title="Danish company registration number (CVR)">CVR {insights.cvr}</span>}
+          {prospect.location && (
+            <span className="pill pill-quiet" title={`Location: ${prospect.location}`}>
+              <MapPin size={11} /> {clip(prospect.location, 26)}
+            </span>
+          )}
+          {prospect.website && (
+            <span className="pill pill-quiet" title={`Website: ${prospect.website}`}>
+              <Globe size={11} /> Web
+            </span>
+          )}
+          {insights?.adProtected && (
             <span className="pill pill-protected" title={insights.protectionNote}>
               <ShieldX size={12} /> Ad-protected
             </span>
           )}
-          {insights.urlCount > 0 && <span className="pill pill-quiet">{insights.urlCount} link{insights.urlCount === 1 ? '' : 's'}</span>}
+          {insights?.urlCount > 0 && <span className="pill pill-quiet">{insights.urlCount} link{insights.urlCount === 1 ? '' : 's'}</span>}
           <kbd className="chip-kbd" title="Shortcut to toggle extra details">X</kbd>
         </span>
       </button>
@@ -196,26 +209,97 @@ function ExtraDetailsAccordion({ prospect }) {
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
           >
-            <div className="registry-grid">
-              {insights.entries.map((e) => (
-                <div key={e.key} className="registry-item">
-                  <label>{e.key}</label>
-                  {e.isUrl ? (
-                    <a
-                      href={e.value}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="registry-link"
-                      title={e.value}
-                    >
-                      {e.key.toLowerCase().includes('map') ? <MapPin size={11} aria-hidden /> : null}
-                      {clip(e.value, 48)} <ExternalLink size={11} aria-hidden />
-                    </a>
-                  ) : (
-                    <span>{isUrlValue(e.value) ? clip(e.value, 48) : e.value}</span>
-                  )}
+            {/* Standard Secondary Fields */}
+            <div className="registry-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+              {prospect.location && (
+                <div className="registry-item">
+                  <label><MapPin size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Location</label>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(prospect.location + (prospect.company ? ` ${prospect.company}` : ''))}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="registry-link"
+                    title="Open address in Google Maps"
+                  >
+                    <span>{prospect.location}</span>
+                    <ExternalLink size={11} aria-hidden />
+                  </a>
                 </div>
-              ))}
+              )}
+              {prospect.website && (
+                <div className="registry-item">
+                  <label><Globe size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Website</label>
+                  <a
+                    href={prospect.website.startsWith('http') ? prospect.website : `https://${prospect.website}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="registry-link"
+                    title={prospect.website}
+                  >
+                    <span>{clip(prospect.website, 45)}</span>
+                    <ExternalLink size={11} aria-hidden />
+                  </a>
+                </div>
+              )}
+              <div className="registry-item">
+                <label><CalendarCheck size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Follow-up Date</label>
+                <input
+                  type="date"
+                  className="input sm"
+                  style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: 12 }}
+                  value={prospect.follow_up_at || ''}
+                  onChange={(e) => onUpdate?.({ follow_up_at: e.target.value })}
+                />
+              </div>
+              <div className="registry-item">
+                <label>Pipeline Stage</label>
+                <select
+                  value={prospect.stage || 'new'}
+                  onChange={(e) => onUpdate?.({ stage: e.target.value })}
+                  style={{ background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', borderRadius: 6, padding: '3px 8px', fontSize: 12 }}
+                >
+                  {STAGES.map((s) => (
+                    <option key={s.id} value={s.id}>{s.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Dynamic Registry / Sheet columns */}
+            {insights?.entries && insights.entries.length > 0 && (
+              <div className="registry-grid">
+                {insights.entries.map((e) => (
+                  <div key={e.key} className="registry-item">
+                    <label>{e.key}</label>
+                    {e.isUrl ? (
+                      <a
+                        href={e.value}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="registry-link"
+                        title={e.value}
+                      >
+                        {e.key.toLowerCase().includes('map') ? <MapPin size={11} aria-hidden /> : null}
+                        {clip(e.value, 48)} <ExternalLink size={11} aria-hidden />
+                      </a>
+                    ) : (
+                      <span>{isUrlValue(e.value) ? clip(e.value, 48) : e.value}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Do Not Call checkbox */}
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <label className="check-row" style={{ fontSize: 12, margin: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={!!prospect.dnc}
+                  onChange={(e) => onUpdate?.({ dnc: e.target.checked })}
+                />
+                <span className={prospect.dnc ? 'danger' : 'muted'}>Mark as Do Not Call (blocks the Call button)</span>
+              </label>
             </div>
           </motion.div>
         )}
@@ -951,17 +1035,21 @@ export default function Dialer() {
   // "Ringing" only while it really is ringing, and shows the engine's error when it fails.
   const webState = webrtc.state;
   const inboundActive = !!inbound?.answered;
+  const activeName = active ? getProspectDisplayName(active) : '';
+  const activeCompany = active?.company || '';
+  const prospectTarget = activeName ? `${activeName}${activeCompany ? ` (${activeCompany})` : ''}` : '';
+
   const inflightText = isWebrtc
     ? webState === 'registering' ? `Registering with ${softphone}…`
-      : webState === 'ringing' ? `Ringing ${dial?.phone || active?.phone || ''}…`
+      : webState === 'ringing' ? `Ringing ${prospectTarget || dial?.phone || active?.phone || ''}…`
         : webState === 'error' ? (webrtc.error || 'The in-browser call failed.')
-          : webState === 'active' ? (dry && !inboundActive ? `Test mode: in-browser call simulated` : `${inboundActive ? 'Inbound call' : 'In-browser call live'} with ${inboundActive ? (inbound?.prospect?.name || inbound?.callerNumber) : (dial?.phone || active?.phone || '')}`)
-            : `Dialing ${dial?.phone || active?.phone || ''}…`
+          : webState === 'active' ? (dry && !inboundActive ? `Test mode: in-browser call simulated` : `${inboundActive ? 'Inbound call' : 'In-browser call live'} with ${inboundActive ? (inbound?.prospect?.name || inbound?.callerNumber) : (prospectTarget || dial?.phone || active?.phone || '')}`)
+            : `Dialing ${prospectTarget || dial?.phone || active?.phone || ''}…`
     : dry
-      ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`}`
+      ? `Simulating ${dial?.uri || `${proto}:${active?.phone || ''}`} · ${prospectTarget}`
       : launched || phase === 'dialing'
-        ? `Dialing via ${softphone} (${cc})…`
-        : `Waiting on ${softphone} (${cc})`;
+        ? `Dialing ${prospectTarget ? `${prospectTarget} via ` : ''}${softphone} (${cc})…`
+        : `Waiting on ${softphone} (${cc}) · ${prospectTarget}`;
   const inflightClass = isWebrtc
     ? (webrtc.active ? 'live' : webState === 'error' ? 'err' : 'wait')
     : (dry ? 'dry' : launched ? 'live' : 'wait');
@@ -1022,6 +1110,16 @@ export default function Dialer() {
                 <div className="banner-titles">
                   <div className="banner-name-row">
                     <h2 className="banner-name">{getProspectDisplayName(active)}</h2>
+                    {(active.pronunciation || (getProspectDisplayName(active) && getDanishPronunciation(getProspectDisplayName(active)))) && (
+                      <button
+                        type="button"
+                        className="pronounce-chip"
+                        onClick={() => speakPronunciation(getProspectDisplayName(active), active.pronunciation || getDanishPronunciation(getProspectDisplayName(active)))}
+                        title="Click to hear Danish pronunciation in English phonetics"
+                      >
+                        <Volume2 size={13} /> {active.pronunciation || getDanishPronunciation(getProspectDisplayName(active))}
+                      </button>
+                    )}
                     {active.title && <span className="banner-title-badge">{active.title}</span>}
                     {active.dnc && <span className="dnc-badge sm"><Ban size={12} /> DNC</span>}
                   </div>
@@ -1083,7 +1181,7 @@ export default function Dialer() {
             </div>
 
             {/* EXTRA DETAILS & REGISTRY METADATA COLLAPSIBLE DROPDOWN */}
-            <ExtraDetailsAccordion prospect={active} />
+            <ExtraDetailsAccordion prospect={active} onUpdate={(patch) => updateProspect(active.id, patch)} />
 
             {/* SOFT PHONE STANDBY. A phone that is only registered while you dial cannot
                 receive a call, so the state of the registration is part of the cockpit, not a
@@ -1109,6 +1207,14 @@ export default function Dialer() {
               </div>
             )}
 
+            {/* HYBRID VOIP COPENHAGEN ROUTE STRIP */}
+            <div className="standby-strip ready" style={{ margin: '6px 0', border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(15, 23, 42, 0.5)' }} title="Outbound via Telnyx wholesale · Inbound Callbacks via FlyNumber free SIP">
+              <span className="standby-dot" style={{ background: '#38bdf8' }} />
+              <span className="standby-txt" style={{ color: '#38bdf8', fontSize: 12 }}>
+                Copenhagen Line ({settings?.flynumber_did || '+45 32 33 16 10'}): Outbound via Telnyx · Inbound via FlyNumber SIP ($0/min)
+              </span>
+            </div>
+
             {/* CALL BAR */}
             <div className={`glass callbar ${phase}`}>
               <div className="callbar-glow" />
@@ -1123,6 +1229,16 @@ export default function Dialer() {
                   >
                     <span className="inflight-dot" />
                     {isWebrtc ? <Radio size={14} /> : dry ? <FlaskConical size={14} /> : launched ? <Headphones size={14} /> : <Wifi size={14} />}
+                    {(activeName || activeCompany) && (
+                      <span className="inflight-target-pill">
+                        <span className="inflight-target-name">{activeName || 'Prospect'}</span>
+                        {activeCompany && (
+                          <span className="inflight-target-company">
+                            <Building2 size={12} /> {activeCompany}
+                          </span>
+                        )}
+                      </span>
+                    )}
                     <span className="inflight-txt">{inflightText}</span>
                     {dial?.uri && <code className="inflight-uri">{dial.uri}</code>}
                     {isWebrtc && webrtc.active && (
@@ -1173,11 +1289,6 @@ export default function Dialer() {
                         {active.number_kind.label}
                       </span>
                     )}
-                  </div>
-                  <div className="callwho">
-                    <strong>{active.name}</strong>
-                    {active.email ? ` · ${active.email}` : ''}
-                    {active.company ? ` · ${active.company}` : ''}
                   </div>
                 </div>
                 <div className="callctl">
@@ -1283,10 +1394,11 @@ export default function Dialer() {
               )}
             </AnimatePresence>
 
-            {/* FULL DETAILS CARD */}
-            <div className="glass card-wrap">
-              <ProspectCard p={active} big onSent={() => Promise.all([reload(), queue.refresh()])} />
-              <div className="kbd-hint"><Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email{isWebrtc ? ' · ' : ' · '}<kbd>M</kbd>{isWebrtc ? ' mute' : ''} · {isWebrtc ? <><kbd>D</kbd> keypad · </> : <><kbd>R</kbd> re-launch softphone · </>}<kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes</div>
+            {/* KEYBOARD SHORTCUTS HINT BAR */}
+            <div className="glass" style={{ padding: '10px 16px', borderRadius: 12, margin: '14px 0', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <div className="kbd-hint" style={{ margin: 0, justifyContent: 'center' }}>
+                <Keyboard size={13} /> <kbd>C</kbd> call/hang up · <kbd>1-8</kbd> classify · <kbd>H</kbd> hang up &amp; classify · <kbd>E</kbd> email{isWebrtc ? ' · ' : ' · '}<kbd>M</kbd>{isWebrtc ? ' mute' : ''} · {isWebrtc ? <><kbd>D</kbd> keypad · </> : <><kbd>R</kbd> re-launch softphone · </>}<kbd>←</kbd><kbd>→</kbd> navigate · <kbd>N</kbd> notes · <kbd>X</kbd> extra details
+              </div>
             </div>
           </>
         ) : doneToday ? (

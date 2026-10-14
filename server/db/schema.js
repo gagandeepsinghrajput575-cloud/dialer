@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS prospects (
   location TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
   extra TEXT NOT NULL DEFAULT '{}',
+  pronunciation TEXT NOT NULL DEFAULT '',
   stage TEXT NOT NULL DEFAULT 'new',
   dnc INTEGER NOT NULL DEFAULT 0,
   follow_up_at TEXT,

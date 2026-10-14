@@ -188,10 +188,12 @@ async function run() {
     'business_days', 'business_hours_end', 'business_hours_start', 'business_tz',
     'caller_id', 'caller_id_cursor', 'caller_id_pool',
     'daily_cap', 'daily_goal', 'default_country_code', 'dry_run', 'email_verify_deep',
-    'followup_email_template', 'has_ai_key', 'has_api_key', 'has_password', 'has_smtp_pass', 'meet_link',
+    'flynumber_did', 'flynumber_linphone_configured', 'flynumber_sip_password', 'flynumber_sip_server', 'flynumber_sip_user', 'flynumber_status',
+    'followup_email_template', 'has_ai_key', 'has_api_key', 'has_flynumber_password', 'has_password', 'has_smtp_pass',
+    'inbound_routing_mode', 'meet_link',
     'queue_smart_sort', 'sales_script', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
-    'telnyx_api_key', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
+    'telnyx_api_key', 'telnyx_caller_id_verified', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
     'vm_auto_advance', 'vm_greeting',
     'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
   ]);
@@ -251,7 +253,28 @@ async function run() {
   assert.strictEqual(s4.webrtc_mic_device, 'mic-abc', 'the microphone choice persists');
   assert.strictEqual(s4.webrtc_speaker_device, 'spk-xyz', 'the speaker choice persists');
   await req('PUT', '/api/settings', { webrtc_ws_url: '', webrtc_credential_handoff: '0', webrtc_mic_device: '', webrtc_speaker_device: '' });
-  ok('telephony + Telnyx keys saved, caller ID kept, secret never echoed back (every setting the schema accepts round-trips)');
+
+  // FlyNumber Copenhagen Inbound DID endpoints
+  const fn1 = await req('GET', '/api/telephony/flynumber');
+  assert.strictEqual(fn1.status, 200);
+  assert.strictEqual(fn1.json.did, '+4532331610', 'FlyNumber Copenhagen line defaults to +45 32 33 16 10');
+  assert.strictEqual(fn1.json.sipHost, 'sip.flynumber.com');
+  assert.strictEqual(fn1.json.bridgeSteps.length, 4);
+
+  const fnUpdate = await req('POST', '/api/telephony/flynumber', {
+    flynumber_status: 'active',
+    flynumber_sip_user: 'cph_agent',
+    flynumber_sip_password: 'test_sip_secret',
+    flynumber_linphone_configured: true,
+  });
+  assert.strictEqual(fnUpdate.status, 200);
+  assert.strictEqual(fnUpdate.json.config.status, 'active');
+  assert.strictEqual(fnUpdate.json.config.hasPassword, true);
+  assert.strictEqual(fnUpdate.json.config.linphoneSipAddress, 'sip:cph_agent@sip.flynumber.com');
+  assert.strictEqual(fnUpdate.json.config.bridgeSteps[0].completed, true);
+  assert.strictEqual(fnUpdate.json.config.bridgeSteps[1].completed, true);
+
+  ok('telephony + Telnyx keys saved, FlyNumber inbound endpoints verified, caller ID kept, secret never echoed back');
 
   // ---------------------------------------------------------------- Danish normalization
   step(3, TOTAL, 'POST /api/prospects — Danish number normalization (+45)');

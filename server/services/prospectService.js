@@ -9,6 +9,8 @@ const backup = require('../db/backup');
 const { ApiError } = require('../middleware/errorHandler');
 const { STAGES, FIELDS } = require('../config/defaults');
 const { parseSqlTime } = require('./format');
+const danishPhonetics = require('./danishPhonetics');
+const aiPronunciationService = require('./aiPronunciationService');
 
 const { cleanStr } = telephony;
 
@@ -49,8 +51,10 @@ function normalizedPhone(raw) {
 }
 
 function create(input = {}) {
+  const name = cleanStr(input.name);
+  const pronunciation = cleanStr(input.pronunciation) || (name ? danishPhonetics.getPronunciation(name) : '');
   const created = prospects.insert({
-    name: cleanStr(input.name),
+    name,
     phone: normalizedPhone(input.phone),
     email: cleanStr(input.email),
     company: cleanStr(input.company),
@@ -58,6 +62,7 @@ function create(input = {}) {
     location: cleanStr(input.location),
     website: cleanStr(input.website),
     extra: input.extra || {},
+    pronunciation,
     stage: STAGES.includes(input.stage) ? input.stage : 'new',
   });
   return withNumberKind(created);
@@ -147,13 +152,25 @@ async function bulkImport({ rows = [], mapping = {}, skipDuplicates = true } = {
         v.company = extractDomainName(v.website);
       }
     }
-    if (!v.name) {
+    if (!v.name || (v.company && v.name.trim().toLowerCase() === v.company.trim().toLowerCase())) {
       const nameCandidate = cleanStr(
         row['Best Public Decision-Maker'] || row['Owner Name(s)'] || row['Decision-Maker'] ||
         row['Navn'] || row['Full Name'] || row['Fulde navn'] || row['Kontaktperson'] ||
         row['Contact Name'] || row['Contact Person'] || row['Ejer'] || row['Direktør'] || row['CEO'] || row['Owner']
       );
-      if (nameCandidate) v.name = nameCandidate;
+      if (nameCandidate) {
+        let clean = nameCandidate;
+        if (clean.includes(';')) clean = clean.split(';')[0].trim();
+        clean = clean.replace(/\s*\(via[^\)]+\)/gi, '').trim();
+        if (clean) v.name = clean;
+      }
+    }
+    if (v.name) {
+      if (v.name.includes(';')) v.name = v.name.split(';')[0].trim();
+      v.name = v.name.replace(/\s*\(via[^\)]+\)/gi, '').trim();
+    }
+    if (!v.pronunciation && v.name) {
+      v.pronunciation = danishPhonetics.getPronunciation(v.name);
     }
     if (!v.title) {
       const titleCandidate = cleanStr(row['Decision-Maker Role'] || row['Category'] || row['Kategori'] || row['Stilling'] || row['Rolle']);
@@ -368,8 +385,27 @@ function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
   };
 }
 
+async function bulkPronunciations({ ids = [] } = {}) {
+  const targetRows = (ids && ids.length)
+    ? ids.map((id) => prospects.get(id)).filter(Boolean)
+    : prospects.list().filter((p) => p.name);
+  if (!targetRows.length) return { updated: 0, total: 0 };
+
+  const names = targetRows.map((r) => r.name);
+  const map = await aiPronunciationService.generatePronunciations(names);
+  let updated = 0;
+  for (const r of targetRows) {
+    const p = map[r.name] || danishPhonetics.getPronunciation(r.name);
+    if (p && p !== r.pronunciation) {
+      prospects.update(r.id, { pronunciation: p });
+      updated++;
+    }
+  }
+  return { updated, total: targetRows.length };
+}
+
 module.exports = {
   list, detail, search, create, update, remove, clearAll, bulkImport, loadDemo,
-  bulkDelete, bulkUpdateStage, cleanIds,
+  bulkDelete, bulkUpdateStage, cleanIds, bulkPronunciations,
   rankProspect, rankedQueue, QUEUE_TABS, encodeCursor, decodeCursor,
 };

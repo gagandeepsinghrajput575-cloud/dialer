@@ -141,6 +141,166 @@ function QuickAddModal({ onClose, onAdded }) {
   );
 }
 
+const DIALPAD_KEYS = [
+  { key: '1', sub: ' ' },
+  { key: '2', sub: 'ABC' },
+  { key: '3', sub: 'DEF' },
+  { key: '4', sub: 'GHI' },
+  { key: '5', sub: 'JKL' },
+  { key: '6', sub: 'MNO' },
+  { key: '7', sub: 'PQRS' },
+  { key: '8', sub: 'TUV' },
+  { key: '9', sub: 'WXYZ' },
+  { key: '*', sub: ' ' },
+  { key: '0', sub: '+' },
+  { key: '#', sub: ' ' },
+];
+
+function ManualDialModal({ onClose, onDial }) {
+  const [phone, setPhone] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  const cleanDigits = phone.replace(/\D/g, '');
+  const canCall = cleanDigits.length >= 5;
+
+  const handleKeyClick = (k) => {
+    setPhone((prev) => prev + k);
+    inputRef.current?.focus();
+  };
+
+  const handleClear = () => {
+    setPhone('');
+    inputRef.current?.focus();
+  };
+
+  const handleBackspace = () => {
+    setPhone((prev) => prev.slice(0, -1));
+    inputRef.current?.focus();
+  };
+
+  const handleCall = async () => {
+    if (!canCall || busy) return;
+    setBusy(true);
+    try {
+      await onDial({ phone: phone.trim(), name: name.trim() });
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === 'Enter' && canCall) {
+        e.preventDefault();
+        handleCall();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [canCall, phone, name, onClose]);
+
+  return (
+    <>
+      <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />
+      <motion.div
+        className="modal glass manual-dial-modal"
+        initial={{ opacity: 0, scale: 0.94, y: 15 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Direct Manual Dialpad"
+      >
+        <div className="modal-head">
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, margin: 0, fontSize: 16 }}>
+            <Grid3x3 size={18} style={{ color: '#818cf8' }} /> Dial Any Number
+          </h3>
+          <button className="icon-btn" onClick={onClose} title="Close (Esc)"><X size={16} /></button>
+        </div>
+
+        <div className="manual-dial-display">
+          <input
+            ref={inputRef}
+            autoFocus
+            type="tel"
+            className="manual-dial-input"
+            placeholder="Enter phone number…"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+          />
+          {phone ? (
+            <button type="button" className="manual-dial-clear" onClick={handleClear} title="Clear">
+              <X size={16} />
+            </button>
+          ) : null}
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <input
+            type="text"
+            placeholder="Contact Name / Note (optional)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            style={{
+              width: '100%',
+              fontSize: 13,
+              padding: '8px 12px',
+              borderRadius: 10,
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid var(--line)',
+              color: 'var(--text)',
+              outline: 'none',
+            }}
+          />
+        </div>
+
+        <div className="manual-dial-grid">
+          {DIALPAD_KEYS.map((k) => (
+            <button
+              key={k.key}
+              type="button"
+              className="manual-dial-key"
+              onClick={() => handleKeyClick(k.key)}
+            >
+              <span className="manual-dial-key-digit">{k.key}</span>
+              <span className="manual-dial-key-sub">{k.sub}</span>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          {phone ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={handleBackspace}
+              style={{ flex: 'none', padding: '0 16px' }}
+              title="Backspace"
+            >
+              ⌫
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="manual-dial-call-btn"
+            onClick={handleCall}
+            disabled={!canCall || busy}
+          >
+            {busy ? <Loader2 size={16} className="spin" /> : <PhoneCall size={16} />}
+            <span>{canCall ? `Call ${phone}` : 'Enter number'}</span>
+          </button>
+        </div>
+      </motion.div>
+    </>
+  );
+}
+
 function ExtraDetailsAccordion({ prospect, onUpdate }) {
   const [open, setOpen] = useState(false);
   const insights = useMemo(() => extraInsights(prospect?.extra), [prospect?.extra]);
@@ -328,6 +488,9 @@ export default function Dialer() {
   const [targetStage, setTargetStage] = useState('');
   const [customNote, setCustomNote] = useState('');
   const [showAdd, setShowAdd] = useState(false);
+  const [manualDialOpen, setManualDialOpen] = useState(false);
+  const manualDialRef = useRef(false);
+  manualDialRef.current = manualDialOpen;
   // { id, name, noteText } of the prospect being emailed, or null. Holding the target rather
   // than a bare boolean means the follow-up prompt can still address a prospect the agent has
   // already navigated away from.
@@ -887,6 +1050,65 @@ export default function Dialer() {
     }
   };
 
+  // Direct dial any custom/ad-hoc phone number directly
+  const handleDirectDial = useCallback(async ({ phone, name }) => {
+    dialLockRef.current = true;
+    setPhaseSafe('dialing');
+    setLaunched(false);
+    setFollowUp(null);
+    try {
+      const r = await api.directDial({ phone, name });
+      if (!r || !r.ok) {
+        setPhaseSafe('idle');
+        return toast(r?.error || 'Direct dial failed.', 'error');
+      }
+
+      if (r.prospect) {
+        patchLocal(r.prospect.id, r.prospect);
+        setPinned(r.prospect);
+        setActiveId(r.prospect.id);
+        refreshProspects();
+        queue.refresh?.();
+      }
+
+      setCallId(r.callId);
+      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, phone: r.phone });
+      const softphone = softphoneLabel(r.telephonyMode);
+
+      if (r.inBrowser) {
+        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
+        if (!res.ok) {
+          try { await api.discardCall(r.callId); } catch { /* best effort */ }
+          setCallId(null);
+          setDial(null);
+          setPhaseSafe('idle');
+          return toast(res.reason || 'The in-browser call could not start.', 'error');
+        }
+        if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
+        else toast(`In-browser softphone dialing ${r.phone}…`);
+        return;
+      }
+
+      if (r.dryRun) {
+        toast(`Test mode: ${r.dialUri} simulated in-browser`);
+      } else {
+        const ok = r.telephonyMode === 'softphone' ? dispatchDialUri(r.dialUri) : false;
+        setLaunched(ok);
+        if (ok) toast(`${softphone} is dialing ${r.phone}…`);
+        else toast(r.warning || `Launch ${r.dialUri} in ${softphone} to connect`, 'error');
+      }
+      setPhaseSafe('active');
+      refreshStats();
+    } catch (e) {
+      setPhaseSafe('idle');
+      setDial(null);
+      toast(e.message, 'error');
+      refreshStats();
+    } finally {
+      dialLockRef.current = false;
+    }
+  }, [setPhaseSafe, setCallId, setDial, patchLocal, setPinned, setActiveId, refreshProspects, queue, toast, refreshStats]);
+
   // Comprehensive keyboard shortcut routing
   useEffect(() => {
     const onKey = (e) => {
@@ -948,9 +1170,9 @@ export default function Dialer() {
         return;
       }
 
-      // The composer is a modal: while it is open the dialer must stop listening, or a
-      // keystroke aimed at the email also places a call behind the dialog.
-      if (mailingRef.current) return;
+      // The composer and manual dialpad are modals: while open the dialer must stop listening, or a
+      // keystroke aimed at inputs also places an unintentional call.
+      if (mailingRef.current || manualDialRef.current) return;
 
       // Mute lives on M, like every other softphone. Only meaningful with a live mic.
       if (k === 'm' && isWebrtcRef.current && webrtcLiveRef.current) {
@@ -959,10 +1181,17 @@ export default function Dialer() {
         toast(nowMuted ? 'Microphone muted' : 'Microphone live');
         return;
       }
-      if (k === 'd' && isWebrtcRef.current && webrtcLiveRef.current) {
-        e.preventDefault();
-        setDtmfOpen((v) => !v);
-        return;
+      if (k === 'd') {
+        if (isWebrtcRef.current && webrtcLiveRef.current) {
+          e.preventDefault();
+          setDtmfOpen((v) => !v);
+          return;
+        }
+        if (phaseRef.current === 'idle') {
+          e.preventDefault();
+          setManualDialOpen(true);
+          return;
+        }
       }
 
       // Normal stage shortcuts
@@ -996,7 +1225,7 @@ export default function Dialer() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, requestDiscard, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer, toast, setDtmfOpen]);
+  }, [phase, classifyModal, startCall, hangUp, go, logOutcome, relaunchSoftphone, requestDiscard, handleDiscardCall, commitClassification, targetStage, customNote, active, openComposer, toast, setDtmfOpen, setManualDialOpen]);
 
   if (loaded && prospects.length === 0) {
     return (
@@ -1079,7 +1308,14 @@ export default function Dialer() {
             </span>
           )}
           <span>{done.size} dialed</span>
-          <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue"><Plus size={12} /> Add</button>
+          <div style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
+            <button className="btn xs" onClick={() => setManualDialOpen(true)} title="Dial any number directly (D)">
+              <Grid3x3 size={12} /> Keypad
+            </button>
+            <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue">
+              <Plus size={12} /> Add
+            </button>
+          </div>
         </div>
         <QueueList
           items={items}
@@ -1315,6 +1551,16 @@ export default function Dialer() {
                       </motion.button>
                     </div>
                     <button className="icon-btn" onClick={() => go(1)} disabled={calling || !!classifyModal} title="Next (→)"><ChevronRight size={18} /></button>
+                    {phase === 'idle' && (
+                      <button
+                        className="icon-btn"
+                        onClick={() => setManualDialOpen(true)}
+                        title="Dial another number directly (D)"
+                        style={{ marginLeft: 4, color: '#818cf8', borderColor: 'rgba(129, 140, 248, 0.3)' }}
+                      >
+                        <Grid3x3 size={17} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1641,6 +1887,16 @@ export default function Dialer() {
           <QuickAddModal
             onClose={() => setShowAdd(false)}
             onAdded={handleQuickAdd}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* MANUAL DIALPAD MODAL */}
+      <AnimatePresence>
+        {manualDialOpen && (
+          <ManualDialModal
+            onClose={() => setManualDialOpen(false)}
+            onDial={handleDirectDial}
           />
         )}
       </AnimatePresence>

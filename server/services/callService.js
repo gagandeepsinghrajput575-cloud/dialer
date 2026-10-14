@@ -121,6 +121,35 @@ function start(prospectId, { tzOffset = null } = {}) {
   };
 }
 
+// Direct dial any custom/ad-hoc phone number without pre-existing prospect
+function startDirectDial({ phone = '', name = '', tzOffset = null } = {}) {
+  const raw = telephony.cleanStr(phone);
+  const normalized = telephony.normalizePhone(raw);
+  if (!normalized || normalized.replace(/\D/g, '').length < telephony.MIN_DIGITS) {
+    throw ApiError.badRequest('A valid phone number is required to place a call.');
+  }
+
+  let p = prospects.findByPhone(normalized);
+  if (!p) {
+    const displayName = String(name || '').trim() || normalized;
+    p = prospects.insert({
+      name: displayName,
+      phone: normalized,
+      stage: 'contacted',
+      extra: { source: 'manual_dial', dialed_at: new Date().toISOString() },
+    });
+  } else if (name && String(name).trim() && p.name === p.phone) {
+    p = prospects.update(p.id, { name: String(name).trim() });
+  }
+
+  const callResult = start(p.id, { tzOffset });
+  return {
+    ok: true,
+    ...callResult,
+    prospect: prospectService.detail(p.id),
+  };
+}
+
 // ---- inbound calls -------------------------------------------------------------------------
 // The browser softphone is registered and listening; the provider delivers an INVITE and the
 // client tells us who is calling. Two things have to happen, atomically: resolve the person,
@@ -327,7 +356,7 @@ function suggestFollowUp(outcome, from = new Date()) {
 
 module.exports = {
   statsFilter, sqlTime, sqlNow, getStartOfDay, todaysDials,
-  start, startInbound, markInboundMissed, inboundCallerId, isProvisionalLead,
+  start, startDirectDial, startInbound, markInboundMissed, inboundCallerId, isProvisionalLead,
   classify, voicemailDrop, discard, remove, suggestFollowUp, applyOutcomeStage,
   OUTCOME_LABEL, FOLLOW_UP_DAYS, FOLLOW_UP_TIME,
 };

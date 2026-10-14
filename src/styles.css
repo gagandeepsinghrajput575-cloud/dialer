@@ -1096,6 +1096,133 @@ button, a, label, summary, input, select, textarea,
   color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* ---------- Manual Direct Dialpad Modal ---------- */
+.manual-dial-modal {
+  width: min(360px, 94vw);
+  padding: 22px;
+  border-radius: 20px;
+  background: #0f1224;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65), 0 0 30px rgba(99, 102, 241, 0.15);
+}
+.manual-dial-display {
+  display: flex;
+  align-items: center;
+  position: relative;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  transition: border-color 150ms ease;
+}
+.manual-dial-display:focus-within {
+  border-color: #6366f1;
+  background: rgba(99, 102, 241, 0.05);
+}
+.manual-dial-input {
+  width: 100%;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+}
+.manual-dial-input::placeholder {
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 400;
+  letter-spacing: normal;
+}
+.manual-dial-clear {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  transition: color 120ms ease;
+}
+.manual-dial-clear:hover {
+  color: #fff;
+}
+.manual-dial-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 9px;
+  margin: 14px 0 16px;
+}
+.manual-dial-key {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 0 10px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 120ms ease;
+  user-select: none;
+}
+.manual-dial-key:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+}
+.manual-dial-key:active {
+  transform: scale(0.94);
+  background: rgba(99, 102, 241, 0.22);
+}
+.manual-dial-key-digit {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.manual-dial-key-sub {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.manual-dial-call-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 13px;
+  border-radius: 13px;
+  font-size: 15px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 18px rgba(16, 185, 129, 0.35);
+  transition: all 150ms ease;
+}
+.manual-dial-call-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 24px rgba(16, 185, 129, 0.5);
+}
+.manual-dial-call-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.manual-dial-call-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.6);
+}
+
 /* ---------- Settings: in-browser softphone panel ---------- */
 .handoff-row {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;

@@ -20,6 +20,9 @@ const patch = asyncHandler(async (req, res) => {
 // everything the incoming-call modal renders.
 const inbound = asyncHandler(async (req, res) => res.json(callService.startInbound(req.body)));
 
+// POST /api/calls/direct — ad-hoc manual dialpad calls
+const directDial = asyncHandler(async (req, res) => res.json(callService.startDirectDial(req.body)));
+
 // POST /api/calls/:id/missed — the ring ended unanswered (far-end CANCEL, or Decline).
 const missed = asyncHandler(async (req, res) => res.json(callService.markInboundMissed(req.params.id, req.body)));
 
@@ -40,4 +43,4 @@ const summarize = asyncHandler(async (req, res) => {
   res.json({ ...result, call: saved });
 });
 
-module.exports = { start, inbound, missed, patch, voicemailDrop, discard, summarize };
+module.exports = { start, directDial, inbound, missed, patch, voicemailDrop, discard, summarize };

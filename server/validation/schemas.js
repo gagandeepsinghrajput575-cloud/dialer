@@ -73,6 +73,12 @@ const bulkDelete = z.object({ ids: bulkIds });
 
 const callStart = z.object({ tzOffset: z.coerce.number().optional() });
 
+const directDial = z.object({
+  phone: z.string().trim().min(5, 'A valid phone number is required (min 5 digits)').max(64),
+  name: z.string().trim().max(200).optional(),
+  tzOffset: z.coerce.number().optional().nullable(),
+});
+
 // The browser softphone posts the caller ID from the SIP From header. Kept as a loose string
 // on purpose: the *server* normalizes it (telephonyService), so a client can never talk the
 // dialer into storing an unnormalized number or a junk value.
@@ -243,7 +249,7 @@ const recordingScriptUpdate = z.object({
 });
 
 module.exports = {
-  AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart,
+  AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart, directDial,
   callPatch, callInbound, callMissed, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,

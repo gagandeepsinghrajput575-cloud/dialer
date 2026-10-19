@@ -175,9 +175,15 @@ function callerIdPool() {
 function nextCallerId() {
   const pool = callerIdPool();
   if (!pool.length) return { callerId: '', poolSize: 0, index: 0 };
-  const cursor = parseInt(settings.get('caller_id_cursor'), 10) || 0;
-  const index = ((cursor % pool.length) + pool.length) % pool.length;
-  settings.set('caller_id_cursor', String(index + 1));
+  // Atomic: getAndIncrement runs inside a single SQLite transaction, preventing duplicate CLI when two dials race.
+  const index = typeof settings.getAndIncrement === 'function'
+    ? settings.getAndIncrement('caller_id_cursor', pool.length)
+    : (() => {
+        const cursor = parseInt(settings.get('caller_id_cursor'), 10) || 0;
+        const idx = ((cursor % pool.length) + pool.length) % pool.length;
+        settings.set('caller_id_cursor', String(idx + 1));
+        return idx;
+      })();
   return { callerId: pool[index], poolSize: pool.length, index };
 }
 
@@ -229,6 +235,13 @@ function zonedTimeToUtc(dateStr, hhmm, tz) {
   let utc = guess - offset * 60000;
   const offset2 = tzOffsetMinutes(tz, new Date(utc));
   if (offset2 !== offset) { offset = offset2; utc = guess - offset * 60000; }
+  // Spring-forward gap guard: 02:30 on the DST jump night does not exist (02→03).
+  // Intl resolves the non-existent wall time to 03:30, so round-trip check fails.
+  // Heuristic +60 min advances to the first valid instant after the gap (known 60-min gap in Europe/Copenhagen).
+  try {
+    const rt = partsIn(tz, new Date(utc));
+    if (rt.hour !== hh || rt.minute !== mm) utc += 60 * 60000;
+  } catch {}
   return new Date(utc);
 }
 
@@ -256,7 +269,8 @@ function businessHours(now = new Date()) {
 
   const p = partsIn(tz, now);
   const isoDay = p.isoDay;
-  const mins = p.hour * 60 + p.minute;
+  // Seconds-aware: 08:29:59 is still closed, 08:30:00 is open. Prevents 1-min off-by-one at window edges.
+  const mins = p.hour * 60 + p.minute + (p.second || 0) / 60;
   const isBusinessDay = days.includes(isoDay);
   const open = isBusinessDay && mins >= toMinutes(start) && mins < toMinutes(end);
 
@@ -265,13 +279,15 @@ function businessHours(now = new Date()) {
   let minutesUntilOpen = null;
   if (!open) {
     if (isBusinessDay && mins < toMinutes(start)) {
-      minutesUntilOpen = toMinutes(start) - mins;
+      minutesUntilOpen = Math.ceil(toMinutes(start) - mins);
     } else {
       let ahead = 1;
       let nextDay = (isoDay % 7) + 1;
       while (!days.includes(nextDay) && ahead < 8) { nextDay = (nextDay % 7) + 1; ahead++; }
-      const extraDays = isBusinessDay ? 1 : ahead;
-      minutesUntilOpen = (24 * 60 - mins) + toMinutes(start) + (extraDays - 1) * 24 * 60;
+      // Use ahead uniformly: after close on a business day, the next business day may not be tomorrow
+      // when business_days is non-contiguous (e.g. Mon/Wed/Fri -> Fri close => Mon, ahead=3).
+      const extraDays = ahead;
+      minutesUntilOpen = Math.ceil((24 * 60 - mins) + toMinutes(start) + (extraDays - 1) * 24 * 60);
     }
   }
 
@@ -284,7 +300,7 @@ function businessHours(now = new Date()) {
     localDate: p.date,
     isBusinessDay,
     open,
-    minutesUntilClose: open ? toMinutes(end) - mins : null,
+    minutesUntilClose: open ? Math.ceil(toMinutes(end) - mins) : null,
     minutesUntilOpen,
     label: `Danish calling window ${start}–${end} (${tz})`,
   };

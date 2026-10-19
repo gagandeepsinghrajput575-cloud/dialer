@@ -18,6 +18,17 @@ function set(key, value) {
     .run(key, String(value ?? ''));
 }
 
+// Atomic cursor increment for caller-ID rotation: prevents duplicate CLI on concurrent dials.
+// Runs as a single SQLite transaction so get→compute→set is linearizable.
+function getAndIncrement(key, mod) {
+  return db.transaction(() => {
+    const cur = parseInt(get(key), 10) || 0;
+    const idx = ((cur % mod) + mod) % mod;
+    set(key, String(idx + 1));
+    return idx;
+  })();
+}
+
 function all() {
   const out = {};
   for (const k of SETTING_KEYS) out[k] = get(k);
@@ -44,4 +55,4 @@ function seedFromEnv() {
   }
 }
 
-module.exports = { get, getInt, getBool, has, set, all, publicView, seedFromEnv };
+module.exports = { get, getInt, getBool, has, set, all, publicView, seedFromEnv, getAndIncrement };

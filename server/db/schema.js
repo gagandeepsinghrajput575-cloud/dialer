@@ -90,6 +90,12 @@ CREATE INDEX IF NOT EXISTS idx_recordings_prospect ON recordings(prospect_id);
 CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at);
 `;
 
+// Inbound dedup index — makes findOpenInbound (caller_id + direction + status window) index-only
+// and minimizes race window under concurrent forked INVITEs.
+const INBOUND_DEDUP_SQL = `
+CREATE INDEX IF NOT EXISTS idx_calls_inbound_dedup ON calls(caller_id, direction, status, started_at);
+`;
+
 // AI Recording Coaching sessions and multi-turn chat messages.
 // Foreign-key cascaded to calls so cleaning up a call cleans all associated AI sessions.
 const RECORDING_CHATS_SQL = `
@@ -113,4 +119,4 @@ CREATE TABLE IF NOT EXISTS recording_chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON recording_chat_messages(chat_id);
 `;
 
-module.exports = { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL };
+module.exports = { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL, INBOUND_DEDUP_SQL };

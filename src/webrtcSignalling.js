@@ -58,21 +58,42 @@ export async function sipStackAvailable() {
 // there is exactly one capture path and mute means the same thing in both directions.
 // Best-effort by design: if a future sip.js changes the handler's shape, the call still works
 // on sip.js's own capture.
+// Hardened: intercept getDescription to guarantee tracks are attached before SDP offer creation,
+// avoiding the setTimeout(0) race that produced m=audio 0 (one-way audio) on slow devices.
 function micFactory(localStream, SessionDescriptionHandler) {
   if (!localStream || !SessionDescriptionHandler) return {};
   return {
     sessionDescriptionHandlerFactory: (sess, options) => {
       const sdh = new SessionDescriptionHandler(sess, options);
-      const attach = () => {
+      const bindTracks = () => {
         try {
           const conn = sdh.peerConnection;
           if (!conn) return false;
-          for (const sender of conn.getSenders()) if (sender.track) conn.removeTrack(sender);
-          for (const t of localStream.getTracks()) conn.addTrack(t, localStream);
+          const senders = conn.getSenders ? conn.getSenders() : [];
+          const tracks = localStream.getTracks();
+          if (senders.length && senders[0] && senders[0].track) {
+            // Prefer replaceTrack to preserve transceiver MID
+            for (let i = 0; i < Math.min(senders.length, tracks.length); i++) {
+              try { senders[i].replaceTrack(tracks[i]); } catch { try { conn.removeTrack(senders[i]); conn.addTrack(tracks[i], localStream); } catch {} }
+            }
+            for (let i = tracks.length; i < senders.length; i++) try { conn.removeTrack(senders[i]); } catch {}
+            for (let i = senders.length; i < tracks.length; i++) conn.addTrack(tracks[i], localStream);
+          } else {
+            for (const sender of senders) if (sender.track) try { conn.removeTrack(sender); } catch {}
+            for (const t of tracks) conn.addTrack(t, localStream);
+          }
           return true;
         } catch { return false; }
       };
-      if (!attach()) setTimeout(attach, 0);
+      // Try immediate bind; if PC not yet created, hook getDescription to bind just before offer.
+      if (!bindTracks()) {
+        const orig = sdh.getDescription && sdh.getDescription.bind(sdh);
+        if (orig) {
+          sdh.getDescription = async (...args) => { bindTracks(); return orig(...args); };
+        } else {
+          queueMicrotask(bindTracks);
+        }
+      }
       return sdh;
     },
   };
@@ -100,11 +121,15 @@ export function setupInboundListener(ua, onIncomingCall) {
       const fromUri = invitation.remoteIdentity?.uri;
       const callerNumber = fromUri ? String(fromUri.user || '').trim() : '';
       const listeners = new Set();
+      let terminatedEmitted = false;
 
       try {
         invitation.stateChange?.addListener?.((state) => {
-          const normalized = state === 'Established' ? 'established' : state === 'Terminated' ? 'terminated' : 'progress';
-          for (const fn of listeners) { try { fn(normalized); } catch { /* a listener must never break signalling */ } }
+          const s = String(state).toLowerCase();
+          const normalized = s === 'established' ? 'established' : s === 'terminated' ? 'terminated' : 'progress';
+          if (normalized === 'terminated' && terminatedEmitted) return;
+          if (normalized === 'terminated') terminatedEmitted = true;
+          for (const fn of listeners) { try { fn(normalized, state); } catch { /* a listener must never break signalling */ } }
         });
       } catch { /* no state machine: the engine falls back to the accept/reject it called */ }
 
@@ -116,12 +141,14 @@ export function setupInboundListener(ua, onIncomingCall) {
         reject: (options) => { try { invitation.reject(options || { statusCode: 486 }); } catch { /* already gone */ } },
         terminate: () => {
           try {
-            if (typeof invitation.bye === 'function' && invitation.state === 'Established') invitation.bye();
-            else if (typeof invitation.cancel === 'function') invitation.cancel();
+            // UAS must not cancel; if established BYE, else reject. cancel() belongs to UAC (Inviter).
+            if (typeof invitation.bye === 'function' && String(invitation.state).toLowerCase() === 'established') invitation.bye();
             else if (typeof invitation.reject === 'function') invitation.reject({ statusCode: 486 });
+            else invitation.dispose?.();
           } catch { /* the session is already down */ }
         },
         accept: async (localStream) => {
+          if (String(invitation.state).toLowerCase() === 'terminated') throw new Error('Call already terminated (caller hung up)');
           const sip = await loadSipStack();
           const SessionDescriptionHandler = sip?.SessionDescriptionHandler;
           await invitation.accept({
@@ -158,15 +185,30 @@ export async function initStandbySession({ session, onIncomingCall, onState } = 
 
   const ua = new UserAgent({
     uri,
-    transportOptions: { server: session.wsUrl },
+    transportOptions: { server: session.wsUrl, keepAliveInterval: 30, traceSip: false },
     authorizationUsername: session.username,
     authorizationPassword: session.password,
     displayName: session.username,
     logLevel: 'error',
   });
 
-  const self = { key, ua, registerer: null, stopped: false, refresh: null, retry: null, session };
+  const self = { key, ua, registerer: null, stopped: false, refresh: null, retry: null, keepAlive: null, session };
   standby = self;
+
+  // Transport liveness: detect half-open WebSocket (sleep, Wi-Fi roam, NAT rebinding).
+  // sip.js transport emits onDisconnect; fallback to raw WebSocket close listener.
+  const onTransportDisconnect = () => {
+    if (self.stopped) return;
+    clearTimeout(self.refresh);
+    clearTimeout(self.retry);
+    onState?.('retrying', 'WebSocket disconnected — re-registering…');
+    refreshStandby(self, onState, 0);
+  };
+  try {
+    ua.transport?.onDisconnect?.(onTransportDisconnect);
+    const rawWs = ua.transport?._ws || ua.transport?.ws;
+    if (rawWs?.addEventListener) rawWs.addEventListener('close', onTransportDisconnect);
+  } catch {}
 
   onState?.('registering');
   try {
@@ -177,6 +219,14 @@ export async function initStandbySession({ session, onIncomingCall, onState } = 
   }
 
   self.registerer = new Registerer(ua, { expires: REGISTER_EXPIRES });
+  try {
+    self.registerer.stateChange?.addListener?.((s) => {
+      if (String(s).toLowerCase().includes('terminated') && !self.stopped) {
+        onState?.('retrying', 'Registration terminated — retrying…');
+        refreshStandby(self, onState, 0);
+      }
+    });
+  } catch {}
   try {
     await registerStandby(self, onState);
   } catch (e) {
@@ -197,6 +247,21 @@ async function registerStandby(self, onState) {
   // Keep the registration alive for as long as the tab is: this is what makes the number ring
   // in the browser rather than in whatever desktop softphone happens to be open.
   self.refresh = setTimeout(() => { refreshStandby(self, onState, 0); }, REGISTER_REFRESH_MS);
+  // Heartbeat: poll transport liveness; if socket silently died, next register will enter retry
+  clearInterval(self.keepAlive);
+  self.keepAlive = setInterval(() => {
+    try {
+      if (self.stopped) return;
+      const t = self.ua?.transport;
+      const ws = t?._ws || t?.ws || t?._socket;
+      if (ws && typeof ws.readyState === 'number' && ws.readyState !== 1) {
+        clearInterval(self.keepAlive);
+        if (self.refresh) clearTimeout(self.refresh);
+        onState?.('retrying', 'WebSocket not open — re-registering…');
+        refreshStandby(self, onState, 0);
+      }
+    } catch {}
+  }, 30000);
 }
 
 function refreshStandby(self, onState, attempt) {
@@ -216,6 +281,7 @@ export async function disposeStandbySession() {
   self.stopped = true;
   clearTimeout(self.refresh);
   clearTimeout(self.retry);
+  clearInterval(self.keepAlive);
   try { await self.registerer?.unregister(); } catch { /* already unregistered */ }
   try { self.ua?.stop?.(); } catch { /* already stopped */ }
 }
@@ -237,6 +303,8 @@ export function standbySession() {
 export async function dialOutbound({ remoteNumber, onState, onActive, localStream } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
+  // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
+  if (self.ua.delegate?.__incomingPending) throw new Error('Incoming call in progress — cannot dial now (glare).');
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   const { UserAgent, Inviter, SessionState, SessionDescriptionHandler } = sip;
@@ -256,14 +324,16 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
     stopped = true;
     try {
       if (inviter.state === SessionState.Established && typeof inviter.bye === 'function') inviter.bye();
+      else if (typeof inviter.cancel === 'function') inviter.cancel();
       else inviter.dispose?.();
     } catch { /* already gone */ }
   };
 
   inviter.stateChange.addListener((s) => {
-    if (s === SessionState.Establishing) onState?.('ringing');
-    else if (s === SessionState.Established) { onState?.('active'); onActive?.(); }
-    else if (s === SessionState.Terminated && !stopped) onState?.('ended');
+    const name = String(s);
+    if (name === SessionState.Establishing || name === 'Establishing') onState?.('ringing');
+    else if (name === SessionState.Established || name === 'Established') { onState?.('active'); onActive?.(); }
+    else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) onState?.('ended');
   });
 
   onState?.('dialing');
@@ -271,8 +341,8 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
     await inviter.invite();
   } catch (e) {
     stop();
-    // Rejections here are the useful ones: 401/403 means credentials, 404 means the number.
     const msg = String(e?.message || e);
+    if (/491/.test(msg)) throw new Error('Glare: another call is being set up — try again in 2 seconds.');
     throw new Error(/401|403/.test(msg)
       ? 'The provider rejected the SIP credentials — check the username and password.'
       : /404/.test(msg)

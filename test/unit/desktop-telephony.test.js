@@ -437,10 +437,10 @@ const responses = (sent, status) => sent.filter((m) => m.startsWith(`SIP/2.0 ${s
   silentUa.emit({ type: 'incoming', callerPhone: CALLER, callId: 'in-10' });
   const answered = silent.answer();
   assert.strictEqual(answered.ok, false);
-  assert.strictEqual(answered.reason, 'no-native-media');
-  assert.strictEqual(handoffs.at(-1), `sip:${CALLER}@${DOMAIN}`);
-  assert.ok(silentUa.commands.some((c) => c[0] === 'decline'), 'the Pulse fork is released');
-  console.log('  ✓ signalling-only mode never fakes audio: answer/dial hand off to the OS softphone');
+  assert.strictEqual(answered.reason, 'no-media-engine');
+  assert.strictEqual(answered.handoff, `sip:${CALLER}@${DOMAIN}`, 'the UI is told which URI to open');
+  assert.strictEqual(silentUa.commands.some((c) => c[0] === 'decline'), false, 'answering never rejects the call');
+  console.log('  ✓ signalling-only mode refuses to fake an answer and never declines the caller');
 
 // ---------------------------------------------------------------------------- ledger client
 {

@@ -3,3 +3,6 @@ dist
 data
 .env
 release
+desktop/bin/linphone-daemon
+desktop/bin/linphonec
+desktop/bin/*.dylib

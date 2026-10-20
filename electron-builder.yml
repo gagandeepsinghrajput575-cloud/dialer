@@ -11,6 +11,14 @@ files:
   - node_modules/**
   - '!**/*.test.js'
   - '!test/**'
+# The headless Linphone engine, when present (see desktop/bin/README.md).
+extraResources:
+  - from: desktop/bin
+    to: linphone/bin
+    filter:
+      - linphone-daemon
+      - linphonec
+      - '*.dylib'
 asar: true
 # better-sqlite3 must stay a real .node file outside the archive.
 asarUnpack:

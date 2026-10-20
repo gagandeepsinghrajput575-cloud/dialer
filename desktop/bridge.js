@@ -37,10 +37,23 @@ class TelephonyBridge {
       this.ledgerCallId = null;
       this.emit({
         type: 'incoming_call', callerPhone: event.callerPhone, callerName: event.callerName || '',
-        callId: event.callId, at: event.at || this.now(),
+        callId: event.callId, canAnswer: this.media, handoffUri: this.media ? '' : sipUri(event.callerPhone),
+        at: event.at || this.now(),
       });
       this.ledgerChain = Promise.resolve(this.ledger ? this.ledger.inbound({ callerPhone: event.callerPhone }) : null)
-        .then((result) => { this.ledgerCallId = result && result.callId ? result.callId : null; return result; })
+        .then((result) => {
+          this.ledgerCallId = result && result.callId ? result.callId : null;
+          // Hand the row to the cockpit so it adopts this call instead of opening a second one.
+          if (this.ledgerCallId) {
+            this.emit({
+              type: 'ledger', callId: this.ledgerCallId,
+              prospect: (result && result.prospect) || null,
+              matched: !!(result && result.matched),
+              provisional: !!(result && result.provisional),
+            });
+          }
+          return result;
+        })
         .catch(() => null);
       return;
     }
@@ -93,13 +106,13 @@ class TelephonyBridge {
   }
 
   answer() {
+    // INVARIANT: answering never rejects the call. If this engine cannot carry audio, the ring
+    // is left intact and the caller is handed to Linphone by the UI — the caller keeps ringing
+    // instead of hearing a busy tone because Pulse could not reach its own microphone.
     if (this.ua && this.media) return { ok: this.ua.answer() };
     if (this.ua) {
-      // No RTP pipeline: open the OS softphone with the caller's number and release this fork.
       const phone = this.current ? this.current.callerPhone : '';
-      const handoff = this.openSoftphone(phone);
-      this.ua.decline();
-      return { ok: false, reason: 'no-native-media', handoff: true, uri: handoff.uri };
+      return { ok: false, reason: 'no-media-engine', handoff: phone ? sipUri(phone) : '' };
     }
     this.forward('answer');
     return { ok: true, forwarded: true };
@@ -132,7 +145,9 @@ class TelephonyBridge {
 
   status() {
     return {
-      engine: this.ua ? 'native-sip' : 'webrtc',
+      engine: this.ua ? (this.media ? 'linphone' : 'native-sip') : 'webrtc',
+      media: this.media,
+      canAnswer: this.media,
       registered: !!(this.ua && this.ua.registered),
       state: this.ua ? this.ua.state : 'idle',
       callId: this.ledgerCallId,

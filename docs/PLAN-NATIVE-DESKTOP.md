@@ -12,6 +12,15 @@
 | `sessionDescriptionHandlerFactory` throws | Getter-only in strict ESM under `sip.js` 0.21 | Desktop path never rewrites the factory; native SIP uses our own transport |
 | Tab lifecycle owns the call | Closing/backgrounding the tab kills the call | Call lives in the Electron main process / a persistent window |
 
+## 2. Update — the in-app engine (mission 2)
+
+The first delivery had no native media path, so `native-sip` could only hand calls to Linphone.
+That is now replaced by a supervised `linphone-daemon` child (`desktop/telephony/`) whose media
+path is CoreAudio: `PULSE_DESKTOP_ENGINE=auto` uses it when installed, otherwise the in-window
+WebRTC engine. `bridge.answer()` can no longer decline a call under any circumstance, and the
+renderer subscribes to native events. The 2-second inbound teardown is analysed in
+`docs/RCA-INBOUND-2S-DROP.md`.
+
 ## 2. Decisions
 
 1. **Two engines, one contract.**

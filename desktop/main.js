@@ -15,10 +15,15 @@ const { TelephonyBridge } = require('./bridge');
 const { LedgerClient } = require('./ledger');
 const { SipTransport } = require('./sip/transport');
 const { SipUserAgent } = require('./sip/ua');
+const { LinphoneDaemon, resolveBinary } = require('./telephony/linphoneDaemon');
 const { CARRIER, parseDeepLink, sipUri } = require('./config');
 
 const PORT = Number(process.env.PORT) || 3001;
-const ENGINE = String(process.env.PULSE_DESKTOP_ENGINE || 'webrtc').toLowerCase() === 'native-sip' ? 'native-sip' : 'webrtc';
+// auto (default): the in-app Linphone engine when its binary is present, otherwise the
+// in-window WebRTC engine. Both carry audio inside the app; native-sip is signalling-only and
+// must be asked for explicitly.
+const REQUESTED_ENGINE = String(process.env.PULSE_DESKTOP_ENGINE || 'auto').toLowerCase();
+const ENGINE = ['auto', 'linphone', 'webrtc', 'native-sip'].includes(REQUESTED_ENGINE) ? REQUESTED_ENGINE : 'auto';
 
 let win = null;
 let bridge = null;
@@ -43,14 +48,47 @@ function localAddress() {
   return '127.0.0.1';
 }
 
+function carrierCredentials() {
+  const settings = require('../server/repositories/settingsRepo');
+  return {
+    user: String(settings.get('telnyx_sip_user') || '').trim() || CARRIER.user,
+    password: String(settings.get('telnyx_sip_password') || ''),
+    domain: String(settings.get('telnyx_sip_server') || '').trim() || CARRIER.domain,
+  };
+}
+
+// The in-app engine: a headless Linphone child process whose media path is CoreAudio. This is
+// the engine that can actually answer a call with two-way audio inside the app.
+function createLinphoneEngine(binary) {
+  const config = carrierCredentials();
+  const daemon = new LinphoneDaemon({
+    config,
+    binary,
+    onEvent: (event) => {
+      if (event.type === 'engine') sendToRenderer(event);
+    },
+  });
+  const engine = new TelephonyBridge({
+    ua: daemon,
+    media: true,
+    ledger: new LedgerClient({ baseUrl: `http://127.0.0.1:${PORT}` }),
+    emit: (event) => {
+      sendToRenderer(event);
+      if (event.type === 'incoming_call') { setBadge(1); notifyIncoming(event); }
+      if (event.type === 'ended') setBadge(0);
+    },
+    forward: sendCommand,
+    handoff: openExternalUri,
+  }).start();
+  daemon.start();
+  return engine;
+}
+
 // Native signalling engine: real REGISTER/INVITE over UDP 5060. Media is delegated to the OS
 // softphone, because a CoreAudio RTP pipeline cannot be built in this toolchain.
 function createNativeEngine() {
   // Required lazily: the database (and therefore the credential) only exists after boot.
-  const settings = require('../server/repositories/settingsRepo');
-  const user = String(settings.get('telnyx_sip_user') || '').trim() || CARRIER.user;
-  const password = String(settings.get('telnyx_sip_password') || '');
-  const domain = String(settings.get('telnyx_sip_server') || '').trim() || CARRIER.domain;
+  const { user, password, domain } = carrierCredentials();
 
   const transport = new SipTransport({ host: domain, port: CARRIER.port, protocol: 'udp', onError: (err) => sendToRenderer({ type: 'transport_error', message: err.message }) });
   ua = new SipUserAgent({
@@ -84,7 +122,7 @@ function createWebRtcBridge() {
 }
 
 function registerIpc() {
-  ipcMain.handle('pulse:status', () => ({ ...bridge.status(), engine: ENGINE, shell: 'desktop' }));
+  ipcMain.handle('pulse:status', () => ({ ...bridge.status(), requestedEngine: ENGINE, shell: 'desktop' }));
   ipcMain.handle('pulse:dial', (_event, payload) => bridge.dial(payload || {}));
   ipcMain.handle('pulse:answer', () => bridge.answer());
   ipcMain.handle('pulse:decline', () => bridge.decline());
@@ -107,7 +145,15 @@ function routeDeepLink(url) {
 }
 
 function bootTelephony() {
-  bridge = ENGINE === 'native-sip' ? createNativeEngine() : createWebRtcBridge();
+  const binary = resolveBinary();
+  if (ENGINE === 'linphone' || (ENGINE === 'auto' && binary)) {
+    bridge = createLinphoneEngine(binary);
+  } else if (ENGINE === 'native-sip') {
+    bridge = createNativeEngine();
+  } else {
+    if (ENGINE !== 'auto') console.warn('[desktop] linphone-daemon not found — falling back to the in-window engine');
+    bridge = createWebRtcBridge();
+  }
   registerIpc();
   buildMenu({
     send: sendCommand,
@@ -142,6 +188,7 @@ async function boot() {
 
   bootTelephony();
   win = createWindow({ port: PORT });
+  win.webContents.once('did-finish-load', () => sendToRenderer({ type: 'engine', ...bridge.status() }));
   win.on('closed', () => { win = null; });
 
   app.on('activate', () => { if (!win) win = createWindow({ port: PORT }); });

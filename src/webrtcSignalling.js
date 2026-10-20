@@ -58,49 +58,56 @@ export async function sipStackAvailable() {
   return (await loadSipStack()) !== null;
 }
 
-// Route the session's outgoing audio through the microphone the engine already opened, so
-// there is exactly one capture path and mute means the same thing in both directions.
-// Best-effort by design: if a future sip.js changes the handler's shape, the call still works
-// on sip.js's own capture.
-// Hardened: intercept getDescription to guarantee tracks are attached before SDP offer creation,
-// avoiding the setTimeout(0) race that produced m=audio 0 (one-way audio) on slow devices (G-4).
-function micFactory(localStream, SessionDescriptionHandler) {
-  if (!localStream || !SessionDescriptionHandler) return {};
-  return {
-    sessionDescriptionHandlerFactory: (sess, options) => {
-      const sdh = new SessionDescriptionHandler(sess, options);
-      const bindTracks = () => {
-        try {
-          const conn = sdh.peerConnection;
-          if (!conn) return false;
-          const senders = conn.getSenders ? conn.getSenders() : [];
-          const tracks = localStream.getTracks();
-          if (senders.length && senders[0] && senders[0].track) {
-            // Prefer replaceTrack to preserve transceiver MID
-            for (let i = 0; i < Math.min(senders.length, tracks.length); i++) {
-              try { senders[i].replaceTrack(tracks[i]); } catch { try { conn.removeTrack(senders[i]); conn.addTrack(tracks[i], localStream); } catch {} }
-            }
-            for (let i = tracks.length; i < senders.length; i++) try { conn.removeTrack(senders[i]); } catch {}
-            for (let i = senders.length; i < tracks.length; i++) conn.addTrack(tracks[i], localStream);
-          } else {
-            for (const sender of senders) if (sender.track) try { conn.removeTrack(sender); } catch {}
-            for (const t of tracks) conn.addTrack(t, localStream);
-          }
-          return true;
-        } catch { return false; }
-      };
-      // Try immediate bind; if PC not yet created, hook getDescription to bind just before offer.
-      if (!bindTracks()) {
-        const orig = sdh.getDescription && sdh.getDescription.bind(sdh);
-        if (orig) {
-          sdh.getDescription = async (...args) => { bindTracks(); return orig(...args); };
-        } else {
-          queueMicrotask(bindTracks);
-        }
-      }
-      return sdh;
+// The microphone the cockpit opened for the call in progress.
+//
+// sip.js resolves the factory from `sessionDescriptionHandlerFactory`, and that accessor on a
+// Session is GETTER-ONLY (sip.js 0.21 `session.js`: `get sessionDescriptionHandlerFactory()`).
+// Assigning to it on an Invitation throws `TypeError: Cannot set property ... which has only a
+// getter`, which is exactly how every answered inbound call used to die before any 200 OK was
+// sent. The supported seam is the UserAgent's configuration factory plus this per-call slot.
+let activeLocalStream = null;
+
+export function setActiveLocalStream(stream) {
+  activeLocalStream = stream || null;
+}
+
+export function clearActiveLocalStream() {
+  activeLocalStream = null;
+}
+
+function mediaStreamFactory(constraints) {
+  if (activeLocalStream && activeLocalStream.getAudioTracks) {
+    const live = activeLocalStream.getAudioTracks().some((track) => track.readyState === 'live');
+    if (live) return Promise.resolve(activeLocalStream);
+  }
+  if (!navigator?.mediaDevices?.getUserMedia) return Promise.reject(new Error('Media devices are unavailable in this context.'));
+  return navigator.mediaDevices.getUserMedia(constraints || { audio: true, video: false });
+}
+
+// Answer an INVITE without ever touching a read-only accessor. Exported so the regression is
+// pinned by a test that supplies an invitation whose factory getter has no setter — the exact
+// shape sip.js presents.
+export async function acceptInvitation(invitation, localStream, options = {}) {
+  if (!invitation || typeof invitation.accept !== 'function') throw new Error('No invitation to accept.');
+  if (String(invitation.state || '').toLowerCase() === 'terminated') {
+    throw new Error('Call already terminated (caller hung up)');
+  }
+  setActiveLocalStream(localStream);
+  return invitation.accept({
+    sessionDescriptionHandlerOptions: {
+      constraints: { audio: true, video: false },
+      // 1 s was too aggressive: a slow STUN round trip produced an answer with no candidates,
+      // and the carrier tore the call down a couple of seconds after the 200 OK.
+      iceGatheringTimeout: 3000,
+      peerConnectionConfiguration: {
+        iceServers: [
+          { urls: 'stun:stun.telnyx.com:3478' },
+          { urls: 'stun:stun.l.google.com:19302' },
+        ],
+      },
+      ...options,
     },
-  };
+  });
 }
 
 function sessionKey(session) {
@@ -226,37 +233,7 @@ export function setupInboundListener(ua, onIncomingCall) {
         },
         accept: async (localStream) => {
           ua.delegate.__incomingPending = false;
-          if (String(invitation.state).toLowerCase() === 'terminated') throw new Error('Call already terminated (caller hung up)');
-          const sip = await loadSipStack();
-          const { SessionDescriptionHandler, defaultSessionDescriptionHandlerFactory } = sip || {};
-
-          if (localStream) {
-            if (typeof defaultSessionDescriptionHandlerFactory === 'function') {
-              invitation.sessionDescriptionHandlerFactory = defaultSessionDescriptionHandlerFactory(() => Promise.resolve(localStream));
-            } else if (SessionDescriptionHandler) {
-              Object.defineProperty(invitation, 'sessionDescriptionHandlerFactory', {
-                value: (sess, options) => {
-                  const mediaStreamFactory = () => Promise.resolve(localStream);
-                  return new SessionDescriptionHandler(sess.userAgent.getLogger('sip.SessionDescriptionHandler'), mediaStreamFactory, options);
-                },
-                configurable: true,
-                writable: true,
-              });
-            }
-          }
-
-          await invitation.accept({
-            sessionDescriptionHandlerOptions: {
-              constraints: { audio: true, video: false },
-              iceGatheringTimeout: 1000,
-              peerConnectionConfiguration: {
-                iceServers: [
-                  { urls: 'stun:stun.telnyx.com:3478' },
-                  { urls: 'stun:stun.l.google.com:19302' },
-                ],
-              },
-            },
-          });
+          await acceptInvitation(invitation, localStream);
         },
       });
     },
@@ -287,6 +264,12 @@ export async function initStandbySession({ session, onIncomingCall, onState } = 
 
   const ua = new UserAgent({
     uri,
+    // One capture path for both directions: sip.js asks this factory for the media stream, and
+    // it answers with the microphone the cockpit already holds (mute, level meter and the call
+    // all agree), or opens its own if the call started on sip.js's terms.
+    ...(typeof sip.defaultSessionDescriptionHandlerFactory === 'function'
+      ? { sessionDescriptionHandlerFactory: sip.defaultSessionDescriptionHandlerFactory(mediaStreamFactory) }
+      : {}),
     transportOptions: { server: session.wsUrl, keepAliveInterval: 30, traceSip: false },
     authorizationUsername: session.username,
     authorizationPassword: session.password,
@@ -386,6 +369,7 @@ function refreshStandby(self, onState, attempt) {
 }
 
 export async function disposeStandbySession() {
+  clearActiveLocalStream();
   const self = standby;
   standby = null;
   if (!self) return;
@@ -418,15 +402,15 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   if (self.ua.delegate?.__incomingPending) throw new Error('Incoming call in progress — cannot dial now (glare).');
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
-  const { UserAgent, Inviter, SessionState, SessionDescriptionHandler } = sip;
+  const { UserAgent, Inviter, SessionState } = sip;
 
   const server = self.session.server;
   const target = UserAgent.makeURI(`sip:${remoteNumber}@${server};transport=ws`);
   if (!target) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
 
+  setActiveLocalStream(localStream);
   const inviter = new Inviter(self.ua, target, {
-    sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } },
-    ...micFactory(localStream, SessionDescriptionHandler),
+    sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false }, iceGatheringTimeout: 3000 },
   });
 
   let stopped = false;

@@ -28,29 +28,45 @@ Requirements on the Mac: macOS 11+, Node 20+, and the Xcode command-line tools
 (`xcode-select --install`) so `better-sqlite3` can be rebuilt for Electron
 (`npm run desktop:rebuild`).
 
-**Two engines, one contract.** Choose with `PULSE_DESKTOP_ENGINE`:
+**Engines, one contract.** Choose with `PULSE_DESKTOP_ENGINE` (default `auto`):
 
-| Engine | Command | Audio path | Best for |
+| Engine | Command | Audio path | Answering |
 | --- | --- | --- | --- |
-| `webrtc` (default) | `npm run desktop` | In-app, Chromium → CoreAudio, autoplay unlocked | everyday calling, recording, inbound ringing in the app |
-| `native-sip` | `PULSE_DESKTOP_ENGINE=native-sip npm run desktop` | Signalling in the shell, voice in Linphone | inspecting SIP reachability, or when the WSS gateway is blocked |
+| `linphone` (auto, when installed) | `npm run desktop:linphone` | Headless `linphone-daemon` child → CoreAudio (Opus/G.711, jitter buffer, AEC) | in-app, two-way |
+| `webrtc` | `npm run desktop` | In-window Chromium → CoreAudio, autoplay unlocked | in-app, two-way |
+| `native-sip` | `npm run desktop:sip` | Signalling only (UDP/TCP 5060); voice stays with Linphone | refuses and offers the handoff |
 
-`native-sip` is a real SIP user agent: it REGISTERs with digest auth over UDP/TCP 5060, answers
-every INVITE with `100` + `180 Ringing` immediately (inside Telnyx's 10-second SBC window),
-handles CANCEL/BYE/DTMF, and writes the same `ringing → connected → completed` ledger rows. It
-does **not** carry RTP audio itself in this build, and it will never answer into a silent call:
-the Answer action opens Linphone and releases Pulse's fork. That is the deliberate Option E/A boundary:
-the shell hands the number to Linphone (`sip:<number>@sip.telnyx.com`) while Pulse keeps the
-queue, Danish phonetics, notes, dispositions and the SQLite ledger.
+`npm run desktop:check` prints which engine this machine resolves and where the binary is
+expected. A missing daemon never blocks calling — `auto` falls back to the window engine.
 
-The Settings page has a **Native macOS app** panel with the copyable Linphone parameters
-(username, `sip.telnyx.com:5060`, transport, `+45 32 33 16 10` caller ID) and the live engine /
-registration status. Everything it shows comes from `GET /api/telephony/desktop`, which is
-guarded by `x-pulse-token` and never contains a SIP secret.
+### In-app engine (Linphone) — recommended
 
-If in-app audio cannot start (engine disabled, gateway blocked, no microphone), the menu dial,
-dock action or `pulse://` link hands the number to Linphone automatically — the call still goes
-out, and Pulse still owns the queue and the ledger.
+`desktop/bin/linphone-daemon` (or a Homebrew `linphonec`) is supervised by the shell: a hidden
+child process, no window, no menu bar. The shell registers it over stdin, rings the CRM from its
+output, and `Answer` is a single `answer <id>` command — it can never terminate the call.
+
+```bash
+brew install linphone                 # or build linphone-daemon and drop it in desktop/bin/
+npm run desktop:check                 # confirms the resolved engine
+npm run desktop:linphone              # runs with the in-app engine explicitly
+```
+
+`native-sip` is the honest diagnostic mode: it REGISTERs with digest auth over UDP/TCP 5060 and
+handles INVITE/CANCEL/BYE/DTMF itself, but it has no RTP pipeline, so it never answers into a
+silent call. It is for proving the carrier leg, not for daily calling.
+
+### Inbound calls — troubleshooting
+Details and the post-mortem of the "drops after 2 seconds, logged as missed" bug are in
+`docs/RCA-INBOUND-2S-DROP.md`. Quick check:
+
+```bash
+sqlite3 data/dialer.db "SELECT id,status,duration_sec,started_at,ended_at FROM calls ORDER BY id DESC LIMIT 5;"
+```
+
+* the banner appears, but Answer reports "could not be answered" → the SIP media path failed
+  (`sessionDescriptionHandlerFactory`, ICE); see the RCA;
+* the row ends `missed` with no agent action → the caller cancelled: check carrier routing;
+* the row moves `ringing → connected → completed` with a duration → the media path is live.
 
 **Why this fixes the browser failure:** the answer no longer races `getUserMedia`, ICE and SDP
 generation inside a tab; the window never suspends its audio context; mic permission is granted

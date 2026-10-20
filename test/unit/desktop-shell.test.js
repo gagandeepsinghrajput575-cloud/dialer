@@ -50,15 +50,27 @@ console.log('--- Unit: Native desktop shell contract (preload, window, packaging
   assert.ok(main.includes('setAsDefaultProtocolClient'), 'pulse:// is registered with the OS');
   assert.ok(main.includes("app.on('open-url'"), 'macOS deep links are handled');
   assert.ok(main.includes('PULSE_DESKTOP_ENGINE'), 'the native SIP engine can be selected');
-  assert.ok(main.includes('SipTransport') && main.includes('SipUserAgent'), 'the native engine is wired, not stubbed');
+  assert.ok(main.includes('SipTransport') && main.includes('SipUserAgent'), 'the native SIP engine is wired, not stubbed');
   assert.ok(main.includes('LedgerClient'), 'native calls write the CRM ledger');
-  console.log('  ✓ main process: single instance, deep links, engine selection, native SIP + ledger');
+  assert.ok(main.includes('LinphoneDaemon') && main.includes('resolveBinary'), 'the in-app Linphone engine is wired');
+  assert.ok(/ENGINE === 'linphone' \|\| \(ENGINE === 'auto' && binary\)/.test(main), 'auto prefers the in-app engine');
+  assert.ok(main.includes("bridge.status(), requestedEngine: ENGINE"), 'status reports the engine actually running');
+  assert.ok(main.includes('canAnswer') || main.includes('media: true'), 'the engine advertises whether it can answer');
+  console.log('  ✓ main process: single instance, deep links, in-app + native SIP engines, ledger');
+
+  // The renderer must consume the shell's events; a preload API nobody calls is a silent phone.
+  const native = read('src/desktop/nativeInbound.mjs');
+  assert.ok(native.includes('onEvent'), 'the renderer subscribes to pulse:event');
+  assert.ok(read('src/softphone.jsx').includes('useNativeInbound'), 'the cockpit mounts the native inbound hook');
+  assert.ok(read('src/softphone.jsx').includes('native.answer'), 'answering a native ring goes through IPC');
 
   // ---- packaging -----------------------------------------------------------------------
   const pkg = JSON.parse(read('package.json'));
   assert.strictEqual(pkg.main, 'desktop/main.js');
   assert.ok(String(pkg.scripts.desktop).includes('electron'), 'npm run desktop launches the shell');
   assert.ok(String(pkg.scripts['desktop:dist']).includes('electron-builder'), 'npm run desktop:dist packages a DMG');
+  assert.ok(String(pkg.scripts['desktop:linphone']).includes('PULSE_DESKTOP_ENGINE=linphone'), 'the in-app engine has its own entry point');
+  assert.ok(String(pkg.scripts['desktop:check']).includes('where-is-linphone'), 'the engine can be checked before a call');
   assert.ok(pkg.devDependencies.electron, 'electron is a declared dev dependency');
   assert.ok(pkg.devDependencies['electron-builder'], 'electron-builder is a declared dev dependency');
 
@@ -68,6 +80,8 @@ console.log('--- Unit: Native desktop shell contract (preload, window, packaging
   assert.match(builder, /x64/, 'both Apple Silicon and Intel are targeted');
   assert.match(builder, /entitlements\.mac\.plist/);
   assert.match(builder, /better-sqlite3/, 'the native SQLite module is unpacked from the asar');
+  assert.match(builder, /extraResources/);
+  assert.match(builder, /linphone\/bin/, 'the in-app engine ships inside the bundle when present');
 
   const entitlements = read('desktop/entitlements.mac.plist');
   assert.match(entitlements, /com\.apple\.security\.device\.audio-input/);

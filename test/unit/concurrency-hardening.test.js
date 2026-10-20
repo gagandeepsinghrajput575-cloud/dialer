@@ -222,12 +222,18 @@ async function run() {
     ok('G-6 mic release order: releaseMedia detaches senders before stop (orange dot cleared)');
   }
 
-  // G-4 — micFactory binds before offer (static)
+  // G-4 — the microphone is bound before the SDP offer, through the supported sip.js seam.
+  // (The old micFactory monkey-patched getDescription and, on the inbound path, assigned to a
+  // getter-only session property — that TypeError is what killed answered calls.)
   {
     const sig = fs.readFileSync(path.join(__dirname, '../../src/webrtcSignalling.js'), 'utf8');
-    assert.ok(/getDescription/.test(sig), 'micFactory intercepts getDescription to bind before offer');
-    assert.ok(!/setTimeout\(attach,\s*0\)/.test(sig), 'micFactory no longer uses bare setTimeout(attach,0) race');
-    ok('G-4 micFactory binds before SDP offer (getDescription intercept, no setTimeout race)');
+    assert.ok(/sessionDescriptionHandlerFactory:\s*sip\.defaultSessionDescriptionHandlerFactory\(mediaStreamFactory\)/.test(sig),
+      'the media factory is installed on the UserAgent configuration');
+    assert.ok(/function mediaStreamFactory/.test(sig), 'the cockpit microphone is resolved at SDP time');
+    assert.ok(/setActiveLocalStream\(localStream\)/.test(sig), 'the opened stream is handed to the factory before accept');
+    assert.ok(!/invitation\.sessionDescriptionHandlerFactory\s*=/.test(sig), 'never assigns to the read-only accessor');
+    assert.ok(!/setTimeout\(attach,\s*0\)/.test(sig), 'no bare setTimeout(attach,0) race');
+    ok('G-4 microphone bound before SDP offer (UA factory, no getter mutation, no setTimeout race)');
   }
 
   // G-7 — zombie registration (static)

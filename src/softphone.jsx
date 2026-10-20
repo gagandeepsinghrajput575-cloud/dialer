@@ -12,6 +12,7 @@ import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
 import { isDesktop, onDesktopCommand, openInSoftphone, pushDesktopState } from './desktop/bridge.mjs';
+import { useNativeInbound } from './desktop/nativeInbound.mjs';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -145,6 +146,41 @@ export function SoftphoneProvider({ children }) {
   const incomingRef = useRef(null);
   incomingRef.current = incomingCall;
 
+  // ---- native engine ---------------------------------------------------------------------
+  // The Linphone daemon inside the shell owns the ring and the audio. Its events feed the same
+  // inbound machinery the browser engine uses, and the ledger row it already opened is adopted
+  // (never re-created), so a native call is one row, one modal and one disposition.
+  const native = useNativeInbound({
+    enabled: isDesktop(),
+    onRinging: useCallback((event) => {
+      const local = findProspectByPhone(event.callerPhone);
+      setInbound({
+        callerNumber: event.callerPhone || 'Unknown', callerName: event.callerName || '',
+        prospect: local, matched: !!local, provisional: false, loading: !local,
+        resolution: 'local', callId: null, startedAt: new Date().toISOString(), native: true,
+      });
+    }, [findProspectByPhone, setInbound]),
+    onLedger: useCallback((event) => {
+      setInbound((cur) => (cur && cur.native
+        ? { ...cur, callId: event.callId || cur.callId, prospect: event.prospect || cur.prospect, loading: false, matched: !!event.matched, provisional: !!event.provisional }
+        : cur));
+    }, [setInbound]),
+    onAnswered: useCallback(() => onActive('inbound'), [onActive]),
+    onEnded: useCallback((event) => {
+      if (event.answered || event.durationSec > 0) { onEnded('inbound'); return; }
+      const rec = inboundRef.current;
+      setInbound(null);
+      if (rec && rec.callerNumber) toast(`Missed call from ${rec.callerNumber}`, 'error');
+      refreshStats();
+    }, [inboundRef, onEnded, refreshStats, setInbound, toast]),
+  });
+
+  // The modal and the menu both call these; whichever engine owns the ring gets the answer.
+  const nativeRinging = !!native.incomingCall;
+  const ringingCall = engine.incomingCall || native.incomingCall;
+  const answerInbound = nativeRinging ? native.answer : engine.answerInbound;
+  const declineInbound = nativeRinging ? native.decline : engine.declineInbound;
+
   // ---- native shell ----------------------------------------------------------------------
   // The macOS menu bar and pulse:// deep links dial through exactly this path: one direct-dial
   // ledger row, then the same engine `start` the dialer page uses. No second call pipeline.
@@ -177,31 +213,37 @@ export function SoftphoneProvider({ children }) {
     }
   }, [enabled, engine, setView, toast]);
 
+  // The menu bar is outside React: it must never act on a stale render's callbacks.
+  const answerRef = useRef(null);
+  const declineRef = useRef(null);
+  const hangupRef = useRef(null);
+  answerRef.current = answerInbound;
+  declineRef.current = declineInbound;
+  hangupRef.current = engine.hangUp;
+
   useEffect(() => {
     if (!isDesktop()) return undefined;
     return onDesktopCommand((command) => {
       if (!command) return;
       if (command.action === 'dial') startDesktopDial(command.phone);
-      else if (command.action === 'answer') engine.answerInbound && engine.answerInbound();
-      else if (command.action === 'decline') engine.declineInbound && engine.declineInbound();
-      else if (command.action === 'hangup') engine.hangUp && engine.hangUp();
+      else if (command.action === 'answer') answerRef.current?.();
+      else if (command.action === 'decline') declineRef.current?.();
+      else if (command.action === 'hangup') hangupRef.current?.();
       else if (command.action === 'dtmf') engine.sendDtmf && engine.sendDtmf(command.digit);
     });
   }, [engine, startDesktopDial]);
+
 
   // The dock badge and the native notification are driven by the engine's own state, so they
   // can never claim a ringing phone the modal is not showing.
   useEffect(() => {
     if (!isDesktop()) return;
-    if (incomingRef.current) {
-      pushDesktopState({
-        type: 'incoming',
-        callerPhone: incomingRef.current.callerNumber || '',
-        callerName: (incomingRef.current.prospect && incomingRef.current.prospect.name) || '',
-      });
+    if (incomingRef.current || native.incomingCall) {
+      const ring = incomingRef.current || native.incomingCall;
+      pushDesktopState({ type: 'incoming', callerPhone: ring.callerNumber || '' });
     } else if (engine.state === 'active') pushDesktopState({ type: 'active' });
     else pushDesktopState({ type: 'idle' });
-  }, [incomingCall, engine.state]);
+  }, [incomingCall, engine.state, native.incomingCall]);
 
   // ---- test-mode trigger ---------------------------------------------------------------
   // Press `i` anywhere in test mode: the phone rings, the modal appears, Enter answers and
@@ -240,7 +282,11 @@ export function SoftphoneProvider({ children }) {
     setCallHandlers,
     simulateIncomingCall,
     simulateCallerHangup,
-  }), [engine, enabled, dryRun, setCallHandlers, simulateCallerHangup, simulateIncomingCall]);
+    incomingCall: ringingCall,
+    answerInbound,
+    declineInbound,
+    nativeEngine: nativeRinging,
+  }), [engine, enabled, dryRun, setCallHandlers, simulateCallerHangup, simulateIncomingCall, ringingCall, answerInbound, declineInbound, nativeRinging]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

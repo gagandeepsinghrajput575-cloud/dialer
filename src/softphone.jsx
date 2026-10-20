@@ -110,20 +110,20 @@ export function SoftphoneProvider({ children }) {
     handlersRef.current.onActive?.(direction);
   }, [bumpLedger, inboundRef, refreshStats, setActiveId, setInbound, setView]);
 
-  const onEnded = useCallback((direction) => {
+  const onEnded = useCallback((direction, endMeta) => {
     if (direction === 'inbound') {
       const rec = inboundRef.current;
       // Hand the finished call to the dialer, which owns the 1-8 disposition modal. The call
       // row already exists server-side, so classification is the same PATCH an outbound call
       // uses — same copilot, same follow-up prompt, same stats.
-      setInboundEnded(rec ? { callId: rec.callId, prospect: rec.prospect } : null);
+      setInboundEnded(rec ? { callId: rec.callId, prospect: rec.prospect, endMeta } : null);
       setInbound(null);
       bumpLedger();
       refreshStats();
     } else {
       bumpLedger();
     }
-    handlersRef.current.onEnded?.(direction);
+    handlersRef.current.onEnded?.(direction, endMeta);
   }, [bumpLedger, inboundRef, refreshStats, setInbound, setInboundEnded]);
 
   const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {

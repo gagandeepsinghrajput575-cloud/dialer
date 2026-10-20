@@ -11,6 +11,7 @@
 // and the persistent root <audio> element synchronously within user gesture call stacks.
 
 export const DANISH_RING = { frequency: 425, onMs: 1000, offMs: 4000, volume: 0.18 };
+export const DANISH_RINGBACK = { frequency: 425, onMs: 1000, offMs: 4000, volume: 0.06 };
 
 let sharedUnlockCtx = null;
 
@@ -170,4 +171,13 @@ export function createRinger(overrides = {}) {
   }
 
   return { start, stop, ringing: () => live };
+}
+
+/**
+ * Danish outbound ringback synthesiser (425 Hz, 1s on / 4s off, quiet 0.06 volume) played
+ * locally when a live SIP INVITE receives `180 Ringing` without early-media SDP, and stopped
+ * immediately upon `183 Session Progress` (with SDP) or `200 OK`.
+ */
+export function createRingback(overrides = {}) {
+  return createRinger({ ...DANISH_RINGBACK, ...overrides });
 }

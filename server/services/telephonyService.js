@@ -8,7 +8,10 @@ const { NATIONAL_LENGTH, SOFTPHONE_PROTOCOLS, TELEPHONY_MODES } = require('../co
 
 function cleanStr(val) {
   if (val === null || val === undefined) return '';
-  const s = String(val).trim();
+  const s = String(val)
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim();
   const lower = s.toLowerCase();
   if (['null', 'undefined', 'n/a', 'na', 'none', '-', '--', 'nil'].includes(lower)) return '';
   return s;
@@ -70,8 +73,14 @@ const mode = () => {
   return TELEPHONY_MODES.includes(m) ? m : 'softphone';
 };
 
+function sanitizeDialTarget(phone) {
+  const normalized = normalizePhone(phone);
+  if (normalized) return normalized;
+  return String(phone || '').replace(/[\s\u00A0\u200B-\u200F\u202F\u2060\uFEFF()[\]{}<>"']/g, '');
+}
+
 // What the OS hands to Zoiper/Linphone/Telephone: sip:+4520123456 or tel:+4520123456
-const buildDialUri = (phone, proto = protocol()) => `${proto}:${phone}`;
+const buildDialUri = (phone, proto = protocol()) => `${proto}:${sanitizeDialTarget(phone)}`;
 
 // ---- Telnyx ----
 // The carrier is Telnyx (Mission Control Portal): a Credential-Auth SIP Connection dialled
@@ -88,8 +97,9 @@ const sipServer = () => String(settings.get('telnyx_sip_server') || '').trim() |
 // Same number addressed straight at the SIP domain — handy as a manual fallback.
 function buildDialUriFull(phone) {
   const server = sipServer();
-  if (!server || /@/.test(phone)) return buildDialUri(phone);
-  return `sip:${phone}@${server}`;
+  const clean = sanitizeDialTarget(phone);
+  if (!server || /@/.test(clean)) return buildDialUri(clean);
+  return `sip:${clean}@${server}`;
 }
 
 const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim();
@@ -114,7 +124,7 @@ function webrtcWsUrl() {
 // over the WebSocket gateway rather than a UDP/TCP trunk.
 function buildWebRtcUri(phone) {
   const server = webrtcServer();
-  const clean = String(phone || '').trim();
+  const clean = sanitizeDialTarget(phone);
   return server ? `sip:${clean}@${server};transport=ws` : `sip:${clean};transport=ws`;
 }
 
@@ -150,7 +160,10 @@ function webrtcSession() {
     username: r.user,
     // Normalized like every other caller ID the app shows or sends: the browser puts this
     // straight into the SIP From header, so '+45 20 12 34 56' would be a malformed one.
-    callerId: normalizePhone(settings.get('caller_id')) || nextCallerId().callerId || '',
+    callerId: normalizePhone(settings.get('caller_id'))
+      || nextCallerId().callerId
+      || normalizePhone(settings.get('flynumber_did'))
+      || '',
     password: handoff ? password : '',
     hasPassword: r.hasPassword,
     credentialHandoff: handoff,

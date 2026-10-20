@@ -593,10 +593,13 @@ export default function Dialer() {
   }, [setPhaseSafe, refreshStats]);
   // Fires when the engine ends the session. The mic is already cold by then (the engine
   // releases it before reporting), so classification opens on a call that is truly over.
-  const engineEnded = useCallback(() => {
+  const engineEnded = useCallback((_dir, endMeta) => {
     webrtcLiveRef.current = false;
-    if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
-  }, []);
+    if (endMeta?.reason) {
+      toast(endMeta.reason, 'error');
+    }
+    if (phaseRef.current !== 'idle') webrtcFinishRef.current?.(endMeta);
+  }, [toast]);
   const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
     // SoftphoneProvider already uploads when recCallId is attached to the engine.
     if (recCallId) return;
@@ -898,21 +901,45 @@ export default function Dialer() {
 
   // The second half of a hang-up: everything except silencing the audio, which is over.
   // Split out because the in-browser engine calls it itself once it has released the mic.
-  const openClassification = useCallback(() => {
+  const openClassification = useCallback((endMeta = null) => {
     if (!callId || !active) return;
     const dur = secRef.current;
+    const autoOutcome = endMeta?.autoOutcome || null;
+    const mappedOutcome = autoOutcome === 'bad_number'
+      ? 'wrong_number'
+      : autoOutcome === 'busy'
+        ? 'hung_up'
+        : autoOutcome === 'no_answer'
+          ? 'no_answer'
+          : (endMeta?.modalOutcome && OUTCOMES.some((x) => x.id === endMeta.modalOutcome) ? endMeta.modalOutcome : null);
+
     setPhaseSafe('idle');
     setLaunched(false);
     setDtmfOpen(false);   // the touch-tone pad must not float over the classification dialog
-    setTargetStage(active.stage || 'contacted');
+    setTargetStage(autoOutcome === 'bad_number' ? 'lost' : (active.stage || 'contacted'));
     setCustomNote(quickNoteRef.current.trim());
     setClassifySafe({
       callId,
       duration: dur,
       prospect: active,
+      sipCode: endMeta?.sipCode || null,
+      sipReason: endMeta?.reason || '',
+      autoOutcome,
+      suggestedOutcome: mappedOutcome,
+      isCarrierError: Boolean(endMeta?.isCarrierError),
     });
   }, [callId, active, setPhaseSafe, setClassifySafe]);
   webrtcFinishRef.current = openClassification;
+
+  // Focus the suggested disposition button automatically whenever a SIP rejection opens the modal.
+  useEffect(() => {
+    if (!classifyModal?.suggestedOutcome || typeof document === 'undefined') return undefined;
+    const t = setTimeout(() => {
+      const btn = document.querySelector(`.classify-modal .outcome[data-outcome="${classifyModal.suggestedOutcome}"]`);
+      btn?.focus?.();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [classifyModal]);
 
   // An inbound call that has been answered belongs to the cockpit from that moment: the same
   // call bar, the same talk timer, the same M / D / H keys as an outbound dial. The call row
@@ -946,7 +973,7 @@ export default function Dialer() {
 
   // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
-    if (phaseRef.current !== 'active' || !callId || !active) return;
+    if ((phaseRef.current !== 'active' && phaseRef.current !== 'dialing') || !callId || !active) return;
     // In-browser: hanging up means releasing the microphone, and the engine reports back the
     // moment it has done that — so classification happens with the mic already cold.
     if (isWebrtcRef.current) {
@@ -1225,7 +1252,11 @@ export default function Dialer() {
           requestDiscard();
         } else if (e.key === 'Enter') {
           e.preventDefault();
-          commitClassification('conversation', targetStage, customNote);
+          commitClassification(
+            (classifyRef.current || classifyModal)?.suggestedOutcome || 'conversation',
+            targetStage,
+            customNote,
+          );
         } else if (/^[1-8]$/.test(e.key)) {
           e.preventDefault();
           commitClassification(OUTCOMES[Number(e.key) - 1].id, targetStage, customNote);
@@ -1276,7 +1307,7 @@ export default function Dialer() {
         e.preventDefault();
         if (phaseRef.current === 'idle') startCall();
         else if (phaseRef.current === 'active') hangUp();
-      } else if (k === 'h' && phaseRef.current === 'active') {
+      } else if (k === 'h' && (phaseRef.current === 'active' || phaseRef.current === 'dialing')) {
         e.preventDefault();
         hangUp();
       } else if (k === 'ArrowRight') {
@@ -2016,15 +2047,32 @@ export default function Dialer() {
               </div>
 
               <div className="classify-content">
+                {classifyModal.sipReason && (
+                  <div
+                    className={`classify-sip-banner ${classifyModal.isCarrierError ? 'is-carrier-error' : ''}`}
+                    role="alert"
+                    data-sip-code={classifyModal.sipCode || ''}
+                    data-auto-outcome={classifyModal.autoOutcome || ''}
+                  >
+                    <span className="classify-sip-code">
+                      {classifyModal.sipCode ? `SIP ${classifyModal.sipCode}` : 'SIP'}
+                    </span>
+                    <span className="classify-sip-reason">{classifyModal.sipReason}</span>
+                  </div>
+                )}
                 <label className="classify-label">1. Choose Call Outcome</label>
                 <div className="classify-outcomes-grid">
                   {OUTCOMES.map((o) => {
                     const Icon = ICONS[o.icon] || Circle;
+                    const isSuggested = classifyModal.suggestedOutcome === o.id;
                     return (
                       <button
                         key={o.id}
                         type="button"
-                        className="outcome live"
+                        data-outcome={o.id}
+                        data-suggested={isSuggested ? 'true' : undefined}
+                        aria-pressed={isSuggested ? 'true' : undefined}
+                        className={`outcome live ${isSuggested ? 'is-suggested' : ''}`}
                         style={{ '--c': o.color }}
                         onClick={() => commitClassification(o.id, targetStage, customNote)}
                       >
@@ -2069,7 +2117,7 @@ export default function Dialer() {
                 <button className="btn danger" onClick={requestDiscard} title="Delete this call record without logging">Discard call</button>
                 <button
                   className="btn primary"
-                  onClick={() => commitClassification('conversation', targetStage, customNote)}
+                  onClick={() => commitClassification(classifyModal.suggestedOutcome || 'conversation', targetStage, customNote)}
                 >
                   <Check size={16} /> Save & Finish
                 </button>

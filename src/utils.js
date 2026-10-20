@@ -264,7 +264,10 @@ export function dispatchDialUri(uri) {
 const PLACEHOLDERS = new Set(['null', 'undefined', 'n/a', 'na', 'none', '-', '--', 'nil']);
 export function cleanStr(val) {
   if (val === null || val === undefined) return '';
-  const s = String(val).trim();
+  const s = String(val)
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim();
   return PLACEHOLDERS.has(s.toLowerCase()) ? '' : s;
 }
 

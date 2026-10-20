@@ -1353,6 +1353,61 @@ async function run() {
       check(abandonedCallRow?.status === 'abandoned' && abandonedCallRow?.outcome === 'dropped',
         `pagehide beacon transitions live DB row to abandoned/dropped (${abandonedCallRow?.status}/${abandonedCallRow?.outcome})`);
       edgeApp.dom.window.close();
+
+      // Live-Call Hardening E2E JSDOM checks:
+      // 1) Messy Danish E.164 sanitization + pre-answer hangup classification modal + SIP autoOutcome persistence
+      const messyRes = await post('/api/prospects', {
+        name: 'Messy CLI Probe',
+        company: 'Copenhagen Audio ApS',
+        phone: '0045 (20) 77-88-99',
+        stage: 'new',
+      });
+      const messyBody = await messyRes.json();
+      check((messyRes.status === 200 || messyRes.status === 201) && messyBody?.phone === '+4520778899',
+        `messy Danish number sanitized on ingest to +4520778899 (${messyBody?.phone})`);
+
+      const liveApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: fakeWebAudio() });
+      const lwin = liveApp.window;
+      const ldoc = lwin.document;
+      lwin.__pulseNow = () => new Date('2026-10-21T08:00:00Z'); // 10:00 Europe/Copenhagen
+      await wait(() => ldoc.querySelector('.q-item'), 10000, 'live hardening queue');
+      await ensureListener(liveApp);
+      await sleep(1100);
+
+      const messyItem = [...ldoc.querySelectorAll('.q-item')].find((el) => /Messy CLI Probe/.test(el.textContent));
+      if (messyItem) messyItem.dispatchEvent(new lwin.MouseEvent('click', { bubbles: true }));
+      await sleep(300);
+
+      // Dial messy prospect and press H while still dialing (pre-answer cancel -> classify modal opens immediately)
+      key(lwin, 'c');
+      await wait(() => /Test mode: sip:\+4520778899/.test(ldoc.body.textContent), 5000, 'sanitized dial URI toast');
+      check(/sip:\+4520778899/.test(ldoc.body.textContent),
+        'outbound dial URI contains strictly sanitized E.164 digits without spaces or punctuation');
+      key(lwin, 'h');
+      await wait(() => ldoc.querySelector('.classify-modal'), 5000, 'pre-answer hangup classification modal');
+      check(!!ldoc.querySelector('.classify-modal'),
+        'pressing H during pre-answer dialing cancels call cleanly and opens classification modal');
+      key(lwin, '1'); // log no_answer
+      await wait(() => !ldoc.querySelector('.classify-modal'), 5000, 'classify modal closed');
+
+      // Direct API verification of autoOutcome 'bad_number' (404/410/484) -> stage 'lost' & 'busy' (486/600)
+      const c404 = await (await post(`/api/prospects/${messyBody.id}/call`, {})).json();
+      const p404 = await fetch(`${BASE}/api/calls/${c404.callId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outcome: 'bad_number', duration_sec: 0 }),
+      });
+      check(p404.status === 200, `PATCH /api/calls/:id accepts decoded SIP autoOutcome 'bad_number' (${p404.status})`);
+      const updatedMessy = await (await fetch(`${BASE}/api/prospects/${messyBody.id}`)).json();
+      check(updatedMessy.stage === 'lost', `autoOutcome 'bad_number' automatically moves prospect stage to 'lost' (${updatedMessy.stage})`);
+      const c486 = await (await post(`/api/prospects/${messyBody.id}/call`, {})).json();
+      const p486 = await fetch(`${BASE}/api/calls/${c486.callId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outcome: 'busy', duration_sec: 0 }),
+      });
+      check(p486.status === 200, `PATCH /api/calls/:id accepts decoded SIP autoOutcome 'busy' (${p486.status})`);
+      liveApp.dom.window.close();
     }
 
     // Leave the fixture as it was found: no sink, no captured mail, no stale setting.

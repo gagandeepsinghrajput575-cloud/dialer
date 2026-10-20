@@ -98,9 +98,11 @@ const callAbandon = z.object({
   note: z.string().max(1000).optional(),
 });
 
+const CALL_OUTCOMES = [...OUTCOMES, 'bad_number', 'busy'];
+
 const callPatch = z.object({
   status: z.enum(['connected', 'completed', 'ended', 'answered', 'initiated', 'placed', 'abandoned']).optional(),
-  outcome: z.enum(OUTCOMES).optional(),
+  outcome: z.enum(CALL_OUTCOMES).optional(),
   duration_sec: seconds.optional(),
   vm_dropped: boolish.optional(),
   follow_up_at: nullableDatetime().optional(),

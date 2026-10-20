@@ -301,8 +301,9 @@ function markInboundMissed(callId, { reason = 'missed', duration_sec = 0 } = {})
 }
 
 const OUTCOME_LABEL = {
-  no_answer: 'no answer', voicemail: 'voicemail', wrong_number: 'wrong number', gatekeeper: 'gatekeeper',
-  hung_up: 'hung up', conversation: 'conversation', meeting_booked: 'meeting booked', dnc: 'do not call',
+  no_answer: 'no answer', voicemail: 'voicemail', wrong_number: 'wrong number', bad_number: 'bad number',
+  gatekeeper: 'gatekeeper', hung_up: 'hung up', busy: 'busy',
+  conversation: 'conversation', meeting_booked: 'meeting booked', dnc: 'do not call',
 };
 
 // Stage machine + follow-up scheduling.
@@ -312,7 +313,7 @@ function applyOutcomeStage(p, outcome, followUpAt) {
   const PICKUP = ['gatekeeper', 'hung_up', 'conversation', 'meeting_booked'];
   if (PICKUP.includes(outcome) && stage === 'new') stage = 'contacted';
   if (outcome === 'meeting_booked') stage = 'meeting';
-  if (outcome === 'wrong_number') stage = 'lost';
+  if (outcome === 'wrong_number' || outcome === 'bad_number') stage = 'lost';
   if (outcome === 'dnc') { dnc = 1; stage = 'lost'; }
   if (followUpAt && !['meeting', 'won', 'lost'].includes(stage)) stage = 'followup';
   return { stage, dnc: dnc ? 1 : 0 };
@@ -374,7 +375,9 @@ function classify(callId, input = {}) {
   if (!call) throw ApiError.notFound('Call not found');
 
   const outcome = input.outcome || null;
-  if (outcome && !OUTCOMES.includes(outcome)) throw ApiError.badRequest('Bad outcome');
+  if (outcome && !OUTCOMES.includes(outcome) && outcome !== 'bad_number' && outcome !== 'busy') {
+    throw ApiError.badRequest('Bad outcome');
+  }
 
   const liveAnswerOnly = input.status === 'connected' && !outcome && !Number.isFinite(input.duration_sec);
   const fields = liveAnswerOnly

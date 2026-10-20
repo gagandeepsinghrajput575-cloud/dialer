@@ -31,8 +31,217 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
-import { createRinger } from './utils/ringer.js';
+import { createRinger, createRingback } from './utils/ringer.js';
 import { acquireSipLeadership } from './utils/tabLeadership.js';
+
+// ---- Challenge 4 (Live Hardening): Telecom-Grade Microphone DSP & Constraints ----
+export function buildAudioConstraints(preferredDeviceId = '') {
+  return {
+    audio: {
+      ...(preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : {}),
+      echoCancellation: { ideal: true },
+      noiseSuppression: { ideal: true },
+      autoGainControl: { ideal: true },
+      channelCount: { ideal: 1 },
+      sampleRate: { ideal: 48000 },
+    },
+  };
+}
+
+export async function acquireMicrophoneStream({
+  preferredDeviceId = '',
+  mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : null,
+} = {}) {
+  if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
+    throw new Error('Browser audio capture API unavailable');
+  }
+  try {
+    return await mediaDevices.getUserMedia(buildAudioConstraints(preferredDeviceId));
+  } catch (err) {
+    if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+      throw err;
+    }
+    return mediaDevices.getUserMedia({ audio: true });
+  }
+}
+
+// ---- Challenge 1 (Live Hardening): Reactive Asynchronous Dual-Channel Recording Mixer ----
+// Mixes both the agent's microphone stream AND late-arriving remote RTP audio tracks into a
+// single live AudioContext MediaStreamDestination without restarting or interrupting MediaRecorder.
+export function createRecordingSession({
+  callId = null,
+  localStream = null,
+  remoteStream = null,
+  AudioContextCtor = null,
+  MediaRecorderCtor = typeof window !== 'undefined' ? window.MediaRecorder : null,
+  onData = null,
+  onStop = null,
+} = {}) {
+  const Ctx = AudioContextCtor || audioContextCtor();
+  if (!Ctx || typeof MediaRecorderCtor !== 'function') return null;
+
+  const ctx = new Ctx();
+  if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+    ctx.resume().catch(() => {});
+  }
+  const dest = ctx.createMediaStreamDestination();
+  const connectedRemoteTracks = new Set();
+  const nodes = [];
+
+  const attachLocalStream = (stream) => {
+    if (!stream || typeof stream.getAudioTracks !== 'function' || !stream.getAudioTracks().length) {
+      return false;
+    }
+    try {
+      const micSource = ctx.createMediaStreamSource(stream);
+      micSource.connect(dest);
+      nodes.push(micSource);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const mixRemoteTrackIntoRecording = (track) => {
+    if (!track) return false;
+    const key = track.id || track;
+    if (connectedRemoteTracks.has(key)) return false;
+    connectedRemoteTracks.add(key);
+    try {
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        ctx.resume().catch(() => {});
+      }
+      const stream = typeof MediaStream !== 'undefined'
+        ? new MediaStream([track])
+        : { id: `remote-${String(key)}`, getAudioTracks: () => [track], getTracks: () => [track] };
+      const remoteSource = ctx.createMediaStreamSource(stream);
+      remoteSource.connect(dest);
+      nodes.push(remoteSource);
+      return true;
+    } catch {
+      connectedRemoteTracks.delete(key);
+      return false;
+    }
+  };
+
+  attachLocalStream(localStream);
+  if (remoteStream && typeof remoteStream.getAudioTracks === 'function') {
+    for (const track of remoteStream.getAudioTracks()) {
+      mixRemoteTrackIntoRecording(track);
+    }
+  }
+
+  const mime = typeof MediaRecorderCtor.isTypeSupported === 'function' && MediaRecorderCtor.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : (typeof MediaRecorderCtor.isTypeSupported === 'function' && MediaRecorderCtor.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : 'audio/ogg');
+
+  const recorder = new MediaRecorderCtor(dest.stream, { mimeType: mime });
+  const chunks = [];
+  recorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) {
+      chunks.push(e.data);
+      onData?.(e.data);
+    }
+  };
+  const startedAt = Date.now();
+  recorder.onstop = () => {
+    try {
+      const durationSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      const blob = new Blob(chunks, { type: mime });
+      if (blob.size > 0) {
+        onStop?.({ blob, durationSec, callId });
+      }
+    } catch { /* ignore assembly errors */ }
+    try { ctx.close?.(); } catch { /* ignore */ }
+  };
+  recorder.start(1000);
+
+  return {
+    recorder,
+    ctx,
+    dest,
+    chunks,
+    mimeType: mime,
+    startedAt,
+    callId,
+    attachLocalStream,
+    mixRemoteTrackIntoRecording,
+    remoteTrackCount: () => connectedRemoteTracks.size,
+    stop: () => {
+      try {
+        if (recorder.state !== 'inactive') recorder.stop();
+      } catch {
+        try { ctx.close?.(); } catch { /* ignore */ }
+      }
+    },
+  };
+}
+
+// ---- Challenge 5 (Live Hardening): Dual-Mode DTMF Dispatch (RFC 4733 -> SIP INFO -> WebAudio) ----
+export async function dispatchDtmfTone({
+  digit,
+  pc = null,
+  peerConnection = null,
+  sipHandle = null,
+  sipSession = null,
+  playLocalTone = null,
+  playFeedbackTone = null,
+} = {}) {
+  const key = String(digit);
+  if (!DTMF_KEYS.includes(key)) return { sent: false, mode: 'invalid', transport: 'invalid' };
+
+  const conn = pc || peerConnection;
+  const session = sipHandle || sipSession;
+  const onBeep = playLocalTone || playFeedbackTone;
+  const pair = DTMF_TONES[key];
+  let mode = 'local-tone';
+
+  // Primary: RFC 4733 in-band WebRTC RTCDTMFSender (160ms tone, 70ms inter-tone gap)
+  let sentViaRtp = false;
+  try {
+    const sender = conn?.getSenders?.().find((s) => s?.track?.kind === 'audio' || s?.dtmf);
+    if (sender?.dtmf && typeof sender.dtmf.insertDTMF === 'function') {
+      sender.dtmf.insertDTMF(key, 160, 70);
+      sentViaRtp = true;
+      mode = 'rfc4733';
+    }
+  } catch {
+    sentViaRtp = false;
+  }
+
+  // Secondary fallback: Out-of-band SIP INFO / session DTMF over signalling WebSocket
+  if (!sentViaRtp && session) {
+    try {
+      if (typeof session.sendDtmf === 'function') {
+        await session.sendDtmf(key);
+        mode = 'sip-info';
+      } else if (typeof session.sendDTMF === 'function') {
+        await session.sendDTMF(key);
+        mode = 'sip-info';
+      } else if (typeof session.info === 'function') {
+        await session.info({
+          requestOptions: {
+            body: {
+              contentDisposition: 'render',
+              contentType: 'application/dtmf-relay',
+              content: `Signal=${key}\r\nDuration=160\r\n`,
+            },
+          },
+        });
+        mode = 'sip-info';
+      }
+    } catch { /* non-fatal; local cue still plays below */ }
+  }
+
+  // Tertiary: Immediate local Web Audio tactile confirmation tone
+  if (pair && typeof onBeep === 'function') {
+    try { onBeep(pair, 160); } catch { /* ignore */ }
+  }
+
+  return { sent: true, mode, transport: mode };
+}
 
 // ---- Challenge 1: Page Reload / Navigation / Tab Close Resilience ----
 // Installs synchronous beforeunload confirmation + pagehide/unload sendBeacon & SIP BYE/486
@@ -145,7 +354,7 @@ export function monitorMicrophoneFailover({
       if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
         throw new Error('Browser audio capture API unavailable');
       }
-      const nextStream = await mediaDevices.getUserMedia({ audio: true });
+      const nextStream = await acquireMicrophoneStream({ mediaDevices });
       if (disposed) {
         for (const t of nextStream.getTracks?.() || []) { try { t.stop?.(); } catch {} }
         return;
@@ -303,6 +512,7 @@ export default function useWebRtc({
   const mutedRef = useRef(false);
   const enabledRef = useRef(enabled);
   const ringerRef = useRef(null);
+  const ringbackRef = useRef(null);
   const incomingRef = useRef(null);      // the ringing call, readable synchronously (key handlers)
   const inboundActiveRef = useRef(false);
   const answeredInboundRef = useRef(null);   // the live inbound session, for hang-up/teardown
@@ -325,9 +535,14 @@ export default function useWebRtc({
 
   // The ringer is created once and reused; every path that ends a call goes through stop().
   if (!ringerRef.current && typeof window !== 'undefined') ringerRef.current = createRinger();
+  if (!ringbackRef.current && typeof window !== 'undefined') ringbackRef.current = createRingback();
 
   const stopRinger = useCallback(() => {
     try { ringerRef.current?.stop(); } catch { /* a silent ringer is not an error */ }
+  }, []);
+
+  const stopRingback = useCallback(() => {
+    try { ringbackRef.current?.stop(); } catch { /* a silent ringback is not an error */ }
   }, []);
 
   const releaseInboundLock = useCallback(() => {
@@ -338,48 +553,23 @@ export default function useWebRtc({
 
   const startRecording = useCallback((callId) => {
     if (dryRun || typeof window === 'undefined' || typeof window.MediaRecorder !== 'function') return;
-    const Ctx = audioContextCtor();
-    if (!Ctx) return;
+    if (recorderRef.current) return;
     try {
-      const ctx = new Ctx();
-      const dest = ctx.createMediaStreamDestination();
-      if (streamRef.current && streamRef.current.getAudioTracks().length) {
-        try {
-          const micSource = ctx.createMediaStreamSource(streamRef.current);
-          micSource.connect(dest);
-        } catch { /* ignore */ }
-      }
-      const remoteStream = audioRef.current?.srcObject;
-      if (remoteStream && remoteStream.getAudioTracks().length) {
-        try {
-          const remoteSource = ctx.createMediaStreamSource(remoteStream);
-          remoteSource.connect(dest);
-        } catch { /* ignore */ }
-      }
-      const mime = typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg');
-      const recorder = new MediaRecorder(dest.stream, { mimeType: mime });
-      const chunks = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-      const startedAt = Date.now();
-      recorder.start(1000);
-      recordingCallIdRef.current = callId || null;
-      recorderRef.current = {
-        recorder,
-        ctx,
-        chunks,
-        mimeType: mime,
-        startedAt,
+      const session = createRecordingSession({
         callId,
-        stop: () => {
-          try {
-            if (recorder.state !== 'inactive') recorder.stop();
-          } catch { /* already stopped */ }
+        localStream: streamRef.current,
+        remoteStream: audioRef.current?.srcObject,
+        onStop: ({ blob, durationSec, callId: stoppedCallId }) => {
+          callbacksRef.current.onRecordingReady?.({
+            blob,
+            durationSec,
+            callId: stoppedCallId || recordingCallIdRef.current,
+          });
         },
-      };
+      });
+      if (!session) return;
+      recordingCallIdRef.current = callId || null;
+      recorderRef.current = session;
     } catch {
       recorderRef.current = null;
     }
@@ -389,21 +579,7 @@ export default function useWebRtc({
     const session = recorderRef.current;
     if (!session) return;
     recorderRef.current = null;
-    try {
-      session.recorder.onstop = () => {
-        try {
-          const durationSec = Math.max(0, Math.round((Date.now() - session.startedAt) / 1000));
-          const blob = new Blob(session.chunks, { type: session.mimeType });
-          if (blob.size > 0) {
-            callbacksRef.current.onRecordingReady?.({ blob, durationSec, callId: session.callId || recordingCallIdRef.current });
-          }
-        } catch { /* ignore assembly errors */ }
-        try { session.ctx.close(); } catch { /* ignore */ }
-      };
-      session.stop();
-    } catch {
-      try { session.ctx.close(); } catch { /* ignore */ }
-    }
+    session.stop();
   }, []);
 
   // ---- teardown. Idempotent, and never throws. ----
@@ -418,9 +594,10 @@ export default function useWebRtc({
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     if (simRef.current) { clearInterval(simRef.current); simRef.current = 0; }
 
-    // The ringer is audio too: answering, hanging up, switching modes or unmounting mid-ring
-    // must all silence it, and 'stop' is the only thing allowed to touch those nodes.
+    // The ringer and outbound ringback are audio too: answering, hanging up, switching modes
+    // or unmounting mid-ring must all silence them immediately.
     stopRinger();
+    stopRingback();
     releaseInboundLock();
 
     // 1) Detach senders before closing PC — releases OS mic indicator immediately.
@@ -471,7 +648,7 @@ export default function useWebRtc({
     setLevel(0);
     setMuted(false);
     mutedRef.current = false;
-  }, [releaseInboundLock, stopRecording, stopRinger]);
+  }, [releaseInboundLock, stopRecording, stopRinger, stopRingback]);
 
   // Release the microphone if the component unmounts mid-call.
   useEffect(() => {
@@ -565,9 +742,7 @@ export default function useWebRtc({
       try { micFailoverCleanupRef.current(); } catch { /* ignore */ }
       micFailoverCleanupRef.current = null;
     }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : true,
-    });
+    const stream = await acquireMicrophoneStream({ preferredDeviceId });
     streamRef.current = stream;
     setAudioDeviceAlert('');
     try { setMicLabel(stream.getAudioTracks()[0]?.label || ''); } catch { /* label is optional */ }
@@ -579,6 +754,7 @@ export default function useWebRtc({
         setAudioDeviceAlert('');
         try { setMicLabel(nextStream.getAudioTracks()[0]?.label || ''); } catch {}
         startLevelMeter(nextStream);
+        try { recorderRef.current?.attachLocalStream?.(nextStream); } catch {}
       },
       getPeerConnection: () => pcRef.current,
       isCallLive: () => ['dialing', 'ringing', 'active'].includes(stateRef.current),
@@ -622,7 +798,7 @@ export default function useWebRtc({
   }, [openMicrophone]);
 
   // ---- inbound ---------------------------------------------------------------------------
-  const finishActiveCall = useCallback((dir) => {
+  const finishActiveCall = useCallback((dir, endMeta = undefined) => {
     // Declared before hangUp uses it: closes the media and reports the end exactly once.
     activeCallIdRef.current = null;
     if (dir === 'inbound') { inboundActiveRef.current = false; answeredInboundRef.current = null; }
@@ -631,7 +807,7 @@ export default function useWebRtc({
     releaseMedia();
     setStateSafe('ended');
     setDirection(null);
-    callbacksRef.current.onEnded?.(dir);
+    callbacksRef.current.onEnded?.(dir, endMeta);
     setTimeout(() => {
       if (stateRef.current === 'ended') setStateSafe(enabledRef.current ? 'standby' : 'idle');
     }, 400);
@@ -652,7 +828,7 @@ export default function useWebRtc({
     callbacksRef.current.onIncomingEnded?.({ ...entry, reason });
   }, [releaseInboundLock, setStateSafe, stopRinger]);
 
-  const handleIncoming = useCallback(async ({ invitation, callerNumber, accept, reject, terminate, onStateChange, simulated = false }) => {
+  const handleIncoming = useCallback(async ({ invitation, callerNumber, accept, reject, terminate, sendDtmf: inboundSendDtmf, onStateChange, simulated = false }) => {
     // A second INVITE while the first is still ringing is the provider retrying, not a second
     // caller. Answering two sessions would put two people in the agent's ears.
     if (incomingRef.current) {
@@ -709,6 +885,7 @@ export default function useWebRtc({
     entry.onStateChange = onStateChange;
     entry.accept = accept;
     entry.reject = reject;
+    entry.sendDtmf = inboundSendDtmf;
     // Declining emits the local 'terminated' transition before the caller ever hears the 603.
     // Without this, the teardown would report 'canceled' and the agent would be told the
     // caller gave up when in fact they hung up on the caller.
@@ -788,9 +965,12 @@ export default function useWebRtc({
       }
 
       // Bind remote audio stream handler BEFORE SDP offer/answer negotiation runs so the instant
-      // WebRTC receives the remote RTP audio track during setRemoteDescription, audio output plays.
+      // WebRTC receives the remote RTP audio track during setRemoteDescription, audio output plays
+      // AND late-arriving RTP tracks automatically bridge into any active recording mixer.
       const attachRemoteTrack = (track) => {
-        if (!audioRef.current || !track) return;
+        if (!track) return;
+        try { recorderRef.current?.mixRemoteTrackIntoRecording?.(track); } catch { /* ignore */ }
+        if (!audioRef.current) return;
         audioRef.current.muted = false;
         audioRef.current.srcObject = new MediaStream([track]);
         const playResult = audioRef.current.play?.();
@@ -856,7 +1036,7 @@ export default function useWebRtc({
     activeCallIdRef.current = answered.callId || null;
     try { entry.onStateChange = null; } catch { /* a frozen entry is fine too */ }
     const byeFn = () => { try { entry.terminate?.(); } catch { /* already gone */ } };
-    sipRef.current = { stop: byeFn, bye: byeFn };
+    sipRef.current = { stop: byeFn, bye: byeFn, sendDtmf: entry.sendDtmf, inviter: entry.invitation };
     setIncomingCall(null);          // the call bar takes it from here
     inboundActiveRef.current = true;
     setDirection('inbound');
@@ -1099,7 +1279,11 @@ export default function useWebRtc({
     }
 
     const attachOutboundRemoteTrack = (track) => {
-      if (!audioRef.current || !track) return;
+      if (!track) return;
+      // Remote media is now flowing: silence synthesized local ringback and mix track into active recording.
+      stopRingback();
+      try { recorderRef.current?.mixRemoteTrackIntoRecording?.(track); } catch { /* ignore */ }
+      if (!audioRef.current) return;
       audioRef.current.muted = false;
       audioRef.current.srcObject = new MediaStream([track]);
       const playResult = audioRef.current.play?.();
@@ -1135,12 +1319,38 @@ export default function useWebRtc({
       sipRef.current = await startSignalling({
         session,
         remoteNumber: phone,
+        callerId: session?.callerId || '',
         localStream: streamRef.current,
         onTrack: (track) => attachOutboundRemoteTrack(track),
         onPeerConnection: (pc) => bindOutboundPeerConnection(pc),
-        onState: setStateSafe,
-        onError: (msg) => { setError(msg); setStateSafe('error'); },
+        onProgress: ({ statusCode, hasEarlyMedia } = {}) => {
+          if (hasEarlyMedia) {
+            // 183 Session Progress with early media SDP: carrier supplies audio, stop local ringback immediately.
+            stopRingback();
+          } else if (statusCode === 180 && !audioRef.current?.srcObject) {
+            // 180 Ringing without early media: synthesize local 425 Hz Danish ringback so dialing never feels dead.
+            try { ringbackRef.current?.start(); } catch { /* ignore */ }
+          }
+        },
+        onAnswered: () => {
+          stopRingback();
+        },
+        onState: (next) => {
+          if (next === 'ended') return; // handled atomically by onEnded -> finishActiveCall
+          setStateSafe(next);
+        },
+        onEnded: (endMeta) => {
+          stopRingback();
+          if (endMeta?.reason) setError(endMeta.reason);
+          finishActiveCall('outbound', endMeta);
+        },
+        onError: (msg) => {
+          stopRingback();
+          setError(msg);
+          setStateSafe('error');
+        },
         onActive: () => {
+          stopRingback();
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
@@ -1170,7 +1380,7 @@ export default function useWebRtc({
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
+  }, [enabled, finishActiveCall, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel, stopRingback]);
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;
@@ -1196,17 +1406,12 @@ export default function useWebRtc({
     const key = String(digit);
     setDtmfLog((log) => [...log.slice(-11), key]);
 
-    // A real session can carry the tone in-band if the browser exposes DTMF on the sender.
-    try {
-      const sender = pcRef.current?.getSenders?.().find((s) => s.track?.kind === 'audio');
-      if (sender && sender.dtmf && typeof sender.dtmf.insertDTMF === 'function') {
-        sender.dtmf.insertDTMF(key, 160);
-        return true;
-      }
-    } catch { /* fall through to the audible tone */ }
-
-    const pair = DTMF_TONES[key];
-    if (pair) playTone(pair, 160);
+    dispatchDtmfTone({
+      digit: key,
+      peerConnection: pcRef.current,
+      sipSession: sipRef.current,
+      playFeedbackTone: playTone,
+    });
     return true;
   }, [playTone]);
 

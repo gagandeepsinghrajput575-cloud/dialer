@@ -26,6 +26,111 @@ export const REGISTER_EXPIRES = 300;
 const REGISTER_REFRESH_MS = 240000;
 const RETRY_MS = [5000, 10000, 20000, 45000];
 
+// Sanitize a dial target or Caller-ID strictly to clean E.164 / URI-safe characters before
+// passing into `sip:<target>@sip.telnyx.com;transport=ws` or SIP `P-Asserted-Identity` headers.
+export function sanitizeSipNumber(raw, defaultCountryCode = '45') {
+  if (raw === null || raw === undefined) return '';
+  const cleaned = String(raw)
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (/@/.test(cleaned) || /^sip:/i.test(cleaned)) {
+    return cleaned.replace(/[\s()[\]{}<>"']/g, '');
+  }
+  const hasPlus = cleaned.startsWith('+');
+  const digits = cleaned.replace(/\D/g, '');
+  if (!digits) return '';
+  const cc = String(defaultCountryCode || '45').replace(/\D/g, '');
+  if (hasPlus || digits.startsWith('00')) {
+    const intl = digits.startsWith('00') ? digits.slice(2) : digits;
+    return intl ? `+${intl}` : '';
+  }
+  const national = digits.replace(/^0+/, '');
+  if (cc && national.length === 8 && cc === '45') return `+45${national}`;
+  if (cc && national.startsWith(cc) && national.length >= cc.length + 5) return `+${national}`;
+  return `+${digits}`;
+}
+
+// Decode SIP 4xx/5xx/6xx final rejection responses into actionable sales diagnostics & CRM outcomes.
+export function decodeSipRejection(sipCode, reasonPhrase = '') {
+  const code = Number(sipCode) || 0;
+  const phrase = String(reasonPhrase || '').trim();
+
+  if (code === 404 || code === 410 || code === 484) {
+    return {
+      sipCode: code,
+      reasonPhrase: phrase,
+      reason: 'Number disconnected or not found',
+      autoOutcome: 'bad_number',
+      modalOutcome: 'wrong_number',
+      isCarrierError: false,
+    };
+  }
+  if (code === 486 || code === 600 || code === 603) {
+    return {
+      sipCode: code,
+      reasonPhrase: phrase,
+      reason: 'Line is busy / Call rejected by prospect',
+      autoOutcome: 'busy',
+      modalOutcome: 'hung_up',
+      isCarrierError: false,
+    };
+  }
+  if (code === 408 || code === 480 || code === 487) {
+    return {
+      sipCode: code,
+      reasonPhrase: phrase,
+      reason: 'No answer after timeout',
+      autoOutcome: 'no_answer',
+      modalOutcome: 'no_answer',
+      isCarrierError: false,
+    };
+  }
+  if (code === 401 || code === 403 || code === 407 || code === 502 || code === 503 || code === 504 || code >= 500) {
+    return {
+      sipCode: code,
+      reasonPhrase: phrase,
+      reason: 'Carrier error: Telnyx rejected Caller ID or trunk unavailable',
+      autoOutcome: null,
+      modalOutcome: 'no_answer',
+      isCarrierError: true,
+    };
+  }
+  return {
+    sipCode: code,
+    reasonPhrase: phrase,
+    reason: phrase ? `Call rejected (${code} ${phrase})` : `Call rejected (${code})`,
+    autoOutcome: 'no_answer',
+    modalOutcome: 'no_answer',
+    isCarrierError: false,
+  };
+}
+
+// Send an out-of-band SIP DTMF digit via either high-level `session.sendDTMF(digit)` or
+// SIP.js 0.21 RFC 2976 `session.info` (`application/dtmf-relay`).
+export async function sendSipSessionDtmf(session, digit) {
+  if (!session) return false;
+  const key = String(digit);
+  if (typeof session.sendDTMF === 'function') {
+    await session.sendDTMF(key);
+    return true;
+  }
+  if (typeof session.info === 'function') {
+    await session.info({
+      requestOptions: {
+        body: {
+          contentDisposition: 'render',
+          contentType: 'application/dtmf-relay',
+          content: `Signal=${key}\r\nDuration=160\r\n`,
+        },
+      },
+    });
+    return true;
+  }
+  return false;
+}
+
 // Active per-call media bridge read by the UserAgent's sessionDescriptionHandlerFactory at
 // SDP negotiation time so neither inbound Invitation nor outbound Inviter ever mutates
 // getter-only Session properties after INVITE parsing or adds duplicate sender tracks.
@@ -264,6 +369,7 @@ export function setupInboundListener(ua, onIncomingCall) {
       onIncomingCall({
         invitation,
         callerNumber,
+        sendDtmf: (digit) => sendSipSessionDtmf(invitation, digit),
         onStateChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
         // 486 Busy Here when another tab owns the audio; 603 Decline when the agent said no.
         reject: (options) => {
@@ -459,7 +565,19 @@ export function standbySession() {
  * @param {function} [opts.onPeerConnection] (pc, sdh) => void invoked when RTCPeerConnection opens
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, localStream, onTrack, onPeerConnection } = {}) {
+export async function dialOutbound({
+  remoteNumber,
+  callerId,
+  onState,
+  onActive,
+  onEnded,
+  onProgress,
+  onAnswered,
+  onRejected,
+  localStream,
+  onTrack,
+  onPeerConnection,
+} = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
@@ -468,9 +586,23 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   if (!sip) throw new Error(INSTALL_HINT);
   const { UserAgent, Inviter, SessionState } = sip;
 
-  const server = self.session.server;
-  const target = UserAgent.makeURI(`sip:${remoteNumber}@${server};transport=ws`);
+  const server = self.session.server || 'sip.telnyx.com';
+  const sanitizedTarget = sanitizeSipNumber(remoteNumber);
+  if (!sanitizedTarget) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
+  const targetUriString = /@/.test(sanitizedTarget)
+    ? `${sanitizedTarget.replace(/;transport=ws$/i, '')};transport=ws`
+    : `sip:${sanitizedTarget}@${server};transport=ws`;
+  const target = UserAgent.makeURI(targetUriString);
   if (!target) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
+
+  const cleanCli = sanitizeSipNumber(callerId ?? self.session?.callerId ?? '');
+  const cliHeaders = cleanCli
+    ? [
+        `P-Asserted-Identity: <sip:${cleanCli}@${server}>`,
+        `P-Preferred-Identity: <sip:${cleanCli}@${server}>`,
+        `X-Pulse-Caller-ID: ${cleanCli}`,
+      ]
+    : [];
 
   activeCallMedia = {
     localStream: localStream || null,
@@ -479,6 +611,8 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   };
 
   const inviter = new Inviter(self.ua, target, {
+    extraHeaders: cliHeaders,
+    ...(cleanCli ? { fromDisplayName: cleanCli } : {}),
     sessionDescriptionHandlerOptions: {
       constraints: { audio: true, video: false },
       iceGatheringTimeout: 1000,
@@ -489,6 +623,9 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   });
 
   let stopped = false;
+  let endedNotified = false;
+  let rejectionMeta = null;
+
   const stop = () => {
     if (stopped) return;
     stopped = true;
@@ -501,14 +638,49 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
 
   inviter.stateChange.addListener((s) => {
     const name = String(s);
-    if (name === SessionState.Establishing || name === 'Establishing') onState?.('ringing');
-    else if (name === SessionState.Established || name === 'Established') { onState?.('active'); onActive?.(); }
-    else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) onState?.('ended');
+    if (name === SessionState.Establishing || name === 'Establishing') {
+      onState?.('ringing');
+    } else if (name === SessionState.Established || name === 'Established') {
+      onState?.('active');
+      onActive?.();
+    } else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped && !endedNotified) {
+      endedNotified = true;
+      onState?.('ended', rejectionMeta || undefined);
+      onEnded?.(rejectionMeta || undefined);
+    }
   });
 
   onState?.('dialing');
   try {
-    await inviter.invite();
+    await inviter.invite({
+      ...(cliHeaders.length ? { requestOptions: { extraHeaders: cliHeaders } } : {}),
+      requestDelegate: {
+        onProgress: (response) => {
+          const statusCode = response?.message?.statusCode || 180;
+          const reasonPhrase = response?.message?.reasonPhrase || '';
+          const body = String(response?.message?.body || '');
+          const hasEarlyMedia = /\bm=audio\b/i.test(body) || /^v=0/m.test(body);
+          onProgress?.({ statusCode, reasonPhrase, hasEarlyMedia });
+          onState?.('ringing');
+        },
+        onAccept: (response) => {
+          const statusCode = response?.message?.statusCode || 200;
+          onAnswered?.({ statusCode });
+        },
+        onReject: (response) => {
+          const statusCode = response?.message?.statusCode || 480;
+          const reasonPhrase = response?.message?.reasonPhrase || '';
+          const decoded = decodeSipRejection(statusCode, reasonPhrase);
+          rejectionMeta = decoded;
+          onRejected?.(decoded);
+          if (!stopped && !endedNotified) {
+            endedNotified = true;
+            onState?.('ended', decoded);
+            onEnded?.(decoded);
+          }
+        },
+      },
+    });
   } catch (e) {
     stop();
     // Rejections here are the useful ones: 401/403 means credentials, 404 means the number.
@@ -521,7 +693,17 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
         : `The call could not be placed — ${msg}`);
   }
 
-  return { stop, bye: stop, inviter, userAgent: self.ua, registerer: self.registerer, reusedRegistration: true };
+  const sendDtmf = (digit) => sendSipSessionDtmf(inviter, digit);
+
+  return {
+    stop,
+    bye: stop,
+    sendDtmf,
+    inviter,
+    userAgent: self.ua,
+    registerer: self.registerer,
+    reusedRegistration: true,
+  };
 }
 
 /**
@@ -530,20 +712,23 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
  * Registers if the tab is not registered yet, then dials on that registration. Kept as the
  * single entry point the engine calls, so "is the softphone standing by?" stays an
  * implementation detail of this module rather than a question the cockpit has to ask.
- *
- * @param {object}   opts
- * @param {object}   opts.session      descriptor from GET /api/telephony/webrtc-session
- * @param {string}   opts.remoteNumber E.164 number to dial
- * @param {function} opts.onState      (state) => void   — registering | dialing | ringing | active | ended
- * @param {function} opts.onError      (message) => void
- * @param {function} opts.onActive     () => void
- * @param {MediaStream} [opts.localStream] microphone the engine already opened
- * @param {function} [opts.onTrack]    (track, event) => void
- * @param {function} [opts.onPeerConnection] (pc, sdh) => void
- * @param {function} [opts.onIncomingCall] INVITE handler, when the engine wants standby calls
- * @returns {Promise<{stop: function}>}
  */
-export async function startSignalling({ session, remoteNumber, onState, onError, onActive, localStream, onTrack, onPeerConnection, onIncomingCall } = {}) {
+export async function startSignalling({
+  session,
+  remoteNumber,
+  callerId,
+  onState,
+  onError,
+  onActive,
+  onEnded,
+  onProgress,
+  onAnswered,
+  onRejected,
+  localStream,
+  onTrack,
+  onPeerConnection,
+  onIncomingCall,
+} = {}) {
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
@@ -554,5 +739,17 @@ export async function startSignalling({ session, remoteNumber, onState, onError,
     onState: (s, detail) => { if (s !== 'ready') onError?.(detail || 'The in-browser softphone lost its registration.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, localStream, onTrack, onPeerConnection });
+  return dialOutbound({
+    remoteNumber,
+    callerId,
+    onState,
+    onActive,
+    onEnded,
+    onProgress,
+    onAnswered,
+    onRejected,
+    localStream,
+    onTrack,
+    onPeerConnection,
+  });
 }

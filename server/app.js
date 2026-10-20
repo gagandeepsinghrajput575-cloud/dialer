@@ -22,6 +22,20 @@ function createApp() {
     credentials: false,
   }));
   app.use(express.json({ limit: '25mb' }));
+  // navigator.sendBeacon(..., JSON.stringify(payload)) transmits Content-Type: text/plain;charset=UTF-8.
+  // Normalize JSON text bodies so beacon endpoints (/abandon, /missed) work identically to fetch().
+  app.use(express.text({ type: 'text/*', limit: '64kb' }));
+  app.use((req, _res, next) => {
+    if (typeof req.body === 'string') {
+      const trimmed = req.body.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try { req.body = JSON.parse(trimmed); } catch { req.body = {}; }
+      } else {
+        req.body = {};
+      }
+    }
+    next();
+  });
   app.use(requestLog);
   app.use('/api', guard);
   app.use('/api', rateLimit({ windowMs: 60000, max: 1200, name: 'api' }));

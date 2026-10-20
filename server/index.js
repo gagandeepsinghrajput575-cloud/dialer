@@ -3,12 +3,14 @@ const { createApp } = require('./app');
 const migrate = require('./db/migrate');
 const settings = require('./repositories/settingsRepo');
 const backup = require('./db/backup');
+const staleCallWatchdog = require('./services/staleCallWatchdog');
 const { db } = require('./db');
 const { port, isTest, dbPath } = require('./config/env');
 
 async function main() {
   const { applied } = migrate.run();
   settings.seedFromEnv();
+  staleCallWatchdog.start();
 
   if (applied.length && !isTest) console.log(`Migrations applied: ${applied.join(', ')}`);
 
@@ -27,6 +29,7 @@ async function main() {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    staleCallWatchdog.stop();
     const finish = () => {
       // Flush the WAL into the main database so a copy of data/ is always consistent, then
       // let SQLite release its locks cleanly.

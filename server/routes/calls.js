@@ -12,6 +12,7 @@ router.post('/inbound', validate(s.callInbound), c.inbound);
 router.post('/direct', validate(s.directDial), c.directDial);
 router.post('/:id/missed', validate(s.callMissed), c.missed);
 router.post('/:id/miss', validate(s.callMissed), c.missed);
+router.post('/:id/abandon', validate(s.callAbandon), c.abandon);
 router.patch('/:id', validate(s.callPatch), c.patch);
 router.post('/:id/discard', c.discard);
 router.post('/:id/voicemail-drop', validate(s.voicemailDrop), c.voicemailDrop);

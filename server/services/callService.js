@@ -26,6 +26,16 @@ const statsFilter = (alias = '') => {
 const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
 const sqlNow = () => sqlTime(new Date());
 
+// SQLite datetime('now') writes UTC timestamps without a trailing 'Z' ('YYYY-MM-DD HH:MM:SS').
+// Appending 'Z' when no explicit zone offset is present avoids multi-hour drift in non-UTC servers.
+function parseSqlUtcMs(raw) {
+  if (!raw) return NaN;
+  const s = String(raw).trim();
+  if (!s) return NaN;
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s.replace(' ', 'T') : `${s.replace(' ', 'T')}Z`;
+  return Date.parse(iso);
+}
+
 function getStartOfDay(offsetDays = 0, tzOffsetMin = null) {
   if (tzOffsetMin !== null && Number.isFinite(tzOffsetMin)) {
     const clientLocal = new Date(Date.now() - tzOffsetMin * 60000);
@@ -308,6 +318,57 @@ function applyOutcomeStage(p, outcome, followUpAt) {
   return { stage, dnc: dnc ? 1 : 0 };
 }
 
+// Graceful teardown when a live or dialing call drops abruptly because the agent reloaded,
+// navigated away, or closed the browser tab (Challenge 1A).
+function abandonCall(callId, { reason = 'page_unload', note = '' } = {}) {
+  const id = Number(callId);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.notFound('Call not found');
+
+  return withBusyRetry(() => db.transaction(() => {
+    const call = calls.get(id);
+    if (!call) throw ApiError.notFound('Call not found');
+
+    if (['completed', 'missed', 'declined', 'abandoned', 'discarded', 'failed'].includes(call.status)) {
+      return { ok: true, alreadyResolved: true, call };
+    }
+
+    const startedMs = parseSqlUtcMs(call.started_at);
+    const durationSec = Number.isFinite(startedMs)
+      ? Math.max(0, Math.round((Date.now() - startedMs) / 1000))
+      : 0;
+
+    const updated = calls.patch(call.id, {
+      status: 'abandoned',
+      outcome: 'dropped',
+      duration_sec: durationSec,
+      ended_at: sqlNow(),
+    });
+
+    const prospect = prospects.get(call.prospect_id);
+    if (prospect) {
+      if (isProvisionalLead(prospect)) {
+        const extraObj = typeof prospect.extra === 'object' && prospect.extra
+          ? { ...prospect.extra }
+          : (() => { try { return JSON.parse(prospect.extra || '{}'); } catch { return {}; } })();
+        delete extraObj.provisional;
+        prospects.update(call.prospect_id, { extra: JSON.stringify(extraObj) });
+      }
+      const noteBody = String(note || '').trim()
+        || `⚠️ System: Call disconnected during page reload/unload (${String(reason || 'page_unload').slice(0, 60)}, duration ${durationSec}s).`;
+      notes.insert(call.prospect_id, noteBody.slice(0, 1000));
+    }
+
+    return {
+      ok: true,
+      alreadyResolved: false,
+      status: 'abandoned',
+      outcome: 'dropped',
+      duration_sec: durationSec,
+      call: updated,
+    };
+  })());
+}
+
 function classify(callId, input = {}) {
   const call = calls.get(callId);
   if (!call) throw ApiError.notFound('Call not found');
@@ -331,8 +392,9 @@ function classify(callId, input = {}) {
     const updated = calls.patch(callId, fields);
     let prospect = prospects.get(call.prospect_id);
     if (prospect && isProvisionalLead(prospect)) {
-      let extraObj = {};
-      try { extraObj = JSON.parse(prospect.extra || '{}'); } catch { extraObj = {}; }
+      const extraObj = typeof prospect.extra === 'object' && prospect.extra
+        ? { ...prospect.extra }
+        : (() => { try { return JSON.parse(prospect.extra || '{}'); } catch { return {}; } })();
       delete extraObj.provisional;
       prospect = prospects.update(call.prospect_id, { extra: JSON.stringify(extraObj) });
     }
@@ -424,8 +486,8 @@ function listHistory({ search = '', direction = '', filter = '', outcome = '', d
 }
 
 module.exports = {
-  statsFilter, sqlTime, sqlNow, getStartOfDay, todaysDials,
-  start, startDirectDial, startInbound, markInboundMissed, inboundCallerId, isProvisionalLead,
+  statsFilter, sqlTime, sqlNow, parseSqlUtcMs, getStartOfDay, todaysDials,
+  start, startDirectDial, startInbound, markInboundMissed, abandonCall, inboundCallerId, isProvisionalLead,
   classify, voicemailDrop, discard, remove, suggestFollowUp, applyOutcomeStage, listHistory,
   OUTCOME_LABEL, FOLLOW_UP_DAYS, FOLLOW_UP_TIME,
 };

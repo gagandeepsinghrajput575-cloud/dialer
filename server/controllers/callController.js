@@ -23,8 +23,11 @@ const inbound = asyncHandler(async (req, res) => res.json(callService.startInbou
 // POST /api/calls/direct — ad-hoc manual dialpad calls
 const directDial = asyncHandler(async (req, res) => res.json(callService.startDirectDial(req.body)));
 
-// POST /api/calls/:id/missed — the ring ended unanswered (far-end CANCEL, or Decline).
+// POST /api/calls/:id/missed — the ring ended unanswered (far-end CANCEL, Decline, or reload).
 const missed = asyncHandler(async (req, res) => res.json(callService.markInboundMissed(req.params.id, req.body)));
+
+// POST /api/calls/:id/abandon — graceful teardown beacon when a live call drops on reload/unload.
+const abandon = asyncHandler(async (req, res) => res.json(callService.abandonCall(req.params.id, req.body)));
 
 const voicemailDrop = asyncHandler(async (req, res) => res.json(callService.voicemailDrop(req.params.id, req.body)));
 
@@ -62,4 +65,4 @@ const list = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-module.exports = { list, start, directDial, inbound, missed, patch, voicemailDrop, discard, summarize };
+module.exports = { list, start, directDial, inbound, missed, abandon, patch, voicemailDrop, discard, summarize };

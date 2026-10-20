@@ -76,8 +76,16 @@ function guard(req, res, next) {
     return next(ApiError.forbidden(`Host header "${host}" is not allowed — add it to PULSE_ALLOWED_HOSTS`));
   }
   const browserRequest = Boolean(req.headers.origin || req.headers.referer);
+  const bodyToken = req.body && typeof req.body === 'object' && typeof req.body._token === 'string'
+    ? req.body._token
+    : '';
+  const queryToken = typeof req.query?.token === 'string' ? req.query.token : '';
+  const suppliedToken = req.get(TOKEN_HEADER) || bodyToken || queryToken;
+  if (req.body && typeof req.body === 'object' && '_token' in req.body) {
+    delete req.body._token;
+  }
   const needsToken = MUTATING.has(req.method) && (browserRequest || process.env.PULSE_REQUIRE_TOKEN === '1');
-  if (needsToken && req.get(TOKEN_HEADER) !== TOKEN) {
+  if (needsToken && suppliedToken !== TOKEN) {
     return next(ApiError.unauthorized('Missing or invalid session token — reload the app'));
   }
   next();

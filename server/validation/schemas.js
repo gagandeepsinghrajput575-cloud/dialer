@@ -88,12 +88,18 @@ const callInbound = z.object({
 });
 
 const callMissed = z.object({
-  reason: z.enum(['missed', 'declined']).optional().default('missed'),
+  reason: z.enum(['missed', 'declined', 'abandoned']).optional().default('missed'),
   duration_sec: seconds.optional(),
 });
 
+const callAbandon = z.object({
+  reason: z.string().max(120).optional().default('page_unload'),
+  duration_sec: seconds.optional(),
+  note: z.string().max(1000).optional(),
+});
+
 const callPatch = z.object({
-  status: z.enum(['connected', 'completed', 'ended', 'answered', 'initiated', 'placed']).optional(),
+  status: z.enum(['connected', 'completed', 'ended', 'answered', 'initiated', 'placed', 'abandoned']).optional(),
   outcome: z.enum(OUTCOMES).optional(),
   duration_sec: seconds.optional(),
   vm_dropped: boolish.optional(),
@@ -251,7 +257,7 @@ const recordingScriptUpdate = z.object({
 
 module.exports = {
   AI_PROVIDERS, DATETIME_RE, prospectCreate, prospectCreateStrict, prospectPatch, bulkImport, callStart, directDial,
-  callPatch, callInbound, callMissed, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
+  callPatch, callInbound, callMissed, callAbandon, voicemailDrop, noteCreate, notePatch, settingsUpdate, followUpSchedule, emailRender,
   softphoneTest, searchQuery, queueQuery, backupCreate,
   emailVerify, emailVerifyBatch, emailSend, emailDraft, outboxQuery,
   bulkStage, bulkDelete, recordingsQuery,

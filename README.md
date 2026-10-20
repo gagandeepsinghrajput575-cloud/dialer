@@ -12,6 +12,46 @@ npm run app        # builds the UI and starts everything on http://localhost:300
 ```
 For UI development use `npm run dev` (Vite on :5173 + API on :3001).
 
+## Native macOS app (Option B) — with the Linphone fallback (Option E/A)
+The desktop build runs the same Express + SQLite backend and the same React CRM inside an
+Electron shell, with the microphone and speakers bound to CoreAudio and **no browser autoplay
+policy in the way**. It also answers Telnyx INVITEs over native SIP/UDP 5060 when you ask it to.
+
+```bash
+npm install                 # Electron is a dev dependency
+npm run build
+npm run desktop             # native window on http://127.0.0.1:3001
+npm run desktop:dist        # release/Pulse Dialer-<version>.dmg  (x64 + arm64)
+```
+
+Requirements on the Mac: macOS 11+, Node 20+, and the Xcode command-line tools
+(`xcode-select --install`) so `better-sqlite3` can be rebuilt for Electron
+(`npm run desktop:rebuild`).
+
+**Two engines, one contract.** Choose with `PULSE_DESKTOP_ENGINE`:
+
+| Engine | Command | Audio path | Best for |
+| --- | --- | --- | --- |
+| `webrtc` (default) | `npm run desktop` | In-app, Chromium → CoreAudio, autoplay unlocked | everyday calling, recording, inbound ringing in the app |
+| `native-sip` | `PULSE_DESKTOP_ENGINE=native-sip npm run desktop` | Signalling in the shell, voice in Linphone | inspecting SIP reachability, or when the WSS gateway is blocked |
+
+`native-sip` is a real SIP user agent: it REGISTERs with digest auth over UDP/TCP 5060, answers
+every INVITE with `100` + `180 Ringing` immediately (inside Telnyx's 10-second SBC window),
+handles CANCEL/BYE/DTMF, and writes the same `ringing → connected → completed` ledger rows. It
+does **not** carry RTP audio itself in this build, and it will never answer into a silent call:
+the Answer action opens Linphone and releases Pulse's fork. That is the deliberate Option E/A boundary:
+the shell hands the number to Linphone (`sip:<number>@sip.telnyx.com`) while Pulse keeps the
+queue, Danish phonetics, notes, dispositions and the SQLite ledger.
+
+The Settings page has a **Native macOS app** panel with the copyable Linphone parameters
+(username, `sip.telnyx.com:5060`, transport, `+45 32 33 16 10` caller ID) and the live engine /
+registration status. Everything it shows comes from `GET /api/telephony/desktop`, which is
+guarded by `x-pulse-token` and never contains a SIP secret.
+
+**Why this fixes the browser failure:** the answer no longer races `getUserMedia`, ICE and SDP
+generation inside a tab; the window never suspends its audio context; mic permission is granted
+once at process start; and the call survives the window being hidden or closed to the dock.
+
 ## First-time setup
 1. **Telnyx** — in [Mission Control](https://portal.telnyx.com), create a **SIP Connection** with
    **Credential Auth**, buy Danish **+45** numbers (two or more if you want DID rotation), assign

@@ -141,10 +141,11 @@ async function runTests() {
 
   // DNS Rebinding attack probe MUST be refused with 403 Forbidden (uses raw http.request to override Host header)
   const http = require('http');
+  const target = new URL(BASE);
   const rebindingStatus = await new Promise((resolve, reject) => {
     const r = http.request({
-      hostname: '127.0.0.1',
-      port: 3001,
+      hostname: target.hostname,
+      port: Number(target.port) || 80,
       path: '/api/session',
       method: 'GET',
       headers: { host: 'attacker-controlled-domain.com' },

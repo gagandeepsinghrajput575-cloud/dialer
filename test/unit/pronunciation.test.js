@@ -1,3 +1,4 @@
+require('../helpers/unit-db');
 const assert = require('assert');
 const danishPhonetics = require('../../server/services/danishPhonetics');
 const aiPronunciationService = require('../../server/services/aiPronunciationService');

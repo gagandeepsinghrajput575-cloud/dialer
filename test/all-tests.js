@@ -395,6 +395,20 @@ async function run() {
   await req('PUT', '/api/settings', { webrtc_ws_url: '' });
   assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'telnyx_default');
 
+  // ------------------------------------------------- native desktop + Linphone fallback contract
+  // The shell consumes the same descriptor the Settings card shows. It is token-guarded and
+  // must never carry a SIP secret, even when the credential handoff above is switched on.
+  assert.strictEqual((await req('GET', '/api/telephony/desktop')).status, 401,
+    'the native desktop contract refuses a caller with no token');
+  const desktopContract = await tokened('GET', '/api/telephony/desktop');
+  assert.strictEqual(desktopContract.status, 200);
+  assert.strictEqual(desktopContract.json.runtime, 'darwin-coreaudio-native');
+  assert.strictEqual(desktopContract.json.sip.port, 5060);
+  assert.strictEqual(desktopContract.json.inbound.did, '+4532331610');
+  assert.strictEqual(desktopContract.json.fallback.linphone.domain, 'sip.telnyx.com:5060');
+  assert.ok(!/password|secret/i.test(JSON.stringify(desktopContract.json)), 'the contract never leaks a credential');
+  ok('the native desktop contract is token-guarded, names Telnyx and carries no credential');
+
   // A webrtc dial addresses the SIP server over the gateway and never degrades to tel:.
   // Its own prospect, so the shared fixture's call counter stays exactly as later groups
   // expect it (the same reason the email group uses a throwaway prospect).

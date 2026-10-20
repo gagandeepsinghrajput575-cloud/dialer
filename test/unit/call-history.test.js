@@ -1,3 +1,4 @@
+require('../helpers/unit-db');
 const assert = require('assert');
 const { db } = require('../../server/db');
 const callRepo = require('../../server/repositories/callRepo');

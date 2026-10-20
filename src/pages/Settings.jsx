@@ -11,6 +11,7 @@ import { useStore } from '../store.jsx';
 import { useSoftphone } from '../softphone.jsx';
 import { Switch } from '../components/ui.jsx';
 import { dispatchDialUri, softphoneLabel } from '../utils.js';
+import DesktopBridgeCard from '../components/DesktopBridgeCard.jsx';
 import { listAudioDevices } from '../useWebRtc.js';
 
 const MODES = [
@@ -337,6 +338,8 @@ export default function SettingsPage() {
           {result && <motion.span initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} className={`test-result ${result.ok ? 'ok' : 'bad'}`}>{result.msg}</motion.span>}
         </div>
       </motion.section>
+
+      <DesktopBridgeCard />
 
       {inBrowser && (
         <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.09 }}>

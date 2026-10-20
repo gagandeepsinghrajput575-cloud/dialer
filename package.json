@@ -7,9 +7,13 @@
     "dev": "concurrently -k \"node server/index.js\" \"vite\"",
     "app": "vite build && node server/index.js",
     "test": "node test/all-tests.js",
-    "test:unit": "node test/unit/repositories.test.js && node test/unit/inbound.test.js && node test/unit/hardening.test.js && node test/unit/email.test.js && node test/unit/property.test.js && node test/unit/import-map.test.js && node test/unit/recordings.test.js && node test/unit/ai-lead-sorter.test.js && node test/unit/ai-recording-coach.test.js && node test/unit/flynumber.test.js && node test/unit/chaos-bug-hunter.test.js && node test/unit/pronunciation.test.js && node test/unit/direct-dial.test.js && node test/unit/backend-connectivity.test.js && node test/unit/concurrency-hardening.test.js && node test/unit/call-history.test.js",
+    "test:unit": "node test/unit/repositories.test.js && node test/unit/inbound.test.js && node test/unit/hardening.test.js && node test/unit/email.test.js && node test/unit/property.test.js && node test/unit/import-map.test.js && node test/unit/recordings.test.js && node test/unit/ai-lead-sorter.test.js && node test/unit/ai-recording-coach.test.js && node test/unit/flynumber.test.js && node test/unit/chaos-bug-hunter.test.js && node test/unit/pronunciation.test.js && node test/unit/direct-dial.test.js && node test/helpers/with-server.js test/unit/backend-connectivity.test.js && node test/unit/concurrency-hardening.test.js && node test/unit/call-history.test.js && node test/unit/desktop-telephony.test.js && node test/unit/desktop-shell.test.js && node test/unit/live-call-hardening.test.js",
     "test:property": "node test/unit/property.test.js",
-    "test:ui": "vite build && node test/ui/dialer-race.test.js"
+    "test:ui": "vite build && node test/ui/dialer-race.test.js",
+    "desktop": "npm run build && electron .",
+    "desktop:engine": "PULSE_DESKTOP_ENGINE=native-sip electron .",
+    "desktop:rebuild": "electron-builder install-app-deps",
+    "desktop:dist": "npm run build && electron-builder --mac dmg --x64 --arm64"
   },
   "keywords": [],
   "author": "",
@@ -31,11 +35,14 @@
     "@dnd-kit/core": "^6.3.1",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^9.2.4",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
     "framer-motion": "^13.5.0",
     "jsdom": "^30.1.2",
     "lucide-react": "^1.49.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "vite": "^8.3.2"
-  }
+  },
+  "main": "desktop/main.js"
 }

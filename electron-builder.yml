@@ -1,0 +1,33 @@
+appId: dk.pulsedialer.desktop
+productName: Pulse Dialer
+copyright: Pulse Dialer
+directories:
+  output: release
+files:
+  - dist/**
+  - server/**
+  - desktop/**
+  - package.json
+  - node_modules/**
+  - '!**/*.test.js'
+  - '!test/**'
+asar: true
+# better-sqlite3 must stay a real .node file outside the archive.
+asarUnpack:
+  - node_modules/better-sqlite3/**
+mac:
+  category: public.app-category.business
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: desktop/entitlements.mac.plist
+  entitlementsInherit: desktop/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Pulse Dialer uses the microphone so you can talk to prospects. Audio never leaves this Mac except as the call itself.
+    NSCameraUsageDescription: Pulse Dialer does not use the camera.
+    NSHumanReadableCopyright: Pulse Dialer
+    LSMinimumSystemVersion: '11.0'

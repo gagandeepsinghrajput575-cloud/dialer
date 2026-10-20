@@ -11,6 +11,8 @@ router.get('/business-hours', c.businessHours);
 // Returns live SIP credentials in opt-in mode, so it demands the session token even though
 // it is a GET — see requireToken in middleware/guard.
 router.get('/webrtc-session', requireToken, c.webrtcSession);
+// Native desktop shell contract (no credentials). Token-guarded like the WebRTC descriptor.
+router.get('/desktop', requireToken, c.desktop);
 router.get('/caller-ids', c.callerIds);
 router.get('/voicemail-greeting', c.greetingMeta);
 router.post('/voicemail-greeting', upload.single('file'), c.uploadGreeting);

@@ -3297,3 +3297,17 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
 
 
 
+
+/* ---- native desktop bridge -------------------------------------------------------------- */
+.desktop-card { display: grid; gap: 12px; }
+.desktop-kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.desktop-kv > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 12px; background: rgba(15, 23, 42, 0.55); border: 1px solid var(--line); }
+.desktop-kv span { color: var(--muted); font-size: 12px; }
+.desktop-kv b { font-size: 12.5px; font-weight: 700; color: #e2e8f0; }
+.desktop-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.copy-chip { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 8px; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: rgba(15, 23, 42, 0.55); transition: border-color 0.15s, background 0.15s; }
+.copy-chip:hover:not(:disabled) { border-color: rgba(167, 139, 250, 0.5); background: rgba(30, 41, 59, 0.65); }
+.copy-chip:disabled { opacity: 0.55; cursor: not-allowed; }
+.copy-chip span { grid-column: 1 / 2; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.copy-chip b { grid-column: 1 / 2; font-size: 12.5px; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; }
+.copy-chip svg { grid-column: 2 / 3; grid-row: 1 / 3; color: #a78bfa; }

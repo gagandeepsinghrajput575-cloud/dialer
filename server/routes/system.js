@@ -3,6 +3,7 @@ const backup = require('../db/backup');
 const { db } = require('../db');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { MIGRATIONS } = require('../db/migrate');
+const { BUILD_METADATA } = require('../config/buildInfo');
 
 router.get('/health', asyncHandler(async (req, res) => {
   res.json({
@@ -14,6 +15,7 @@ router.get('/health', asyncHandler(async (req, res) => {
       migrations: MIGRATIONS.length,
     },
     backups: backup.list().length,
+    build: BUILD_METADATA,
   });
 }));
 

@@ -317,6 +317,9 @@ function classify(callId, input = {}) {
 
   const fields = { ended_at: sqlNow() };
   if (outcome) fields.outcome = outcome;
+  // 'connected' arrives mid-call (no ended_at); classification closes ringing -> connected -> completed.
+  if (input.status === 'connected') { fields.status = 'connected'; delete fields.ended_at; }
+  else if (input.status === 'completed' || (call.direction === 'inbound' && call.status === 'connected')) fields.status = 'completed';
   if (Number.isFinite(input.duration_sec)) fields.duration_sec = Math.round(input.duration_sec);
   if (input.vm_dropped !== undefined) fields.vm_dropped = input.vm_dropped ? 1 : 0;
   if (input.summary !== undefined) fields.summary = String(input.summary || '').slice(0, 4000);

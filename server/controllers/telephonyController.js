@@ -5,6 +5,7 @@ const path = require('path');
 const settings = require('../repositories/settingsRepo');
 const telephony = require('../services/telephonyService');
 const followUpService = require('../services/followUpService');
+const desktopBridge = require('../services/desktopBridgeService');
 const { audioDir } = require('../config/env');
 const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
@@ -16,6 +17,7 @@ const businessHours = asyncHandler(async (req, res) => res.json(telephony.busine
 // this response is the only place a SIP credential can leave the process — and only when the
 // agent has turned the handoff on. See telephonyService.webrtcSession for that reasoning.
 const webrtcSession = asyncHandler(async (req, res) => res.json(telephony.webrtcSession()));
+const desktop = asyncHandler(async (req, res) => res.json(desktopBridge.descriptor()));
 
 const callerIds = asyncHandler(async (req, res) => res.json({
   pool: telephony.callerIdPool(),
@@ -99,6 +101,6 @@ const updateFlynumber = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting,
+  businessHours, webrtcSession, desktop, callerIds, greetingMeta, uploadGreeting,
   greetingFile, followUpEmail, scheduleFollowUp, flynumber, updateFlynumber
 };

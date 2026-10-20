@@ -113,6 +113,7 @@ export const api = {
   // Credentials for the in-browser softphone. Token-gated like everything else, and the
   // server only releases the SIP password when the operator turned the handoff on.
   webrtcSession: () => req('GET', '/api/telephony/webrtc-session'),
+  desktopContract: () => req('GET', '/api/telephony/desktop'),
   callerIds: () => req('GET', '/api/telephony/caller-ids'),
   voicemailGreeting: () => req('GET', '/api/telephony/voicemail-greeting'),
   uploadGreeting: (file) => { const f = new FormData(); f.append('file', file); return req('POST', '/api/telephony/voicemail-greeting', f, true); },

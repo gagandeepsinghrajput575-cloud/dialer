@@ -11,6 +11,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
+import { isDesktop, onDesktopCommand, pushDesktopState } from './desktop/bridge.mjs';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -143,6 +144,53 @@ export function SoftphoneProvider({ children }) {
   const { simulateIncomingCall, simulateCallerHangup, incomingCall } = engine;
   const incomingRef = useRef(null);
   incomingRef.current = incomingCall;
+
+  // ---- native shell ----------------------------------------------------------------------
+  // The macOS menu bar and pulse:// deep links dial through exactly this path: one direct-dial
+  // ledger row, then the same engine `start` the dialer page uses. No second call pipeline.
+  const startDesktopDial = useCallback(async (phone) => {
+    if (!enabled) {
+      toast('Turn on the in-app softphone to dial from the menu', 'error');
+      return { ok: false, reason: 'not-webrtc' };
+    }
+    const clean = String(phone || '').trim();
+    if (!clean) return { ok: false, reason: 'no-number' };
+    try {
+      const call = await api.directDial({ phone: clean, name: '' });
+      const result = await engine.start(call.phone || clean, { callId: call.callId });
+      if (result && result.ok) setView('dialer');
+      return result;
+    } catch (e) {
+      toast(e.message || 'Could not start that call', 'error');
+      return { ok: false, reason: e.message };
+    }
+  }, [enabled, engine, setView, toast]);
+
+  useEffect(() => {
+    if (!isDesktop()) return undefined;
+    return onDesktopCommand((command) => {
+      if (!command) return;
+      if (command.action === 'dial') startDesktopDial(command.phone);
+      else if (command.action === 'answer') engine.answerInbound && engine.answerInbound();
+      else if (command.action === 'decline') engine.declineInbound && engine.declineInbound();
+      else if (command.action === 'hangup') engine.hangUp && engine.hangUp();
+      else if (command.action === 'dtmf') engine.sendDtmf && engine.sendDtmf(command.digit);
+    });
+  }, [engine, startDesktopDial]);
+
+  // The dock badge and the native notification are driven by the engine's own state, so they
+  // can never claim a ringing phone the modal is not showing.
+  useEffect(() => {
+    if (!isDesktop()) return;
+    if (incomingRef.current) {
+      pushDesktopState({
+        type: 'incoming',
+        callerPhone: incomingRef.current.callerNumber || '',
+        callerName: (incomingRef.current.prospect && incomingRef.current.prospect.name) || '',
+      });
+    } else if (engine.state === 'active') pushDesktopState({ type: 'active' });
+    else pushDesktopState({ type: 'idle' });
+  }, [incomingCall, engine.state]);
 
   // ---- test-mode trigger ---------------------------------------------------------------
   // Press `i` anywhere in test mode: the phone rings, the modal appears, Enter answers and

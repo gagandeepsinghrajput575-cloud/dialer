@@ -1273,6 +1273,88 @@ async function run() {
       freshApp.dom.window.close();
     }
 
+    // --- Deep Edge Cases in Real Compiled Bundle (Unload Beacon + 16:30 Window) ---
+    {
+      await put('/api/settings', { dry_run: '1', telephony_mode: 'webrtc' });
+      const winProspect = await post('/api/prospects', { name: 'Window Probe', phone: '20776655' });
+      const morningProspect = await post('/api/prospects', { name: 'Morning Probe', phone: '20887766' });
+      const edgeApp = loadApp(JSDOM, VirtualConsole, '#dialer', { webAudio: fakeWebAudio() });
+      const ewin = edgeApp.window;
+      const edoc = ewin.document;
+      let simClock = new Date('2026-10-20T14:29:45Z'); // 16:29:45 Europe/Copenhagen (CEST)
+      ewin.__pulseNow = () => simClock;
+
+      const sentBeacons = [];
+      ewin.navigator.sendBeacon = (url, body) => {
+        sentBeacons.push({ url, body });
+        fetch(new URL(url, BASE).href, {
+          method: 'POST',
+          headers: { Origin: BASE, 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: String(body),
+        }).catch(() => {});
+        return true;
+      };
+
+      await wait(() => edoc.querySelector('.q-item'), 15000, 'edge dialer queue');
+      await ensureListener(edgeApp);
+      await sleep(1150); // ensure window monitor synced to 16:29:45 regardless of host wall clock
+
+      const probeItem = [...edoc.querySelectorAll('.q-item')].find((el) => /Window Probe/.test(el.textContent));
+      if (probeItem) probeItem.dispatchEvent(new ewin.MouseEvent('click', { bubbles: true }));
+      await sleep(350);
+
+      // Start outbound WebRTC call at 16:29:45 Copenhagen
+      key(ewin, 'c');
+      await wait(() => /WebRTC Active/.test(edoc.body.textContent), 9000, 'edge call live');
+
+      // Advance Copenhagen clock across 16:30:00 while call is active
+      simClock = new Date('2026-10-20T14:30:02Z'); // 16:30:02 Europe/Copenhagen
+      await wait(
+        () => /Calling window closed for today \(16:30\)\. Wrap up active conversation\./.test(edoc.body.textContent),
+        5000,
+        '16:30 wrap-up notice in DOM',
+      );
+      check(/WebRTC Active/.test(edoc.body.textContent), 'active conversation continues uninterrupted across 16:30:00 Copenhagen');
+      check(/Calling window closed for today \(16:30\)\. Wrap up active conversation\./.test(edoc.body.textContent),
+        '16:30:00 transition surfaces non-intrusive wrap-up notice');
+
+      // Verify beforeunload confirmation string during active call
+      const bu = new ewin.Event('beforeunload', { cancelable: true });
+      Object.defineProperty(bu, 'returnValue', { value: undefined, writable: true, configurable: true });
+      ewin.dispatchEvent(bu);
+      check(bu.defaultPrevented && bu.returnValue === 'Call in progress. Are you sure?',
+        'beforeunload prompts agent when reloading mid-call');
+
+      // Classify active call, then verify pressing C after 16:30 places 0 new calls until 08:30 next business day
+      key(ewin, '6');
+      await sleep(1100);
+      edgeApp.drain();
+      key(ewin, 'c');
+      await sleep(500);
+      check(count(edgeApp.drain(), /POST \/api\/prospects\/\d+\/call/) === 0,
+        'pressing C after 16:30 wrap-up places 0 outbound calls');
+
+      // Next business day 08:30:05 Copenhagen -> unlocks dialing automatically, then pagehide abandons cleanly
+      simClock = new Date('2026-10-21T06:30:05Z');
+      await sleep(1250);
+      const morningItem = [...edoc.querySelectorAll('.q-item')].find((el) => /Morning Probe/.test(el.textContent));
+      if (morningItem) morningItem.dispatchEvent(new ewin.MouseEvent('click', { bubbles: true }));
+      await sleep(300);
+      key(ewin, 'c');
+      await wait(() => /WebRTC Active/.test(edoc.body.textContent), 9000, 'next-morning call live');
+      await sleep(1100);
+      ewin.dispatchEvent(new ewin.Event('pagehide'));
+      await sleep(450);
+      const abandonBeacon = sentBeacons.find((b) => /\/api\/calls\/\d+\/abandon$/.test(b.url));
+      check(!!abandonBeacon, 'pagehide during active call dispatches sendBeacon to /api/calls/:id/abandon');
+      const abandonedId = abandonBeacon ? Number(abandonBeacon.url.match(/\/api\/calls\/(\d+)\/abandon/)[1]) : 0;
+      const historyJson = await (await fetch(`${BASE}/api/calls?limit=20`)).json();
+      const abandonedCallRow = (historyJson.calls || []).find((c) => Number(c.id) === abandonedId);
+      check(abandonedCallRow?.status === 'abandoned' && abandonedCallRow?.outcome === 'dropped',
+        `pagehide beacon transitions live DB row to abandoned/dropped (${abandonedCallRow?.status}/${abandonedCallRow?.outcome})`);
+      edgeApp.dom.window.close();
+    }
+
     // Leave the fixture as it was found: no sink, no captured mail, no stale setting.
     await fetch(`${BASE}/api/email/outbox`, { method: 'DELETE' });
     await put('/api/settings', { smtp_host: '', smtp_user: '', smtp_port: '587', smtp_from: '' });

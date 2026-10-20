@@ -93,6 +93,7 @@ const callMissed = z.object({
 });
 
 const callPatch = z.object({
+  status: z.enum(['connected', 'completed', 'ended', 'answered', 'initiated', 'placed']).optional(),
   outcome: z.enum(OUTCOMES).optional(),
   duration_sec: seconds.optional(),
   vm_dropped: boolish.optional(),

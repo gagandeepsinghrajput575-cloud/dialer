@@ -11,6 +11,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
+import { installGlobalAudioUnlock } from './utils/ringer.js';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -18,7 +19,7 @@ export const useSoftphone = () => useContext(Ctx);
 export function SoftphoneProvider({ children }) {
   const {
     settings, toast, setActiveId, setView, setInbound, inboundRef, setInboundEnded,
-    findProspectByPhone, refreshProspects, refreshStats, prospects,
+    findProspectByPhone, refreshProspects, refreshStats, bumpLedger, prospects,
   } = useStore();
 
   const enabled = settings?.telephony_mode === 'webrtc';
@@ -52,11 +53,12 @@ export function SoftphoneProvider({ children }) {
       setInbound((cur) => (cur && cur.startedAt === entry.startedAt
         ? { ...cur, prospect: res.prospect, matched: res.matched, provisional: res.provisional, callId: res.callId, loading: false, resolution: res.matched ? 'database' : 'provisional' }
         : cur));
+      bumpLedger();
       refreshStats();
     } catch (e) {
       setInbound((cur) => (cur && cur.startedAt === entry.startedAt ? { ...cur, loading: false, logError: e.message } : cur));
     }
-  }, [findProspectByPhone, refreshProspects, refreshStats, setInbound]);
+  }, [bumpLedger, findProspectByPhone, refreshProspects, refreshStats, setInbound]);
 
   // ---- a ring ended unanswered ---------------------------------------------------------
   // The engine reports one object: the ring, plus why it stopped. Reading it as a second
@@ -81,9 +83,10 @@ export function SoftphoneProvider({ children }) {
       // A stranger's placeholder lead is swept with the ring (data minimisation): if it was,
       // the list on screen has to change, or the agent keeps seeing a lead that no longer exists.
       if (res?.cleanedUp) await refreshProspects();
+      bumpLedger();
       await refreshStats();
     } catch { /* the ring is over either way; a missing ledger row must not shout at the agent */ }
-  }, [inboundRef, refreshProspects, refreshStats, setInbound, toast]);
+  }, [bumpLedger, inboundRef, refreshProspects, refreshStats, setInbound, toast]);
 
   // ---- a call became real --------------------------------------------------------------
   const onActive = useCallback((direction) => {
@@ -91,8 +94,9 @@ export function SoftphoneProvider({ children }) {
       const rec = inboundRef.current;
       setInbound(rec ? { ...rec, answered: true } : null);
       if (rec?.callId) {
-        api.patchCall(rec.callId, { status: 'connected', outcome: 'conversation' }).catch(() => { });
-        refreshStats();
+        api.patchCall(rec.callId, { status: 'connected' })
+          .then(() => { bumpLedger(); refreshStats(); })
+          .catch(() => { });
       }
       // A callback about a customer the agent is already talking to: the cockpit has to be
       // showing that person, on the dialer, before the first sentence.
@@ -102,7 +106,7 @@ export function SoftphoneProvider({ children }) {
       }
     }
     handlersRef.current.onActive?.(direction);
-  }, [inboundRef, refreshStats, setActiveId, setInbound, setView]);
+  }, [bumpLedger, inboundRef, refreshStats, setActiveId, setInbound, setView]);
 
   const onEnded = useCallback((direction) => {
     if (direction === 'inbound') {
@@ -112,21 +116,25 @@ export function SoftphoneProvider({ children }) {
       // uses — same copilot, same follow-up prompt, same stats.
       setInboundEnded(rec ? { callId: rec.callId, prospect: rec.prospect } : null);
       setInbound(null);
+      bumpLedger();
       refreshStats();
+    } else {
+      bumpLedger();
     }
     handlersRef.current.onEnded?.(direction);
-  }, [inboundRef, refreshStats, setInbound, setInboundEnded]);
+  }, [bumpLedger, inboundRef, refreshStats, setInbound, setInboundEnded]);
 
   const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {
     if (callId && blob && blob.size > 0) {
       try {
         await api.uploadRecording(callId, blob, durationSec);
+        bumpLedger();
       } catch (e) {
         console.warn('Background recording upload non-fatal failure:', e);
       }
     }
     handlersRef.current.onRecordingReady?.({ blob, durationSec, callId });
-  }, []);
+  }, [bumpLedger]);
 
   const engine = useWebRtc({
     enabled,
@@ -143,6 +151,10 @@ export function SoftphoneProvider({ children }) {
   const { simulateIncomingCall, simulateCallerHangup, incomingCall } = engine;
   const incomingRef = useRef(null);
   incomingRef.current = incomingCall;
+
+  // Prime Web Audio + persistent root <audio> element on first user gesture anywhere in the app
+  // so inbound SIP ring tones and WebRTC remote audio streams never fall victim to autoplay block.
+  useEffect(() => installGlobalAudioUnlock(() => engine.audioRef?.current || null), [engine.audioRef]);
 
   // ---- test-mode trigger ---------------------------------------------------------------
   // Press `i` anywhere in test mode: the phone rings, the modal appears, Enter answers and

@@ -29,17 +29,24 @@ function InlineAudioPlayer({ callId, filename, durationSec = 0 }) {
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(durationSec);
   const [speed, setSpeed] = useState(1);
+  const [loadError, setLoadError] = useState(false);
   const sliderId = useId();
 
   const togglePlay = (e) => {
     e.stopPropagation();
     const el = audioRef.current;
     if (!el) return;
+    if (loadError) {
+      setLoadError(false);
+      el.load();
+    }
     if (playing) {
       el.pause();
       setPlaying(false);
     } else {
-      el.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      el.play().then(() => setPlaying(true)).catch(() => {
+        setPlaying(false);
+      });
     }
   };
 
@@ -64,50 +71,60 @@ function InlineAudioPlayer({ callId, filename, durationSec = 0 }) {
         src={`/api/recordings/${callId}/audio`}
         preload="metadata"
         onLoadedMetadata={(e) => {
+          setLoadError(false);
           if (e.target.duration && Number.isFinite(e.target.duration)) setDuration(e.target.duration);
         }}
         onTimeUpdate={(e) => setCurrent(e.target.currentTime)}
         onEnded={() => { setPlaying(false); setCurrent(0); }}
+        onError={() => { setPlaying(false); setLoadError(true); }}
       />
       <button
         type="button"
         className={`recents-play-btn ${playing ? 'playing' : ''}`}
         onClick={togglePlay}
-        title={playing ? 'Pause recording' : 'Play call audio'}
-        aria-label={playing ? 'Pause recording' : 'Play call audio'}
+        title={loadError ? 'Retry loading recording' : playing ? 'Pause recording' : 'Play call audio'}
+        aria-label={loadError ? 'Retry loading recording' : playing ? 'Pause recording' : 'Play call audio'}
       >
         {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" style={{ marginLeft: 2 }} />}
       </button>
 
-      <Equalizer playing={playing} />
+      {loadError ? (
+        <span className="recents-audio-error">
+          <AlertCircle size={13} /> Audio unavailable
+        </span>
+      ) : (
+        <>
+          <Equalizer playing={playing} />
 
-      <div className="recents-progress-wrap">
-        <input
-          id={sliderId}
-          type="range"
-          min="0"
-          max={duration || 1}
-          step="0.1"
-          value={current}
-          onChange={onSeek}
-          className="recents-slider"
-          aria-label="Audio scrubber"
-        />
-        <div className="recents-slider-time">
-          <span>{fmtDur(Math.round(current))}</span>
-          <span>{fmtDur(Math.round(duration))}</span>
-        </div>
-      </div>
+          <div className="recents-progress-wrap">
+            <input
+              id={sliderId}
+              type="range"
+              min="0"
+              max={duration || 1}
+              step="0.1"
+              value={current}
+              onChange={onSeek}
+              className="recents-slider"
+              aria-label="Audio scrubber"
+            />
+            <div className="recents-slider-time">
+              <span>{fmtDur(Math.round(current))}</span>
+              <span>{fmtDur(Math.round(duration))}</span>
+            </div>
+          </div>
 
-      <button
-        type="button"
-        className="recents-speed-btn"
-        onClick={cycleSpeed}
-        title="Playback speed"
-        aria-label={`Playback speed ${speed}x`}
-      >
-        {speed}x
-      </button>
+          <button
+            type="button"
+            className="recents-speed-btn"
+            onClick={cycleSpeed}
+            title="Playback speed"
+            aria-label={`Playback speed ${speed}x`}
+          >
+            {speed}x
+          </button>
+        </>
+      )}
 
       <a
         href={`/api/recordings/${callId}/audio`}
@@ -124,7 +141,7 @@ function InlineAudioPlayer({ callId, filename, durationSec = 0 }) {
 }
 
 export default function Recents() {
-  const { setActiveId, setDrawerId, setView, toast, stats } = useStore();
+  const { setActiveId, setDrawerId, setView, toast, stats, inbound, ledgerVersion } = useStore();
   const [calls, setCalls] = useState([]);
   const [summary, setSummary] = useState(null);
   const [total, setTotal] = useState(0);
@@ -162,6 +179,9 @@ export default function Recents() {
 
   useEffect(() => {
     loadCalls();
+  }, [loadCalls, stats, ledgerVersion, inbound?.callId, inbound?.answered]);
+
+  useEffect(() => {
     const interval = setInterval(loadCalls, 10000);
     const onFocus = () => { if (document.visibilityState === 'visible') loadCalls(); };
     window.addEventListener('focus', onFocus);
@@ -171,7 +191,7 @@ export default function Recents() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [loadCalls, stats]);
+  }, [loadCalls]);
 
   const handleRedial = (call) => {
     if (call.prospect_id) {
@@ -374,9 +394,10 @@ export default function Recents() {
                 <div className="recents-cards-grid">
                   <AnimatePresence>
                     {groupItems.map((c) => {
-                      const isMissed = c.direction === 'inbound' && ['ringing', 'missed', 'declined'].includes(c.status);
+                      const isLiveRinging = c.direction === 'inbound' && c.status === 'ringing' && inbound?.callId === c.id && !inbound?.answered;
+                      const isMissed = !isLiveRinging && c.direction === 'inbound' && ['ringing', 'missed', 'declined'].includes(c.status);
+                      const isLiveConnected = c.status === 'connected' && !c.ended_at;
                       const isInbound = c.direction === 'inbound';
-                      const isOutbound = c.direction === 'outbound';
                       const outcomeInfo = outcomeMeta(c.outcome);
 
                       return (
@@ -392,7 +413,9 @@ export default function Recents() {
                           <div className="recents-card-body">
                             {/* Direction Icon Badge */}
                             <div className={`direction-badge ${isMissed ? 'missed' : isInbound ? 'inbound' : 'outbound'}`}>
-                              {isMissed ? (
+                              {isLiveRinging ? (
+                                <PhoneIncoming size={16} />
+                              ) : isMissed ? (
                                 <PhoneMissed size={16} />
                               ) : isInbound ? (
                                 <ArrowDownLeft size={16} />
@@ -411,6 +434,12 @@ export default function Recents() {
                                   <span className="pronunciation-badge" title="Danish pronunciation guide">
                                     /{c.pronunciation}/
                                   </span>
+                                )}
+                                {isLiveRinging && (
+                                  <span className="ringing-pill">Incoming Ring…</span>
+                                )}
+                                {isLiveConnected && (
+                                  <span className="connected-pill">Live Call</span>
                                 )}
                                 {isMissed && (
                                   <span className="missed-pill">Missed Call</span>

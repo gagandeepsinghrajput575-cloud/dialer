@@ -12,7 +12,7 @@ const start = asyncHandler(async (req, res) => {
 
 const patch = asyncHandler(async (req, res) => {
   const result = callService.classify(req.params.id, req.body);
-  res.json({ ok: true, prospect: result.prospect, call: result.call });
+  res.json({ ok: true, status: result.call?.status, prospect: result.prospect, call: result.call });
 });
 
 // POST /api/calls/inbound — the browser softphone received a SIP INVITE. Creates the ledger

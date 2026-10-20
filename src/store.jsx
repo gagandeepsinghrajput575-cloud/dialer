@@ -183,6 +183,8 @@ export function StoreProvider({ children }) {
   const [inboundEnded, setInboundEnded] = useState(null);   // answered call that has hung up: { callId, prospect }
   const inboundRef = useRef(null);
   inboundRef.current = inbound;
+  const [ledgerVersion, setLedgerVersion] = useState(0);
+  const bumpLedger = useCallback(() => setLedgerVersion((v) => v + 1), []);
 
   // Local, instant match for the ringing caller. The server does the authoritative lookup (and
   // provisions an unknown caller); this is what puts a name on screen without waiting for a
@@ -220,7 +222,8 @@ export function StoreProvider({ children }) {
     onProspectSaved, onProspectDeleted,
     outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismissToast: dismiss,
     inbound, setInbound, inboundRef, inboundEnded, setInboundEnded, findProspectByPhone,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss, inbound, inboundEnded, findProspectByPhone]);
+    ledgerVersion, bumpLedger,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss, inbound, inboundEnded, findProspectByPhone, ledgerVersion, bumpLedger]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

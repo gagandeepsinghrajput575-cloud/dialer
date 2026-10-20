@@ -69,6 +69,7 @@ export const api = {
   deleteNote: (id) => req('DELETE', `/api/notes/${id}`),
   call: (id) => req('POST', `/api/prospects/${id}/call`, { tzOffset: new Date().getTimezoneOffset() }),
   logCall: (id, b) => req('PATCH', `/api/calls/${id}`, b),
+  patchCall: (id, b) => req('PATCH', `/api/calls/${id}`, b),
   // The browser softphone received an INVITE: match the caller to a prospect (or provision a
   // placeholder lead) and open the ledger row the call will be classified against.
   inboundCall: (b) => req('POST', '/api/calls/inbound', b),

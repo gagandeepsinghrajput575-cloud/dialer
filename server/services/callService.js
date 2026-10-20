@@ -315,7 +315,11 @@ function classify(callId, input = {}) {
   const outcome = input.outcome || null;
   if (outcome && !OUTCOMES.includes(outcome)) throw ApiError.badRequest('Bad outcome');
 
-  const fields = { ended_at: sqlNow() };
+  const liveAnswerOnly = input.status === 'connected' && !outcome && !Number.isFinite(input.duration_sec);
+  const fields = liveAnswerOnly
+    ? { status: 'connected' }
+    : { status: input.status || 'completed', ended_at: sqlNow() };
+
   if (outcome) fields.outcome = outcome;
   if (Number.isFinite(input.duration_sec)) fields.duration_sec = Math.round(input.duration_sec);
   if (input.vm_dropped !== undefined) fields.vm_dropped = input.vm_dropped ? 1 : 0;
@@ -323,9 +327,15 @@ function classify(callId, input = {}) {
   if (input.next_step !== undefined) fields.next_step = String(input.next_step || '').slice(0, 1000);
   if (input.follow_up_at !== undefined) fields.follow_up_at = input.follow_up_at || null;
 
-  return db.transaction(() => {
+  return withBusyRetry(() => db.transaction(() => {
     const updated = calls.patch(callId, fields);
     let prospect = prospects.get(call.prospect_id);
+    if (prospect && isProvisionalLead(prospect)) {
+      let extraObj = {};
+      try { extraObj = JSON.parse(prospect.extra || '{}'); } catch { extraObj = {}; }
+      delete extraObj.provisional;
+      prospect = prospects.update(call.prospect_id, { extra: JSON.stringify(extraObj) });
+    }
     if (outcome && prospect) {
       const { stage, dnc } = applyOutcomeStage(prospect, outcome, input.follow_up_at || null);
       const patch = { last_outcome: outcome, stage, dnc };
@@ -333,7 +343,7 @@ function classify(callId, input = {}) {
       prospect = prospects.update(call.prospect_id, patch);
     }
     return { ok: true, prospect, call: updated };
-  })();
+  })());
 }
 
 // V — voicemail drop: log it, flag the drop, schedule the callback and let the UI advance.

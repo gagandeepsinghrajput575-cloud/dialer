@@ -2990,6 +2990,35 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
   border-radius: 99px;
 }
 
+.ringing-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #67e8f9;
+  background: rgba(34, 211, 238, 0.14);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  padding: 1px 8px;
+  border-radius: 99px;
+}
+
+.connected-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 1px 8px;
+  border-radius: 99px;
+}
+
+.recents-audio-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: #fda4af;
+  padding: 0 6px;
+}
+
 .lead-sub {
   display: flex;
   align-items: center;

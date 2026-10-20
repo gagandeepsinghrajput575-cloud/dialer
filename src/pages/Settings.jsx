@@ -178,9 +178,8 @@ export default function SettingsPage() {
   const proto = f.softphone_protocol === 'tel' ? 'tel' : 'sip';
   const inBrowser = f.telephony_mode === 'webrtc';
   const sipServer = f.telnyx_sip_server || 'sip.telnyx.com';
-  // Telnyx's WebRTC gateway is a single fixed endpoint, not a port/path derived from the SIP
-  // domain, so the placeholder states it outright instead of synthesising a URL.
-  const wsGateway = f.webrtc_ws_url || 'wss://rtc.telnyx.com';
+  // Telnyx's standard SIP over WSS proxy runs on port 7443 (wss://sip.telnyx.com:7443).
+  const wsGateway = f.webrtc_ws_url || 'wss://sip.telnyx.com:7443';
   // The two modes hand out completely different URIs, so the sample must not lie about which
   // one Pulse will actually dial.
   const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer};transport=ws` : `${proto}:+${cc}20123456`;

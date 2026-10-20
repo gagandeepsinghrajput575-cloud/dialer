@@ -83,9 +83,8 @@ const DEFAULTS = {
   meet_link: '', // your standing meeting link; {{meet_link}} inserts it into the template
   email_verify_deep: '0', // SMTP RCPT probing — see emailService.js for why it is off
   // ---- in-browser WebRTC softphone (telephony_mode: 'webrtc') ----
-  // The SIP-over-WebSocket gateway the browser registers against. Empty means Telnyx's own
-  // gateway (wss://rtc.telnyx.com) — a fixed endpoint, not a port/path derived from the SIP
-  // server. Set it explicitly only to point at a different gateway or a proxy.
+  // The SIP-over-WebSocket gateway the browser registers against. Empty means Telnyx's RFC 7118
+  // SIP over WSS proxy (wss://sip.telnyx.com:7443). Set explicitly only for a custom/regional edge.
   webrtc_ws_url: '',
   // The browser cannot register with a SIP server without the SIP password. That is a real
   // tension with the rule that this secret never reaches the browser, so the handoff is an

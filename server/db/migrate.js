@@ -107,6 +107,8 @@ const MIGRATIONS = [
   },
   // Inbound dedup index: minimizes lock window for concurrent forked INVITEs (G-9).
   { version: 13, name: 'calls-inbound-dedup-index', up: (d) => d.exec(INBOUND_DEDUP_SQL) },
+  // Ensure Standard SIP over WSS gateway (wss://sip.telnyx.com:7443) replaces any legacy rtc.telnyx.com override.
+  require('./migrations/014-fix-telnyx-sip-ws-gateway'),
 ];
 
 function backfillProspectPronunciations(d) {

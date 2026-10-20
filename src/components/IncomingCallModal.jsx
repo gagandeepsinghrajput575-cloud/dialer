@@ -10,6 +10,7 @@ import { Phone, PhoneOff, PhoneIncoming, UserPlus, Building2, History, Mic } fro
 import { useStore } from '../store.jsx';
 import { stageMeta } from '../utils.js';
 import { useSoftphone } from '../softphone.jsx';
+import { unlockAudio } from '../utils/ringer.js';
 import { Avatar } from './ui.jsx';
 
 function CallerWave() {
@@ -34,7 +35,7 @@ function CallerWave() {
 
 export default function IncomingCallModal() {
   const { inbound } = useStore();
-  const { incomingCall, answerInbound, declineInbound } = useSoftphone();
+  const { incomingCall, answerInbound, declineInbound, silenceRinger, audioRef } = useSoftphone();
   const answerRef = useRef(null);
   const restoreFocusRef = useRef(null);
   const [answering, setAnswering] = useState(false);
@@ -42,6 +43,10 @@ export default function IncomingCallModal() {
 
   const answer = async () => {
     if (open && !answering) {
+      // Unlock Web Audio + <audio> output and stop the ringer synchronously within the user
+      // gesture call stack before any async getUserMedia / SIP SDP await boundary.
+      unlockAudio(audioRef?.current || null);
+      silenceRinger?.();
       setAnswering(true);
       try {
         await answerInbound();

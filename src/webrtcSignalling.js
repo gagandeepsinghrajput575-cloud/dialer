@@ -12,22 +12,28 @@
 // while the tab is open (`initStandbySession`), the INVITE is picked up by the delegate, and
 // an outbound dial reuses the registration that is already up instead of performing a second
 // handshake. `disposeStandbySession` is the way back out — switching modes or closing the tab.
-//
-// ## Status: wired, not verified against a live PBX
-//
-// The stack is sip.js, bundled lazily (the chunk is only fetched when the softphone is used).
-// The dialer is honest about what it can guarantee: registration, media and the INVITE
-// delegate are handled here, but until the credentials point at a reachable gateway nothing
-// can prove the far end answers. If the stack cannot be loaded at all, this throws a message
-// the agent can act on instead of letting the cockpit pretend a call is up.
 
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
+
+export const DEFAULT_ICE_SERVERS = [
+  { urls: 'stun:stun.telnyx.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+];
 
 // Ask for a short registration and refresh it well before it lapses. A stale registration is
 // the quiet failure mode of a standby softphone: the tab looks ready and simply stops ringing.
 export const REGISTER_EXPIRES = 300;
 const REGISTER_REFRESH_MS = 240000;
 const RETRY_MS = [5000, 10000, 20000, 45000];
+
+// Active per-call media bridge read by the UserAgent's sessionDescriptionHandlerFactory at
+// SDP negotiation time so neither inbound Invitation nor outbound Inviter ever mutates
+// getter-only Session properties after INVITE parsing or adds duplicate sender tracks.
+let activeCallMedia = {
+  localStream: null,
+  onTrack: null,
+  onPeerConnection: null,
+};
 
 // Resolve the SIP library. The specifiers are written out as literals on purpose: the bundler
 // only code-splits an import it can see, and a bare specifier left in the output is something
@@ -38,7 +44,7 @@ export async function loadSipStack() {
     const core = await import('sip.js');
     if (!core?.UserAgent) return null;
     // sip.js keeps the WebRTC session-description handler in its platform layer, not the root
-    // export (0.21.x). Needed only to point the media path at the microphone we already hold.
+    // export (0.21.x). Needed to bind pre-opened microphone tracks and remote track listeners.
     let SessionDescriptionHandler = core.SessionDescriptionHandler;
     let defaultSessionDescriptionHandlerFactory = core.defaultSessionDescriptionHandlerFactory;
     if (!SessionDescriptionHandler || !defaultSessionDescriptionHandlerFactory) {
@@ -58,48 +64,97 @@ export async function sipStackAvailable() {
   return (await loadSipStack()) !== null;
 }
 
-// Route the session's outgoing audio through the microphone the engine already opened, so
-// there is exactly one capture path and mute means the same thing in both directions.
-// Best-effort by design: if a future sip.js changes the handler's shape, the call still works
-// on sip.js's own capture.
-// Hardened: intercept getDescription to guarantee tracks are attached before SDP offer creation,
-// avoiding the setTimeout(0) race that produced m=audio 0 (one-way audio) on slow devices (G-4).
-function micFactory(localStream, SessionDescriptionHandler) {
-  if (!localStream || !SessionDescriptionHandler) return {};
-  return {
-    sessionDescriptionHandlerFactory: (sess, options) => {
-      const sdh = new SessionDescriptionHandler(sess, options);
-      const bindTracks = () => {
-        try {
-          const conn = sdh.peerConnection;
-          if (!conn) return false;
-          const senders = conn.getSenders ? conn.getSenders() : [];
-          const tracks = localStream.getTracks();
-          if (senders.length && senders[0] && senders[0].track) {
-            // Prefer replaceTrack to preserve transceiver MID
-            for (let i = 0; i < Math.min(senders.length, tracks.length); i++) {
-              try { senders[i].replaceTrack(tracks[i]); } catch { try { conn.removeTrack(senders[i]); conn.addTrack(tracks[i], localStream); } catch {} }
-            }
-            for (let i = tracks.length; i < senders.length; i++) try { conn.removeTrack(senders[i]); } catch {}
-            for (let i = senders.length; i < tracks.length; i++) conn.addTrack(tracks[i], localStream);
-          } else {
-            for (const sender of senders) if (sender.track) try { conn.removeTrack(sender); } catch {}
-            for (const t of tracks) conn.addTrack(t, localStream);
-          }
-          return true;
-        } catch { return false; }
+// Build a single SIP.js 0.21.x compliant SessionDescriptionHandlerFactory registered once on
+// UserAgent construction:
+//   1. Calls new SessionDescriptionHandler(logger, mediaStreamFactory, sdhConfiguration)
+//      using the exact 3-arg signature expected by sip.js/lib/platform/web.
+//   2. Attaches remote audio track listeners on peerConnection IMMEDIATELY upon creation,
+//      before setDescription(offer/answer) runs, so early remote RTP tracks are never missed.
+//   3. Wraps getDescription to ensure local microphone tracks are bound once (never calling
+//      pc.addTrack twice for the same track) and audio transceivers carry sendrecv direction.
+export function buildSessionDescriptionHandlerFactory(sip) {
+  const SDH = sip?.SessionDescriptionHandler;
+  if (!SDH) return undefined;
+
+  return (sess, options = {}) => {
+    const hooks = activeCallMedia;
+    const logger = sess.userAgent.getLogger('sip.SessionDescriptionHandler');
+    const sdhConfig = {
+      iceGatheringTimeout: options?.iceGatheringTimeout ?? 1000,
+      peerConnectionConfiguration: {
+        iceServers: DEFAULT_ICE_SERVERS,
+        ...(options?.peerConnectionConfiguration || {}),
+      },
+    };
+    const mediaStreamFactory = (constraints) => {
+      if (hooks.localStream) return Promise.resolve(hooks.localStream);
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+        return navigator.mediaDevices.getUserMedia(constraints || { audio: true, video: false });
+      }
+      return Promise.resolve(new MediaStream());
+    };
+
+    const sdh = new SDH(logger, mediaStreamFactory, sdhConfig);
+    const pc = sdh.peerConnection;
+    const seenTrackIds = new Set();
+
+    const notifyRemoteTrack = (event) => {
+      const track = event?.track || event?.streams?.[0]?.getAudioTracks?.()?.[0];
+      if (!track || (track.kind && track.kind !== 'audio')) return;
+      const key = track.id || track;
+      if (seenTrackIds.has(key)) return;
+      seenTrackIds.add(key);
+      try { hooks.onTrack?.(track, event); } catch { /* audio hook must never break SIP */ }
+    };
+
+    // Wire remote track listeners BEFORE setDescription / getDescription execute.
+    if (pc) {
+      const prevDelegate = sdh.peerConnectionDelegate;
+      sdh.peerConnectionDelegate = {
+        ...(prevDelegate || {}),
+        ontrack: (ev) => {
+          prevDelegate?.ontrack?.(ev);
+          notifyRemoteTrack(ev);
+        },
       };
-      // Try immediate bind; if PC not yet created, hook getDescription to bind just before offer.
-      if (!bindTracks()) {
-        const orig = sdh.getDescription && sdh.getDescription.bind(sdh);
-        if (orig) {
-          sdh.getDescription = async (...args) => { bindTracks(); return orig(...args); };
-        } else {
-          queueMicrotask(bindTracks);
+      if (typeof pc.addEventListener === 'function') {
+        pc.addEventListener('track', notifyRemoteTrack);
+      }
+      try { hooks.onPeerConnection?.(pc, sdh); } catch { /* non-fatal */ }
+    }
+
+    const ensureBidirectionalTracks = (callOpts) => {
+      const conn = sdh.peerConnection;
+      if (!conn) return;
+      const stream = hooks.localStream;
+      if (stream) {
+        const senders = conn.getSenders ? conn.getSenders() : [];
+        for (const track of stream.getAudioTracks()) {
+          const existing = senders.find((s) => s.track === track || s.track?.kind === 'audio');
+          if (!existing) {
+            conn.addTrack(track, stream);
+          } else if (existing.track !== track && typeof existing.replaceTrack === 'function') {
+            try { existing.replaceTrack(track); } catch { /* ignore */ }
+          }
         }
       }
-      return sdh;
-    },
+      // Guarantee active audio transceivers negotiate sendrecv unless explicitly placed on hold
+      if (!callOpts?.hold && typeof conn.getTransceivers === 'function') {
+        for (const tr of conn.getTransceivers()) {
+          if (tr && tr.direction && tr.direction !== 'stopped' && tr.direction !== 'sendrecv') {
+            tr.direction = 'sendrecv';
+          }
+        }
+      }
+    };
+
+    const origGetDescription = sdh.getDescription.bind(sdh);
+    sdh.getDescription = async (...args) => {
+      ensureBidirectionalTracks(args[0]);
+      return origGetDescription(...args);
+    };
+
+    return sdh;
   };
 }
 
@@ -224,39 +279,28 @@ export function setupInboundListener(ua, onIncomingCall) {
             else invitation.dispose?.();
           } catch { /* the session is already down */ }
         },
-        accept: async (localStream) => {
+        accept: async (localStream, mediaHooks = {}) => {
           ua.delegate.__incomingPending = false;
-          if (String(invitation.state).toLowerCase() === 'terminated') throw new Error('Call already terminated (caller hung up)');
-          const sip = await loadSipStack();
-          const { SessionDescriptionHandler, defaultSessionDescriptionHandlerFactory } = sip || {};
-
-          if (localStream) {
-            if (typeof defaultSessionDescriptionHandlerFactory === 'function') {
-              invitation.sessionDescriptionHandlerFactory = defaultSessionDescriptionHandlerFactory(() => Promise.resolve(localStream));
-            } else if (SessionDescriptionHandler) {
-              Object.defineProperty(invitation, 'sessionDescriptionHandlerFactory', {
-                value: (sess, options) => {
-                  const mediaStreamFactory = () => Promise.resolve(localStream);
-                  return new SessionDescriptionHandler(sess.userAgent.getLogger('sip.SessionDescriptionHandler'), mediaStreamFactory, options);
-                },
-                configurable: true,
-                writable: true,
-              });
-            }
+          if (String(invitation.state).toLowerCase() === 'terminated') {
+            throw new Error('Call already terminated (caller hung up)');
           }
+
+          activeCallMedia = {
+            localStream: localStream || null,
+            onTrack: mediaHooks?.onTrack || null,
+            onPeerConnection: mediaHooks?.onPeerConnection || null,
+          };
 
           await invitation.accept({
             sessionDescriptionHandlerOptions: {
               constraints: { audio: true, video: false },
               iceGatheringTimeout: 1000,
               peerConnectionConfiguration: {
-                iceServers: [
-                  { urls: 'stun:stun.telnyx.com:3478' },
-                  { urls: 'stun:stun.l.google.com:19302' },
-                ],
+                iceServers: DEFAULT_ICE_SERVERS,
               },
             },
           });
+          return invitation;
         },
       });
     },
@@ -270,20 +314,23 @@ export function setupInboundListener(ua, onIncomingCall) {
  * @param {object} opts.session          descriptor from GET /api/telephony/webrtc-session
  * @param {function} opts.onIncomingCall INVITE handler (see setupInboundListener)
  * @param {function} [opts.onState]      ('registering'|'ready'|'retrying'|'unavailable', detail) => void
+ * @param {object} [opts.sipStack]       optional injected SIP stack (for unit testing)
  * @returns {Promise<object>} the standby session
  */
-export async function initStandbySession({ session, onIncomingCall, onState } = {}) {
+export async function initStandbySession({ session, onIncomingCall, onState, sipStack } = {}) {
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
   const key = sessionKey(session);
   if (standby && standby.key === key && standby.ua) return standby;
   if (standby) await disposeStandbySession();
 
-  const sip = await loadSipStack();
+  const sip = sipStack || await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   const { UserAgent, Registerer } = sip;
 
   const uri = UserAgent.makeURI(`sip:${session.username}@${session.server}`);
   if (!uri) throw new Error(`"${session.username}@${session.server}" is not a usable SIP address.`);
+
+  const sdhFactory = buildSessionDescriptionHandlerFactory(sip);
 
   const ua = new UserAgent({
     uri,
@@ -292,18 +339,16 @@ export async function initStandbySession({ session, onIncomingCall, onState } = 
     authorizationPassword: session.password,
     displayName: session.username,
     logLevel: 'error',
+    ...(sdhFactory ? { sessionDescriptionHandlerFactory: sdhFactory } : {}),
     sessionDescriptionHandlerFactoryOptions: {
       peerConnectionConfiguration: {
-        iceServers: [
-          { urls: 'stun:stun.telnyx.com:3478' },
-          { urls: 'stun:stun.l.google.com:19302' },
-        ],
+        iceServers: DEFAULT_ICE_SERVERS,
       },
       iceGatheringTimeout: 1000,
     },
   });
 
-  const self = { key, ua, registerer: null, stopped: false, refresh: null, retry: null, keepAlive: null, session };
+  const self = { key, ua, sip, registerer: null, stopped: false, refresh: null, retry: null, keepAlive: null, session };
   standby = self;
 
   // Transport liveness: detect half-open WebSocket (sleep, Wi-Fi roam, NAT rebinding).
@@ -388,6 +433,7 @@ function refreshStandby(self, onState, attempt) {
 export async function disposeStandbySession() {
   const self = standby;
   standby = null;
+  activeCallMedia = { localStream: null, onTrack: null, onPeerConnection: null };
   if (!self) return;
   self.stopped = true;
   clearTimeout(self.refresh);
@@ -409,24 +455,37 @@ export function standbySession() {
  * @param {function} opts.onState    (state) => void — registering | dialing | ringing | active | ended
  * @param {function} [opts.onActive] () => void
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
+ * @param {function} [opts.onTrack]  (track, event) => void invoked before SDP completes
+ * @param {function} [opts.onPeerConnection] (pc, sdh) => void invoked when RTCPeerConnection opens
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, localStream } = {}) {
+export async function dialOutbound({ remoteNumber, onState, onActive, localStream, onTrack, onPeerConnection } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
   if (self.ua.delegate?.__incomingPending) throw new Error('Incoming call in progress — cannot dial now (glare).');
-  const sip = await loadSipStack();
+  const sip = self.sip || await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
-  const { UserAgent, Inviter, SessionState, SessionDescriptionHandler } = sip;
+  const { UserAgent, Inviter, SessionState } = sip;
 
   const server = self.session.server;
   const target = UserAgent.makeURI(`sip:${remoteNumber}@${server};transport=ws`);
   if (!target) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
 
+  activeCallMedia = {
+    localStream: localStream || null,
+    onTrack: onTrack || null,
+    onPeerConnection: onPeerConnection || null,
+  };
+
   const inviter = new Inviter(self.ua, target, {
-    sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } },
-    ...micFactory(localStream, SessionDescriptionHandler),
+    sessionDescriptionHandlerOptions: {
+      constraints: { audio: true, video: false },
+      iceGatheringTimeout: 1000,
+      peerConnectionConfiguration: {
+        iceServers: DEFAULT_ICE_SERVERS,
+      },
+    },
   });
 
   let stopped = false;
@@ -479,10 +538,12 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
  * @param {function} opts.onError      (message) => void
  * @param {function} opts.onActive     () => void
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
+ * @param {function} [opts.onTrack]    (track, event) => void
+ * @param {function} [opts.onPeerConnection] (pc, sdh) => void
  * @param {function} [opts.onIncomingCall] INVITE handler, when the engine wants standby calls
  * @returns {Promise<{stop: function}>}
  */
-export async function startSignalling({ session, remoteNumber, onState, onError, onActive, localStream, onIncomingCall } = {}) {
+export async function startSignalling({ session, remoteNumber, onState, onError, onActive, localStream, onTrack, onPeerConnection, onIncomingCall } = {}) {
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
@@ -493,5 +554,5 @@ export async function startSignalling({ session, remoteNumber, onState, onError,
     onState: (s, detail) => { if (s !== 'ready') onError?.(detail || 'The in-browser softphone lost its registration.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, localStream });
+  return dialOutbound({ remoteNumber, onState, onActive, localStream, onTrack, onPeerConnection });
 }

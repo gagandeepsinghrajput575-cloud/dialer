@@ -78,7 +78,8 @@ const buildDialUri = (phone, proto = protocol()) => `${proto}:${phone}`;
 // either from a desktop softphone (Zoiper/Linphone) over the SIP FQDN, or straight from this
 // browser over Telnyx's WebRTC signalling gateway. Both modes read the same account.
 const TELNYX_SIP_DOMAIN = 'sip.telnyx.com';
-const TELNYX_WEBRTC_WS = 'wss://rtc.telnyx.com';
+const TELNYX_WEBRTC_WS = 'wss://sip.telnyx.com:7443';
+const FORBIDDEN_LEGACY_RTC_WS = /^wss?:\/\/rtc\.telnyx\.com\/?$/i;
 
 // The SIP FQDN every URI is addressed to. A saved value wins, so pointing Pulse at your own
 // PBX or a Telnyx regional edge still works; the Telnyx domain is the floor, not a guess.
@@ -94,16 +95,19 @@ function buildDialUriFull(phone) {
 const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim();
 
 // ---------------------------------------------------------------- in-browser WebRTC softphone
-// Telnyx's WebRTC endpoint is a single fixed gateway (wss://rtc.telnyx.com) rather than a
-// port/path derived from the SIP server, so there is nothing to compute: the setting is an
-// override for a proxy or a different region, and the Telnyx gateway is the documented default.
-// `webrtcSession()` reports which of the two is in play so the UI never has to guess.
+// Standard SIP.js over WSS runs against Telnyx's RFC 7118 SIP WebSocket proxy
+// (wss://sip.telnyx.com:7443), never the proprietary wss://rtc.telnyx.com endpoint.
 
 const webrtcServer = () => sipServer();
 
+function isCustomWebrtcGateway(raw) {
+  const clean = String(raw || '').trim();
+  return !!clean && !FORBIDDEN_LEGACY_RTC_WS.test(clean);
+}
+
 function webrtcWsUrl() {
   const explicit = String(settings.get('webrtc_ws_url') || '').trim();
-  return explicit || TELNYX_WEBRTC_WS;
+  return isCustomWebrtcGateway(explicit) ? explicit : TELNYX_WEBRTC_WS;
 }
 
 // What the browser addresses the call to. transport=ws tells the far end this leg arrives
@@ -141,7 +145,7 @@ function webrtcSession() {
     configured: r.configured,
     missing: r.missing,
     wsUrl: r.wsUrl,
-    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : 'telnyx_default',
+    wsUrlSource: isCustomWebrtcGateway(settings.get('webrtc_ws_url')) ? 'settings' : 'telnyx_default',
     server: r.server,
     username: r.user,
     // Normalized like every other caller ID the app shows or sends: the browser puts this

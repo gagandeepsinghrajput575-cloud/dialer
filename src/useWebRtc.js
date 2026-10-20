@@ -537,7 +537,54 @@ export default function useWebRtc({
         endIncoming('canceled');
         return { ok: false, reason: 'canceled' };
       }
-      await entry.accept?.(streamRef.current);
+
+      // Bind remote audio stream handler BEFORE SDP offer/answer negotiation runs so the instant
+      // WebRTC receives the remote RTP audio track during setRemoteDescription, audio output plays.
+      const attachRemoteTrack = (track) => {
+        if (!audioRef.current || !track) return;
+        audioRef.current.muted = false;
+        audioRef.current.srcObject = new MediaStream([track]);
+        const playResult = audioRef.current.play?.();
+        if (playResult && typeof playResult.catch === 'function') {
+          playResult.catch((err) => {
+            console.warn('Inbound WebRTC audio play() deferred or blocked:', err);
+          });
+        }
+      };
+
+      const bindPeerConnection = (pc) => {
+        if (!pc) return;
+        pcRef.current = pc;
+        const onTrackEvent = (event) => {
+          const track = event?.track || event?.streams?.[0]?.getAudioTracks?.()?.[0];
+          if (track && (!track.kind || track.kind === 'audio')) attachRemoteTrack(track);
+        };
+        if (typeof pc.addEventListener === 'function') {
+          pc.addEventListener('track', onTrackEvent);
+        } else {
+          const prev = pc.ontrack;
+          pc.ontrack = (event) => {
+            if (typeof prev === 'function') prev.call(pc, event);
+            onTrackEvent(event);
+          };
+        }
+      };
+
+      await entry.accept?.(streamRef.current, {
+        onTrack: (track) => attachRemoteTrack(track),
+        onPeerConnection: (pc) => bindPeerConnection(pc),
+      });
+
+      // Fallback safety: if the remote track had already landed on the handler's stream/receivers
+      // before playback settled, guarantee audioRef.current is bound and playing.
+      const sdh = entry.invitation?.sessionDescriptionHandler;
+      const pc = sdh?.peerConnection;
+      if (pc && pcRef.current !== pc) bindPeerConnection(pc);
+      if (audioRef.current && !audioRef.current.srcObject) {
+        const existingTrack = sdh?.remoteMediaStream?.getAudioTracks?.()?.[0]
+          || (pc?.getReceivers ? pc.getReceivers().find((r) => r.track?.kind === 'audio')?.track : null);
+        if (existingTrack) attachRemoteTrack(existingTrack);
+      }
     } catch (e) {
       // 487 Canceled crossing 200 OK: not an error, just caller gave up
       if (/487|Canceled|canceled|terminated/i.test(String(e?.message || e))) {
@@ -549,39 +596,6 @@ export default function useWebRtc({
       setError(reason);
       endIncoming('missed');
       return { ok: false, reason };
-    }
-
-    // Connect inbound remote audio to speakers & hold pcRef for teardown
-    try {
-      const sdh = entry.invitation?.sessionDescriptionHandler;
-      const pc = sdh?.peerConnection;
-      if (pc) pcRef.current = pc;
-
-      const playRemote = (stream) => {
-        if (!audioRef.current || !stream) return;
-        audioRef.current.srcObject = stream;
-        audioRef.current.play?.().catch(() => {});
-      };
-
-      if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
-        playRemote(sdh.remoteMediaStream);
-      } else if (pc) {
-        const remoteStream = new MediaStream();
-        const receivers = pc.getReceivers ? pc.getReceivers() : [];
-        for (const r of receivers) {
-          if (r.track && r.track.kind === 'audio') remoteStream.addTrack(r.track);
-        }
-        if (remoteStream.getAudioTracks().length > 0) playRemote(remoteStream);
-      }
-
-      if (pc) {
-        pc.addEventListener?.('track', (ev) => {
-          const stream = ev.streams?.[0] || new MediaStream([ev.track]);
-          playRemote(stream);
-        });
-      }
-    } catch (err) {
-      console.warn('Inbound remote audio binding non-fatal:', err);
     }
 
     // The ring is over. Clearing the ref is what lets the *next* call in: while it is set, the
@@ -597,7 +611,11 @@ export default function useWebRtc({
     setDirection('inbound');
     setTarget(answered.callerNumber);
     setStateSafe('active');
-    callbacksRef.current.onActive?.('inbound');
+    try {
+      callbacksRef.current.onActive?.('inbound');
+    } catch (cbErr) {
+      console.error('Inbound onActive callback error:', cbErr);
+    }
     if (answered.callId) startRecording(answered.callId);
     return { ok: true, entry: answered };
   }, [endIncoming, openMicrophone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel, stopRinger]);
@@ -777,9 +795,8 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    let stream;
     try {
-      stream = await openMicrophone();
+      await openMicrophone();
     } catch (e) {
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
       const reason = denied
@@ -790,78 +807,64 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    // A peer connection is created and the microphone attached even before signalling
-    // succeeds, so the session is ready the moment an offer comes back.
-    try {
-      const PC = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
-      if (PC) {
-        // Telnyx's STUN first; a public fallback second, so a network that blocks the
-        // carrier's STUN still gathers a candidate set instead of failing to connect.
-        const pc = new PC({
-          iceServers: [
-            { urls: 'stun:stun.telnyx.com:3478' },
-            { urls: 'stun:stun.l.google.com:19302' },
-          ],
+    const attachOutboundRemoteTrack = (track) => {
+      if (!audioRef.current || !track) return;
+      audioRef.current.muted = false;
+      audioRef.current.srcObject = new MediaStream([track]);
+      const playResult = audioRef.current.play?.();
+      if (playResult && typeof playResult.catch === 'function') {
+        playResult.catch((err) => {
+          console.warn('Outbound WebRTC audio play() deferred or blocked:', err);
         });
-        for (const track of stream.getTracks()) pc.addTrack(track, stream);
-        pc.ontrack = (ev) => {
-          const [remote] = ev.streams || [];
-          if (audioRef.current && remote) {
-            audioRef.current.srcObject = remote;
-            audioRef.current.play?.().catch(() => {});
-          }
-        };
-        pc.oniceconnectionstatechange = () => {
-          const s = pc.iceConnectionState;
-          if (s === 'connected' || s === 'completed') {
-            if (stateRef.current !== 'active') {
-              setStateSafe('active');
-              callbacksRef.current.onActive?.('outbound');
-              if (recordingCallIdRef.current) startRecording(recordingCallIdRef.current);
-            }
-          } else if (s === 'failed' || s === 'disconnected') {
-            setError('The audio connection dropped.');
-            setStateSafe('error');
-          }
-        };
-        pcRef.current = pc;
       }
-    } catch { /* the media element still plays the local stream back */ }
+    };
 
-    // Signalling is the one piece that needs the provider's SIP-over-WebSocket gateway. It is
-    // deliberately isolated behind this boundary: swap the adapter and the engine is unchanged.
+    const bindOutboundPeerConnection = (pc) => {
+      if (!pc) return;
+      pcRef.current = pc;
+      const onTrackEvent = (event) => {
+        const track = event?.track || event?.streams?.[0]?.getAudioTracks?.()?.[0];
+        if (track && (!track.kind || track.kind === 'audio')) attachOutboundRemoteTrack(track);
+      };
+      if (typeof pc.addEventListener === 'function') {
+        pc.addEventListener('track', onTrackEvent);
+      } else {
+        const prev = pc.ontrack;
+        pc.ontrack = (event) => {
+          if (typeof prev === 'function') prev.call(pc, event);
+          onTrackEvent(event);
+        };
+      }
+    };
+
+    // Signalling binds the live RTCPeerConnection and attaches ontrack BEFORE SDP offer/answer
+    // completes so early media (183 Session Progress) and 200 OK RTP streams never miss tracks.
     try {
       const { startSignalling } = await import('./webrtcSignalling.js');
       sipRef.current = await startSignalling({
         session,
         remoteNumber: phone,
         localStream: streamRef.current,
+        onTrack: (track) => attachOutboundRemoteTrack(track),
+        onPeerConnection: (pc) => bindOutboundPeerConnection(pc),
         onState: setStateSafe,
         onError: (msg) => { setError(msg); setStateSafe('error'); },
         onActive: () => {
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
-            if (sipPc && pcRef.current !== sipPc) {
-              try { pcRef.current?.close?.(); } catch {}
-              pcRef.current = sipPc;
-            }
-            const playRemote = (remStream) => {
-              if (!audioRef.current || !remStream) return;
-              audioRef.current.srcObject = remStream;
-              audioRef.current.play?.().catch(() => {});
-            };
-            if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
-              playRemote(sdh.remoteMediaStream);
-            } else if (sipPc) {
-              const remStream = new MediaStream();
-              for (const r of (sipPc.getReceivers ? sipPc.getReceivers() : [])) {
-                if (r.track && r.track.kind === 'audio') remStream.addTrack(r.track);
-              }
-              if (remStream.getAudioTracks().length > 0) playRemote(remStream);
+            if (sipPc && pcRef.current !== sipPc) bindOutboundPeerConnection(sipPc);
+            if (audioRef.current && !audioRef.current.srcObject) {
+              const existingTrack = sdh?.remoteMediaStream?.getAudioTracks?.()?.[0]
+                || (sipPc?.getReceivers ? sipPc.getReceivers().find((r) => r.track?.kind === 'audio')?.track : null);
+              if (existingTrack) attachOutboundRemoteTrack(existingTrack);
             }
           } catch {}
-          callbacksRef.current.onActive?.('outbound');
+          try {
+            callbacksRef.current.onActive?.('outbound');
+          } catch (cbErr) {
+            console.error('Outbound onActive callback error:', cbErr);
+          }
           if (recordingCallIdRef.current && !recorderRef.current) {
             startRecording(recordingCallIdRef.current);
           }
@@ -944,12 +947,13 @@ export default function useWebRtc({
     busy: state !== 'idle' && state !== 'standby' && state !== 'ended' && state !== 'error',
     supported: mediaSupported(),
     audioRef,
+    silenceRinger: stopRinger,
     start, hangUp, toggleMute, sendDtmf, reset,
     answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
   }), [
     state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
-    start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+    stopRinger, start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
   ]);
 }

@@ -1,21 +1,91 @@
-// The sound of the phone ringing, synthesised in the tab.
+// The sound of the phone ringing, synthesised in the tab, plus browser audio-unlock helpers.
 //
 // Zero assets and zero network: a browser that can play a 425 Hz sine can ring, which means
 // an incoming call makes a noise even on a machine where the sample pack was never shipped.
 // The tone is the Danish standard (425 Hz, 1s on / 4s off), the same cadence the handset on
 // the desk uses.
 //
-// The hard part is not the tone, it is the lifecycle. A ringer that is not torn down on
-// *every* way out of 'incoming' — answered, declined, cancelled by the far end, the tab
-// closing, the mode being switched — leaves an agent listening to a phone that will not stop
-// ringing after they picked it up. So: stop() is idempotent, start() always stops first, and
-// the nodes are clamped, stopped, disconnected and closed in that order.
+// Modern Chromium/WebKit autoplay policies start AudioContext in 'suspended' and block
+// <audio>.play() on remote WebRTC tracks unless primed inside a user gesture ('pointerdown'
+// or 'keydown'). installGlobalAudioUnlock() + unlockAudio() prime a shared Web Audio context
+// and the persistent root <audio> element synchronously within user gesture call stacks.
 
 export const DANISH_RING = { frequency: 425, onMs: 1000, offMs: 4000, volume: 0.18 };
 
+let sharedUnlockCtx = null;
+
+function getAudioContextCtor() {
+  if (typeof window === 'undefined') return null;
+  return window.AudioContext || window.webkitAudioContext || null;
+}
+
+/**
+ * Synchronously prime/unlock Web Audio and an optional HTMLAudioElement within a user gesture
+ * call stack ('pointerdown' / 'keydown' / Answer click) before any async await boundary.
+ *
+ * @param {HTMLMediaElement|null} [audioEl]
+ * @returns {AudioContext|null}
+ */
+export function unlockAudio(audioEl = null) {
+  let ctx = sharedUnlockCtx;
+  try {
+    if (!ctx || ctx.state === 'closed') {
+      const Ctor = getAudioContextCtor();
+      if (Ctor) {
+        ctx = new Ctor();
+        sharedUnlockCtx = ctx;
+      }
+    }
+    if (ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+      ctx.resume()?.catch?.(() => {});
+    }
+    // Play a zero-length silent buffer when supported so WebKit/Safari marks Web Audio unlocked.
+    if (ctx && typeof ctx.createBuffer === 'function' && typeof ctx.createBufferSource === 'function') {
+      const silent = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = silent;
+      src.connect(ctx.destination);
+      src.start(0);
+    }
+  } catch { /* non-browser or restricted environment */ }
+
+  try {
+    if (audioEl) {
+      audioEl.muted = false;
+      if (audioEl.srcObject && audioEl.paused && typeof audioEl.play === 'function') {
+        audioEl.play()?.catch?.(() => {});
+      }
+    }
+  } catch { /* element playback may not be ready yet */ }
+
+  return ctx;
+}
+
+/**
+ * Attach passive global user-gesture listeners ('pointerdown' & 'keydown') on window so audio
+ * output is unlocked before the first inbound SIP INVITE ever arrives.
+ *
+ * @param {() => HTMLMediaElement|null} [getAudioEl]
+ * @returns {() => void} cleanup function
+ */
+export function installGlobalAudioUnlock(getAudioEl = () => null) {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    return () => {};
+  }
+  const onGesture = () => {
+    unlockAudio(typeof getAudioEl === 'function' ? getAudioEl() : null);
+  };
+  window.addEventListener('pointerdown', onGesture, { capture: true, passive: true });
+  window.addEventListener('keydown', onGesture, { capture: true });
+  return () => {
+    window.removeEventListener('pointerdown', onGesture, { capture: true });
+    window.removeEventListener('keydown', onGesture, { capture: true });
+  };
+}
+
 /**
  * @param {object} [overrides]
- * @param {Function|null} [overrides.audioContext] AudioContext constructor (injected in tests)
+ * @param {Function|null} [overrides.audioContext] AudioContext constructor or instance (injected in tests)
  * @returns {{ start: () => boolean, stop: () => void, ringing: () => boolean }}
  */
 export function createRinger(overrides = {}) {
@@ -47,8 +117,10 @@ export function createRinger(overrides = {}) {
 
   function pulse() {
     if (!live || !ctx || !gain) return;
+    if (timer !== null) { clearTimeout(timer); timer = null; }
     const now = ctx.currentTime;
     try {
+      if (typeof gain.gain.cancelScheduledValues === 'function') gain.gain.cancelScheduledValues(now);
       gain.gain.setValueAtTime(cfg.volume, now);
       gain.gain.setValueAtTime(0, now + cfg.onMs / 1000);
     } catch { stop(); return; }
@@ -57,15 +129,14 @@ export function createRinger(overrides = {}) {
 
   function start() {
     stop();   // ringing twice is a restart, never two tones on top of each other
-    const Ctor = cfg.audioContext !== undefined
+    const CtorOrInstance = cfg.audioContext !== undefined
       ? cfg.audioContext
-      : (typeof window !== 'undefined' ? (window.AudioContext || window.webkitAudioContext || null) : null);
-    if (!Ctor) return false;
+      : getAudioContextCtor();
+    if (!CtorOrInstance) return false;
     try {
-      ctx = new Ctor();
-      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-        try { ctx.resume()?.catch?.(() => {}); } catch { /* autoplay policy, not our problem */ }
-      }
+      ctx = typeof CtorOrInstance === 'function' ? new CtorOrInstance() : CtorOrInstance;
+      const wasSuspended = ctx.state === 'suspended';
+
       gain = ctx.createGain();
       gain.gain.setValueAtTime(0, ctx.currentTime);   // silent until the first pulse
       gain.connect(ctx.destination);
@@ -78,6 +149,19 @@ export function createRinger(overrides = {}) {
 
       live = true;
       pulse();
+
+      if (wasSuspended && typeof ctx.resume === 'function') {
+        const activeCtx = ctx;
+        try {
+          const resumed = activeCtx.resume();
+          if (resumed && typeof resumed.then === 'function') {
+            resumed.then(() => {
+              // Re-anchor the audible pulse immediately once the hardware audio clock unfreezes.
+              if (live && ctx === activeCtx) pulse();
+            }).catch(() => {});
+          }
+        } catch { /* autoplay policy until user interacts */ }
+      }
       return true;
     } catch {
       stop();

@@ -48,6 +48,10 @@ The Settings page has a **Native macOS app** panel with the copyable Linphone pa
 registration status. Everything it shows comes from `GET /api/telephony/desktop`, which is
 guarded by `x-pulse-token` and never contains a SIP secret.
 
+If in-app audio cannot start (engine disabled, gateway blocked, no microphone), the menu dial,
+dock action or `pulse://` link hands the number to Linphone automatically — the call still goes
+out, and Pulse still owns the queue and the ledger.
+
 **Why this fixes the browser failure:** the answer no longer races `getUserMedia`, ICE and SDP
 generation inside a tab; the window never suspends its audio context; mic permission is granted
 once at process start; and the call survives the window being hidden or closed to the dock.

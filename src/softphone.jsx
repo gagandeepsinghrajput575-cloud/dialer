@@ -11,7 +11,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
-import { isDesktop, onDesktopCommand, pushDesktopState } from './desktop/bridge.mjs';
+import { isDesktop, onDesktopCommand, openInSoftphone, pushDesktopState } from './desktop/bridge.mjs';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -149,16 +149,27 @@ export function SoftphoneProvider({ children }) {
   // The macOS menu bar and pulse:// deep links dial through exactly this path: one direct-dial
   // ledger row, then the same engine `start` the dialer page uses. No second call pipeline.
   const startDesktopDial = useCallback(async (phone) => {
+    const clean = String(phone || '').trim();
+    if (!clean) return { ok: false, reason: 'no-number' };
+    // Fail-safe: when this shell cannot start in-app audio (engine off, WSS blocked, no mic),
+    // hand the number to Linphone immediately instead of dead-ending the menu action.
+    const handoff = () => {
+      if (!isDesktop() || !openInSoftphone(clean)) return false;
+      toast('Opening Linphone for this call');
+      return true;
+    };
     if (!enabled) {
+      if (handoff()) return { ok: true, handoff: true };
       toast('Turn on the in-app softphone to dial from the menu', 'error');
       return { ok: false, reason: 'not-webrtc' };
     }
-    const clean = String(phone || '').trim();
-    if (!clean) return { ok: false, reason: 'no-number' };
     try {
       const call = await api.directDial({ phone: clean, name: '' });
       const result = await engine.start(call.phone || clean, { callId: call.callId });
       if (result && result.ok) setView('dialer');
+      else if (!['busy', 'already-ringing', 'glare-outbound-pending'].includes(result && result.reason) && handoff()) {
+        return { ok: true, handoff: true };
+      }
       return result;
     } catch (e) {
       toast(e.message || 'Could not start that call', 'error');

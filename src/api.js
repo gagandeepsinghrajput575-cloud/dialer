@@ -78,6 +78,14 @@ export const api = {
   missCall: (id, b) => req('POST', `/api/calls/${id}/missed`, b || {}),
   discardCall: (id) => req('POST', `/api/calls/${id}/discard`, {}),
   stats: () => req('GET', `/api/stats?tzOffset=${new Date().getTimezoneOffset()}`),
+  calls: (opts = {}) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts || {})) {
+      if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
+    }
+    const qs = params.toString();
+    return req('GET', `/api/calls${qs ? `?${qs}` : ''}`);
+  },
   exportProspectsUrl: () => '/api/prospects/export',
   settings: () => req('GET', '/api/settings'),
   saveSettings: (b) => req('PUT', '/api/settings', b),

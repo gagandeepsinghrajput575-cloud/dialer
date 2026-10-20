@@ -49,20 +49,35 @@ const aiLeadSorter = require('../services/aiLeadSorter');
 const settings = require('../repositories/settingsRepo');
 
 router.post('/ai-analyze', asyncHandler(async (req, res) => {
-  const { headers, sampleRows, apiKey, saveKey } = req.body || {};
+  const { headers, sampleRows, apiKey, saveKey, provider, model } = req.body || {};
   if (!Array.isArray(headers) || !headers.length) {
     throw ApiError.badRequest('No headers provided for AI analysis');
   }
 
-  if (saveKey && apiKey && typeof apiKey === 'string') {
-    settings.set('ai_api_key', apiKey.trim());
-    settings.set('ai_provider', 'gemini');
+  const keyStr = (apiKey && typeof apiKey === 'string') ? apiKey.trim() : '';
+  let detectedProvider = provider;
+  if (!detectedProvider && keyStr) {
+    if (keyStr.startsWith('sk-or-')) detectedProvider = 'openrouter';
+    else if (keyStr.startsWith('AIza')) detectedProvider = 'gemini';
+    else if (keyStr.startsWith('sk-')) detectedProvider = 'openai';
+  }
+
+  if (saveKey && keyStr) {
+    settings.set('ai_api_key', keyStr);
+    if (detectedProvider) {
+      settings.set('ai_provider', detectedProvider);
+      if (detectedProvider === 'openrouter' && (!settings.get('ai_model') || settings.get('ai_model').startsWith('gemini-'))) {
+        settings.set('ai_model', 'openrouter/free');
+      }
+    }
   }
 
   const result = await aiLeadSorter.analyzeLeadStructure({
     headers,
     sampleRows: Array.isArray(sampleRows) ? sampleRows : [],
-    apiKey,
+    apiKey: keyStr || undefined,
+    provider: detectedProvider,
+    model,
   });
 
   res.json(result);

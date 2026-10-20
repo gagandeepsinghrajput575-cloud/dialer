@@ -103,6 +103,8 @@ const SELECT_ONE = `
 
 const get = (id) => toMessage(db.prepare(`${SELECT_ONE} WHERE o.id = ?`).get(Number(id)), { includeAttachmentData: true });
 
+const escapeLike = (s) => String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
+
 // Newest first, with an optional substring search across the fields an agent would search by.
 function list({ limit = 50, offset = 0, q = '' } = {}) {
   const lim = Math.max(1, Math.min(200, Number(limit) || 50));
@@ -111,10 +113,10 @@ function list({ limit = 50, offset = 0, q = '' } = {}) {
   // Attachment filenames are searched too: "the quote I sent" is as likely to be remembered
   // as a file name as it is as a subject line, and it costs nothing on a local ledger.
   const where = term
-    ? `WHERE (o.subject LIKE ? OR o.to_address LIKE ? OR o.from_address LIKE ? OR o.text_body LIKE ?
-             OR o.attachments_json LIKE ? OR IFNULL(p.name, '') LIKE ?)`
+    ? `WHERE (o.subject LIKE ? ESCAPE '\\' OR o.to_address LIKE ? ESCAPE '\\' OR o.from_address LIKE ? ESCAPE '\\' OR o.text_body LIKE ? ESCAPE '\\'
+             OR o.attachments_json LIKE ? ESCAPE '\\' OR IFNULL(p.name, '') LIKE ? ESCAPE '\\')`
     : '';
-  const args = term ? Array.from({ length: 6 }, () => `%${term}%`) : [];
+  const args = term ? Array.from({ length: 6 }, () => `%${escapeLike(term)}%`) : [];
   const total = db.prepare(`
     SELECT COUNT(*) AS n FROM outbox o LEFT JOIN prospects p ON p.id = o.prospect_id ${where}
   `).get(...args).n;

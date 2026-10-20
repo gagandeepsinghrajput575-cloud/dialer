@@ -70,6 +70,118 @@ const recent = (limit = 8, extraWhere = '') =>
      WHERE c.status != 'failed' AND c.status != 'discarded' ${extraWhere} ORDER BY c.id DESC LIMIT ?`
   ).all(limit);
 
+const escapeLike = (s) => String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
+
+function buildHistoryFilters({ search = '', direction = '', filter = '', outcome = '', dryRun = null } = {}) {
+  const wheres = ["c.status != 'discarded'"];
+  const params = [];
+
+  if (dryRun !== null) {
+    wheres.push('c.dry_run = ?');
+    params.push(dryRun ? 1 : 0);
+  }
+
+  if (search && search.trim()) {
+    const s = `%${escapeLike(search.trim())}%`;
+    wheres.push("(p.name LIKE ? ESCAPE '\\' OR p.company LIKE ? ESCAPE '\\' OR p.phone LIKE ? ESCAPE '\\' OR c.caller_id LIKE ? ESCAPE '\\')");
+    params.push(s, s, s, s);
+  }
+
+  if (direction && direction !== 'all') {
+    wheres.push('c.direction = ?');
+    params.push(direction.trim());
+  }
+
+  if (filter === 'missed') {
+    wheres.push("(c.direction = 'inbound' AND c.status IN ('ringing', 'missed', 'declined'))");
+  } else if (filter === 'connected') {
+    wheres.push("c.duration_sec > 0 AND c.status NOT IN ('missed', 'declined', 'failed')");
+  } else if (filter === 'voicemail') {
+    wheres.push("(c.vm_dropped = 1 OR c.outcome = 'voicemail')");
+  } else if (filter === 'recordings') {
+    wheres.push('r.id IS NOT NULL');
+  }
+
+  if (outcome && outcome.trim()) {
+    wheres.push('c.outcome = ?');
+    params.push(outcome.trim());
+  }
+
+  const whereClause = wheres.length ? `WHERE ${wheres.join(' AND ')}` : '';
+  return { whereClause, params };
+}
+
+function listHistory({ search = '', direction = '', filter = '', outcome = '', dryRun = null, limit = 50, offset = 0 } = {}) {
+  const { whereClause, params } = buildHistoryFilters({ search, direction, filter, outcome, dryRun });
+  const sql = `
+    SELECT
+      c.id,
+      c.prospect_id,
+      c.outcome,
+      c.duration_sec,
+      c.status,
+      c.dry_run,
+      c.started_at,
+      c.ended_at,
+      c.dial_uri,
+      c.caller_id,
+      c.vm_dropped,
+      c.summary,
+      c.next_step,
+      c.follow_up_at,
+      c.direction,
+      p.name AS prospect_name,
+      p.company,
+      p.title,
+      p.phone,
+      p.stage,
+      p.pronunciation,
+      r.id AS recording_id,
+      CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END AS has_recording
+    FROM calls c
+    LEFT JOIN prospects p ON p.id = c.prospect_id
+    LEFT JOIN recordings r ON r.call_id = c.id
+    ${whereClause}
+    ORDER BY c.id DESC
+    LIMIT ? OFFSET ?
+  `;
+  return db.prepare(sql).all(...params, Math.min(200, Math.max(1, limit)), Math.max(0, offset));
+}
+
+function countHistory({ search = '', direction = '', filter = '', outcome = '', dryRun = null } = {}) {
+  const { whereClause, params } = buildHistoryFilters({ search, direction, filter, outcome, dryRun });
+  const sql = `
+    SELECT COUNT(*) AS total
+    FROM calls c
+    LEFT JOIN prospects p ON p.id = c.prospect_id
+    LEFT JOIN recordings r ON r.call_id = c.id
+    ${whereClause}
+  `;
+  return db.prepare(sql).get(...params)?.total || 0;
+}
+
+function historySummary({ dryRun = null } = {}) {
+  const dryClause = dryRun !== null ? `AND c.dry_run = ${dryRun ? 1 : 0}` : '';
+  const sql = `
+    SELECT
+      COUNT(*) AS total_calls,
+      SUM(CASE WHEN c.direction = 'inbound' THEN 1 ELSE 0 END) AS inbound_calls,
+      SUM(CASE WHEN c.direction = 'outbound' THEN 1 ELSE 0 END) AS outbound_calls,
+      SUM(CASE WHEN c.direction = 'inbound' AND c.status IN ('ringing', 'missed', 'declined') THEN 1 ELSE 0 END) AS missed_calls,
+      SUM(CASE WHEN c.duration_sec > 0 THEN c.duration_sec ELSE 0 END) AS total_duration_sec
+    FROM calls c
+    WHERE c.status != 'discarded' ${dryClause}
+  `;
+  const row = db.prepare(sql).get() || {};
+  return {
+    totalCalls: row.total_calls || 0,
+    inboundCalls: row.inbound_calls || 0,
+    outboundCalls: row.outbound_calls || 0,
+    missedCalls: row.missed_calls || 0,
+    totalDurationSec: row.total_duration_sec || 0,
+  };
+}
+
 module.exports = {
-  insert, createInbound, findOpenInbound, get, remove, patch, listByProspect, lastByProspect, all, since, countSince, recent, PATCH_COLUMNS,
+  insert, createInbound, findOpenInbound, get, remove, patch, listByProspect, lastByProspect, all, since, countSince, recent, listHistory, countHistory, historySummary, PATCH_COLUMNS,
 };

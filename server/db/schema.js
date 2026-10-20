@@ -114,4 +114,10 @@ CREATE TABLE IF NOT EXISTS recording_chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON recording_chat_messages(chat_id);
 `;
 
-module.exports = { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL };
+// Inbound dedup index: covers calls(caller_id, direction, status, started_at)
+// so findOpenInbound runs in sub-millisecond time under concurrent inbound burst (G-9).
+const INBOUND_DEDUP_SQL = `
+CREATE INDEX IF NOT EXISTS idx_calls_inbound_dedup ON calls(caller_id, direction, status, started_at);
+`;
+
+module.exports = { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL, INBOUND_DEDUP_SQL };

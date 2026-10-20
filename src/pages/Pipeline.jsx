@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { DndContext, DragOverlay, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from '@dnd-kit/core';
 import { Phone, Building2, GripVertical } from 'lucide-react';
@@ -46,6 +46,14 @@ export default function Pipeline() {
   const [dragging, setDragging] = useState(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
+  const byStage = useMemo(() => {
+    const map = Object.fromEntries(STAGES.map((s) => [s.id, []]));
+    for (const p of prospects) {
+      if (map[p.stage]) map[p.stage].push(p);
+    }
+    return map;
+  }, [prospects]);
+
   const onEnd = (e) => {
     setDragging(null);
     const to = e.over?.id;
@@ -62,7 +70,7 @@ export default function Pipeline() {
       <header className="page-head"><div><h1>Pipeline</h1><p>Drag prospects between stages. Results you log in the dialer move them automatically.</p></div></header>
       <DndContext sensors={sensors} onDragStart={(e) => setDragging(e.active.data.current.p)} onDragEnd={onEnd} onDragCancel={() => setDragging(null)}>
         <div className="kanban">
-          {STAGES.map((s) => <Column key={s.id} stage={s} items={prospects.filter((p) => p.stage === s.id)} />)}
+          {STAGES.map((s) => <Column key={s.id} stage={s} items={byStage[s.id] || []} />)}
         </div>
         <DragOverlay dropAnimation={{ duration: 180 }}>{dragging ? <CardView p={dragging} overlay /> : null}</DragOverlay>
       </DndContext>

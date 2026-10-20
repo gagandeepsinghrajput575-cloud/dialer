@@ -32,13 +32,15 @@ function remove(callId) {
   return info.changes > 0;
 }
 
+const escapeLike = (s) => String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
+
 function buildFilters({ search = '', outcome = '', direction = '' } = {}) {
   const wheres = [];
   const params = [];
 
   if (search && search.trim()) {
-    const s = `%${search.trim()}%`;
-    wheres.push('(p.name LIKE ? OR p.company LIKE ? OR p.phone LIKE ? OR c.caller_id LIKE ?)');
+    const s = `%${escapeLike(search.trim())}%`;
+    wheres.push("(p.name LIKE ? ESCAPE '\\' OR p.company LIKE ? ESCAPE '\\' OR p.phone LIKE ? ESCAPE '\\' OR c.caller_id LIKE ? ESCAPE '\\')");
     params.push(s, s, s, s);
   }
 

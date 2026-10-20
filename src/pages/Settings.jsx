@@ -349,7 +349,7 @@ export default function SettingsPage() {
           <div className="form two">
             <label>
               WebSocket signalling URL
-              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder="wss://rtc.telnyx.com" className="mono" />
+              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder="wss://sip.telnyx.com:7443" className="mono" />
             </label>
             <label>
               Microphone
@@ -409,7 +409,7 @@ export default function SettingsPage() {
             <>
               <li>
                 In-browser mode needs no softphone: leave the gateway blank to use Telnyx's
-                <b> wss://rtc.telnyx.com</b>, then switch <b>SIP credential handoff</b> on and
+                <b> wss://sip.telnyx.com:7443</b>, then switch <b>SIP credential handoff</b> on and
                 press <b>Test microphone</b>.
               </li>
               <li>
@@ -751,15 +751,16 @@ export default function SettingsPage() {
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.22 }}>
         <div className="panel-title"><Sparkles size={16} /> AI Lead Sorter &amp; Copilot</div>
         <p className="muted small">
-          Connect Google Gemini to intelligently analyze and sort raw lead sheets, map primary contact fields,
+          Connect OpenRouter or Google Gemini to intelligently analyze and sort raw lead sheets, map primary contact fields,
           and automatically tuck secondary registry/social metadata into the dialer dropdown menu.
         </p>
 
         <div className="form two">
           <label>
             AI Provider
-            <select value={f.ai_provider || 'gemini'} onChange={set('ai_provider')}>
-              <option value="gemini">Google Gemini (Recommended)</option>
+            <select value={f.ai_provider || 'openrouter'} onChange={set('ai_provider')}>
+              <option value="openrouter">OpenRouter (Free Heavyweights: Meta-Router, MiniMax)</option>
+              <option value="gemini">Google Gemini</option>
               <option value="openai">OpenAI</option>
               <option value="local">Local (Offline heuristic)</option>
             </select>
@@ -769,7 +770,7 @@ export default function SettingsPage() {
             <input
               value={f.ai_model || ''}
               onChange={set('ai_model')}
-              placeholder={f.ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-1.5-flash'}
+              placeholder={f.ai_provider === 'openrouter' ? 'openrouter/free' : f.ai_provider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash'}
             />
           </label>
         </div>
@@ -781,14 +782,18 @@ export default function SettingsPage() {
               type="password"
               value={f.ai_api_key || ''}
               onChange={set('ai_api_key')}
-              placeholder={settings?.has_ai_key ? '•••••••• (saved — type to replace)' : 'Google Gemini API key (AIzaSy...)'}
+              placeholder={settings?.has_ai_key ? '•••••••• (saved — type to replace)' : f.ai_provider === 'openrouter' ? 'OpenRouter API key (sk-or-v1-...)' : 'Google Gemini API key (AIzaSy...)'}
               autoComplete="new-password"
             />
           </label>
         </div>
 
         <p className="muted small">
-          Get a free Google Gemini API key at{' '}
+          Get a free API key at{' '}
+          <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>
+            OpenRouter
+          </a>{' '}
+          or{' '}
           <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>
             Google AI Studio
           </a>.

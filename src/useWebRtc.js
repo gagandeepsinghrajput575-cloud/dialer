@@ -122,6 +122,7 @@ export default function useWebRtc({
   // an object handed to React must keep working across renders.
   const answerInboundRef = useRef(null);
   const declineInboundRef = useRef(null);
+  const glareMutexRef = useRef(false); // glare window: outbound invite in-flight vs inbound INVITE
 
   callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
@@ -225,19 +226,34 @@ export default function useWebRtc({
     stopRinger();
     releaseInboundLock();
 
+    // 1) Detach senders before closing PC — releases OS mic indicator immediately.
+    //    Closing a PC that still references tracks leaves orange dot on macOS for 0.5–30s.
     try {
-      if (pcRef.current) {
-        pcRef.current.ontrack = null;
-        pcRef.current.oniceconnectionstatechange = null;
-        pcRef.current.close();
+      const pc = pcRef.current;
+      if (pc) {
+        pc.ontrack = null;
+        pc.oniceconnectionstatechange = null;
+        try {
+          for (const sender of (pc.getSenders?.() || [])) {
+            try {
+              if (sender.track) {
+                try { sender.replaceTrack(null); } catch {}
+                try { pc.removeTrack(sender); } catch {}
+              }
+            } catch {}
+          }
+        } catch {}
+        pc.close();
       }
     } catch { /* already closed */ }
     pcRef.current = null;
 
-    // Releasing the tracks is what turns the browser's recording indicator off. A leaked
-    // stream leaves the mic hot after the call, which is the worst possible bug here.
+    // 2) Now stop tracks — PC no longer references them
     try {
-      if (streamRef.current) for (const t of streamRef.current.getTracks()) t.stop();
+      if (streamRef.current) for (const t of streamRef.current.getTracks()) {
+        try { t.enabled = false; } catch {}
+        try { t.stop(); } catch {}
+      }
     } catch { /* nothing to stop */ }
     streamRef.current = null;
 
@@ -245,7 +261,15 @@ export default function useWebRtc({
     try { if (ctxRef.current && ctxRef.current.state !== 'closed') ctxRef.current.close(); } catch { /* ignore */ }
     ctxRef.current = null;
     analyserRef.current = null;
-    for (const t of tonesRef.current) { try { t.stop(); } catch { /* ignore */ } }
+    for (const entry of tonesRef.current) {
+      try {
+        if (entry?.osc) { try { entry.osc.stop(); entry.osc.disconnect(); } catch {} }
+        else if (entry?.oscs) { for (const o of entry.oscs) try { o.stop(); o.disconnect(); } catch {} }
+        if (entry?.gain) try { entry.gain.disconnect(); } catch {}
+        if (entry?.ctx && entry.ctx.state !== 'closed') try { entry.ctx.close(); } catch {}
+        else if (entry?.stop) try { entry.stop(); } catch {}
+      } catch {}
+    }
     tonesRef.current = [];
     setLevel(0);
     setMuted(false);
@@ -303,29 +327,39 @@ export default function useWebRtc({
   }, []);
 
   // Ringback / DTMF tones. Purely local: nothing is transmitted anywhere.
+  // Hardened: track AudioContext alongside oscillators so releaseMedia can close it (G-5).
   const playTone = useCallback((freqs, ms) => {
     const Ctx = audioContextCtor();
     if (!Ctx) return;
+    let ctx, gain, oscs = [];
     try {
-      const ctx = new Ctx();
+      ctx = new Ctx();
       if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
-      const gain = ctx.createGain();
+      gain = ctx.createGain();
       gain.gain.value = 0.06;                     // quiet: it is a cue, not a ringtone
       gain.connect(ctx.destination);
-      const oscs = freqs.map((f) => {
+      oscs = freqs.map((f) => {
         const o = ctx.createOscillator();
         o.frequency.value = f;
         o.connect(gain);
         o.start();
         return o;
       });
-      tonesRef.current.push(...oscs);
+      const entry = { ctx, gain, oscs, osc: oscs[0], stop: () => {
+        for (const o of oscs) try { o.stop(); o.disconnect(); } catch {}
+        try { gain.disconnect(); } catch {}
+        try { if (ctx.state !== 'closed') ctx.close(); } catch {}
+      }};
+      tonesRef.current.push(entry);
       setTimeout(() => {
-        for (const o of oscs) { try { o.stop(); } catch { /* already stopped */ } }
-        try { ctx.close(); } catch { /* ignore */ }
-        tonesRef.current = tonesRef.current.filter((o) => !oscs.includes(o));
+        try { entry.stop(); } catch {}
+        tonesRef.current = tonesRef.current.filter((e) => e !== entry);
       }, ms);
-    } catch { /* audio cues are best-effort */ }
+    } catch {
+      // Ensure partial context is closed on failure
+      try { for (const o of oscs) try { o.stop(); } catch {} } catch {}
+      try { if (ctx && ctx.state !== 'closed') ctx.close(); } catch {}
+    }
   }, []);
 
   // ---- opening the microphone. One implementation for both directions. ----
@@ -375,6 +409,11 @@ export default function useWebRtc({
     if (incomingRef.current) {
       try { reject?.({ statusCode: 486 }); } catch { /* already gone */ }
       return { ok: false, reason: 'already-ringing' };
+    }
+    // Glare window: outbound dial just started (invite in-flight). Defer inbound politely.
+    if (glareMutexRef.current) {
+      try { reject?.({ statusCode: 486 }); } catch { /* already gone */ }
+      return { ok: false, reason: 'glare-outbound-pending' };
     }
 
     // One ringer per machine. The tab that holds the audio lock takes the call; the others
@@ -457,6 +496,11 @@ export default function useWebRtc({
   const answerInbound = useCallback(async () => {
     const entry = incomingRef.current;
     if (!entry) return { ok: false, reason: 'no-incoming' };
+    // CANCEL may have arrived while we were acquiring lock/mic — if already terminated, abort
+    if (entry.invitation && String(entry.invitation.state || '').toLowerCase() === 'terminated') {
+      if (incomingRef.current === entry) endIncoming('canceled');
+      return { ok: false, reason: 'caller-hung-up' };
+    }
     stopRinger();
     setStandbyNote('');
 
@@ -487,13 +531,57 @@ export default function useWebRtc({
     }
 
     try {
+      // Re-check after mic open: CANCEL may have arrived during getUserMedia (80–200 ms window)
+      if (entry.invitation && String(entry.invitation.state || '').toLowerCase() === 'terminated') {
+        releaseMedia();
+        endIncoming('canceled');
+        return { ok: false, reason: 'canceled' };
+      }
       await entry.accept?.(streamRef.current);
     } catch (e) {
+      // 487 Canceled crossing 200 OK: not an error, just caller gave up
+      if (/487|Canceled|canceled|terminated/i.test(String(e?.message || e))) {
+        releaseMedia(); endIncoming('canceled');
+        return { ok: false, reason: 'canceled' };
+      }
       releaseMedia();
       const reason = `The incoming call could not be answered — ${e?.message || e}`;
       setError(reason);
       endIncoming('missed');
       return { ok: false, reason };
+    }
+
+    // Connect inbound remote audio to speakers & hold pcRef for teardown
+    try {
+      const sdh = entry.invitation?.sessionDescriptionHandler;
+      const pc = sdh?.peerConnection;
+      if (pc) pcRef.current = pc;
+
+      const playRemote = (stream) => {
+        if (!audioRef.current || !stream) return;
+        audioRef.current.srcObject = stream;
+        audioRef.current.play?.().catch(() => {});
+      };
+
+      if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
+        playRemote(sdh.remoteMediaStream);
+      } else if (pc) {
+        const remoteStream = new MediaStream();
+        const receivers = pc.getReceivers ? pc.getReceivers() : [];
+        for (const r of receivers) {
+          if (r.track && r.track.kind === 'audio') remoteStream.addTrack(r.track);
+        }
+        if (remoteStream.getAudioTracks().length > 0) playRemote(remoteStream);
+      }
+
+      if (pc) {
+        pc.addEventListener?.('track', (ev) => {
+          const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+          playRemote(stream);
+        });
+      }
+    } catch (err) {
+      console.warn('Inbound remote audio binding non-fatal:', err);
     }
 
     // The ring is over. Clearing the ref is what lets the *next* call in: while it is set, the
@@ -639,6 +727,9 @@ export default function useWebRtc({
       return { ok: false, reason: 'busy' };
     }
     if (incomingRef.current) return { ok: false, reason: 'busy' };   // the phone is ringing
+    // Glare window: mark outbound in-flight so concurrent inbound INVITE is deferred (G-1)
+    glareMutexRef.current = true;
+    setTimeout(() => { glareMutexRef.current = false; }, 1200);
 
     setError('');
     setDtmfLog([]);
@@ -747,17 +838,45 @@ export default function useWebRtc({
         localStream: streamRef.current,
         onState: setStateSafe,
         onError: (msg) => { setError(msg); setStateSafe('error'); },
-        onActive: () => callbacksRef.current.onActive?.('outbound'),
+        onActive: () => {
+          try {
+            const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
+            const sipPc = sdh?.peerConnection;
+            if (sipPc && pcRef.current !== sipPc) {
+              try { pcRef.current?.close?.(); } catch {}
+              pcRef.current = sipPc;
+            }
+            const playRemote = (remStream) => {
+              if (!audioRef.current || !remStream) return;
+              audioRef.current.srcObject = remStream;
+              audioRef.current.play?.().catch(() => {});
+            };
+            if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
+              playRemote(sdh.remoteMediaStream);
+            } else if (sipPc) {
+              const remStream = new MediaStream();
+              for (const r of (sipPc.getReceivers ? sipPc.getReceivers() : [])) {
+                if (r.track && r.track.kind === 'audio') remStream.addTrack(r.track);
+              }
+              if (remStream.getAudioTracks().length > 0) playRemote(remStream);
+            }
+          } catch {}
+          callbacksRef.current.onActive?.('outbound');
+          if (recordingCallIdRef.current && !recorderRef.current) {
+            startRecording(recordingCallIdRef.current);
+          }
+        },
         onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
       });
       return { ok: true, simulated: false };
     } catch (e) {
+      releaseMedia();
       const reason = e?.message || String(e);
       setError(reason);
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, handleIncoming, openMicrophone, playTone, setStateSafe, startRecording, startSimulatedLevel]);
+  }, [enabled, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;

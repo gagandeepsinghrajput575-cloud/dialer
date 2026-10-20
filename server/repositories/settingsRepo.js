@@ -19,8 +19,12 @@ function set(key, value) {
 }
 
 function all() {
-  const out = {};
-  for (const k of SETTING_KEYS) out[k] = get(k);
+  const out = { ...DEFAULTS };
+  for (const r of db.prepare('SELECT key, value FROM settings').all()) {
+    if (Object.prototype.hasOwnProperty.call(DEFAULTS, r.key) && r.value !== null && r.value !== undefined) {
+      out[r.key] = r.value;
+    }
+  }
   return out;
 }
 
@@ -44,4 +48,15 @@ function seedFromEnv() {
   }
 }
 
-module.exports = { get, getInt, getBool, has, set, all, publicView, seedFromEnv };
+// Atomic increment for sequence-style settings (e.g., caller_id_cursor) (G-14).
+// Serializes through a transaction so concurrent calls never reuse the same index.
+function getAndIncrement(key, mod = 0) {
+  return db.transaction(() => {
+    const cur = getInt(key, 0);
+    const next = mod > 0 ? (cur + 1) % mod : cur + 1;
+    set(key, String(next));
+    return cur;
+  })();
+}
+
+module.exports = { get, getInt, getBool, has, set, all, publicView, seedFromEnv, getAndIncrement };

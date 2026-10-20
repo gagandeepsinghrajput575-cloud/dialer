@@ -1,5 +1,6 @@
-// Environment + filesystem layout. Everything the app writes lives under dataDir.
-require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
+if (process.env.PULSE_TEST !== '1') {
+  require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
+}
 const path = require('path');
 const fs = require('fs');
 

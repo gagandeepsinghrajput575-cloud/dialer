@@ -31,9 +31,9 @@ const CSV_HEADERS = [
   'Total Talk Sec', 'Voicemail Drops', 'Last Dial URI',
 ];
 
-function callAggregates() {
+function callAggregates(allCalls = calls.all()) {
   const byProspect = {};
-  for (const c of calls.all()) {
+  for (const c of allCalls) {
     const agg = byProspect[c.prospect_id] || (byProspect[c.prospect_id] = { talkSec: 0, vmDrops: 0, lastDialUri: '' });
     agg.talkSec += c.duration_sec || 0;
     if (c.vm_dropped) agg.vmDrops++;
@@ -66,8 +66,21 @@ function toCsv() {
 }
 
 // Full JSON snapshot: prospects with their notes, complete call history and talk times.
+// Single-pass grouping avoids 2N+1 per-prospect SQL queries on large lead lists.
 function toJson() {
-  const aggs = callAggregates();
+  const allCalls = calls.all();
+  const aggs = callAggregates(allCalls);
+  const callsByProspect = {};
+  // Sort newest first to match calls.listByProspect(id, 1000)
+  for (let i = allCalls.length - 1; i >= 0; i--) {
+    const c = allCalls[i];
+    const list = callsByProspect[c.prospect_id] || (callsByProspect[c.prospect_id] = []);
+    if (list.length < 1000) list.push(c);
+  }
+  const notesByProspect = {};
+  for (const n of notes.all()) {
+    (notesByProspect[n.prospect_id] || (notesByProspect[n.prospect_id] = [])).push(n);
+  }
   const stats = statsService.stats({}); // computed once for both sections
   return {
     exported_at: new Date().toISOString(),
@@ -86,8 +99,8 @@ function toJson() {
       ...p,
       totalTalkSec: (aggs[p.id] || {}).talkSec || 0,
       voicemailDrops: (aggs[p.id] || {}).vmDrops || 0,
-      notes: notes.listByProspect(p.id),
-      calls: calls.listByProspect(p.id, 1000),
+      notes: notesByProspect[p.id] || [],
+      calls: callsByProspect[p.id] || [],
     })),
   };
 }

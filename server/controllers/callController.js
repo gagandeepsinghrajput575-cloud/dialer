@@ -43,4 +43,23 @@ const summarize = asyncHandler(async (req, res) => {
   res.json({ ...result, call: saved });
 });
 
-module.exports = { start, directDial, inbound, missed, patch, voicemailDrop, discard, summarize };
+// GET /api/calls — paginated list of calls with search, direction, and outcome filters
+const list = asyncHandler(async (req, res) => {
+  const { search, direction, filter, outcome, limit, offset, dryRun } = req.query;
+  const parsedLimit = limit ? parseInt(limit, 10) : 50;
+  const parsedOffset = offset ? parseInt(offset, 10) : 0;
+  const parsedDryRun = dryRun !== undefined ? (dryRun === '1' || dryRun === 'true') : null;
+
+  const result = callService.listHistory({
+    search,
+    direction,
+    filter,
+    outcome,
+    dryRun: parsedDryRun,
+    limit: parsedLimit,
+    offset: parsedOffset,
+  });
+  res.json(result);
+});
+
+module.exports = { list, start, directDial, inbound, missed, patch, voicemailDrop, discard, summarize };

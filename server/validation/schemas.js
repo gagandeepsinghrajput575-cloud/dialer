@@ -3,7 +3,7 @@
 const { z } = require('zod');
 const { STAGES, OUTCOMES, SOFTPHONE_PROTOCOLS, TELEPHONY_MODES } = require('../config/defaults');
 
-const AI_PROVIDERS = ['local', 'openai', 'gemini'];
+const AI_PROVIDERS = ['local', 'openai', 'gemini', 'openrouter'];
 // A null from a CSV cell or a JSON client means "empty", not "invalid" — accept it and
 // normalize to '' so the services never have to special-case it. The `.optional()` has to be
 // the OUTERMOST wrapper: an absent key must stay absent, otherwise every settings save would

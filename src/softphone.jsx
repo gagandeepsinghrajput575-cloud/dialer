@@ -18,7 +18,7 @@ export const useSoftphone = () => useContext(Ctx);
 export function SoftphoneProvider({ children }) {
   const {
     settings, toast, setActiveId, setView, setInbound, inboundRef, setInboundEnded,
-    findProspectByPhone, refreshProspects, prospects,
+    findProspectByPhone, refreshProspects, refreshStats, prospects,
   } = useStore();
 
   const enabled = settings?.telephony_mode === 'webrtc';
@@ -34,31 +34,29 @@ export function SoftphoneProvider({ children }) {
   const onIncoming = useCallback(async (entry) => {
     // 1. Instant, local answer: a name from the list we already have, so the modal is never
     //    blank while the network catches up.
-    const local = findProspectByPhone(entry.rawNumber || entry.callerNumber);
+    const callerPhone = entry.rawNumber || entry.callerNumber || 'Unknown';
+    const local = findProspectByPhone(callerPhone);
     setInbound({
-      ...entry, prospect: local, matched: !!local, provisional: false, loading: !local, resolution: 'local',
+      ...entry, callerNumber: entry.callerNumber || 'Unknown', prospect: local, matched: !!local, provisional: false, loading: !local, resolution: 'local',
     });
 
     // 2. The authoritative one: matches against the whole database (not just the loaded page),
     //    provisions a placeholder lead for a stranger, and opens the ledger row.
-    const callerPhone = entry.rawNumber || entry.callerNumber;
-    if (!callerPhone || callerPhone === 'Unknown') {
-      setInbound((cur) => (cur ? { ...cur, loading: false, logError: 'No caller number in the INVITE — this call cannot be logged.' } : cur));
-      return;
-    }
     try {
       const res = await api.inboundCall({ callerPhone });
       entry.attachCrm?.({ prospect: res.prospect, matched: res.matched, provisional: res.provisional, callId: res.callId });
+      entry.callId = res.callId;
       // A stranger's placeholder lead only exists server-side: pull it into the list so the
       // cockpit can show the person the agent is about to say hello to.
       if (res.provisional) refreshProspects();
       setInbound((cur) => (cur && cur.startedAt === entry.startedAt
         ? { ...cur, prospect: res.prospect, matched: res.matched, provisional: res.provisional, callId: res.callId, loading: false, resolution: res.matched ? 'database' : 'provisional' }
         : cur));
+      refreshStats();
     } catch (e) {
       setInbound((cur) => (cur && cur.startedAt === entry.startedAt ? { ...cur, loading: false, logError: e.message } : cur));
     }
-  }, [findProspectByPhone, refreshProspects, setInbound]);
+  }, [findProspectByPhone, refreshProspects, refreshStats, setInbound]);
 
   // ---- a ring ended unanswered ---------------------------------------------------------
   // The engine reports one object: the ring, plus why it stopped. Reading it as a second
@@ -73,8 +71,8 @@ export function SoftphoneProvider({ children }) {
     // and it must never be marked missed on the way out.
     if (ended?.answered) return;
 
-    if (reason === 'declined') toast(`Declined call from ${ended.callerNumber}`);
-    else if (reason === 'canceled') toast(`Missed call from ${ended.callerNumber}`, 'error');
+    if (reason === 'declined') toast(`Declined call from ${ended.callerNumber || 'caller'}`);
+    else if (reason === 'canceled') toast(`Missed call from ${ended.callerNumber || 'caller'}`, 'error');
     // 'another-tab' / 'missed' are handled by the tab that owns the call; a passive tab stays quiet.
 
     if (!callId) return;
@@ -83,14 +81,19 @@ export function SoftphoneProvider({ children }) {
       // A stranger's placeholder lead is swept with the ring (data minimisation): if it was,
       // the list on screen has to change, or the agent keeps seeing a lead that no longer exists.
       if (res?.cleanedUp) await refreshProspects();
+      await refreshStats();
     } catch { /* the ring is over either way; a missing ledger row must not shout at the agent */ }
-  }, [inboundRef, refreshProspects, setInbound, toast]);
+  }, [inboundRef, refreshProspects, refreshStats, setInbound, toast]);
 
   // ---- a call became real --------------------------------------------------------------
   const onActive = useCallback((direction) => {
     if (direction === 'inbound') {
       const rec = inboundRef.current;
       setInbound(rec ? { ...rec, answered: true } : null);
+      if (rec?.callId) {
+        api.patchCall(rec.callId, { status: 'connected', outcome: 'conversation' }).catch(() => { });
+        refreshStats();
+      }
       // A callback about a customer the agent is already talking to: the cockpit has to be
       // showing that person, on the dialer, before the first sentence.
       if (rec?.prospect?.id) {
@@ -99,7 +102,7 @@ export function SoftphoneProvider({ children }) {
       }
     }
     handlersRef.current.onActive?.(direction);
-  }, [inboundRef, setActiveId, setInbound, setView]);
+  }, [inboundRef, refreshStats, setActiveId, setInbound, setView]);
 
   const onEnded = useCallback((direction) => {
     if (direction === 'inbound') {
@@ -109,9 +112,10 @@ export function SoftphoneProvider({ children }) {
       // uses — same copilot, same follow-up prompt, same stats.
       setInboundEnded(rec ? { callId: rec.callId, prospect: rec.prospect } : null);
       setInbound(null);
+      refreshStats();
     }
     handlersRef.current.onEnded?.(direction);
-  }, [inboundRef, setInbound, setInboundEnded]);
+  }, [inboundRef, refreshStats, setInbound, setInboundEnded]);
 
   const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {
     if (callId && blob && blob.size > 0) {

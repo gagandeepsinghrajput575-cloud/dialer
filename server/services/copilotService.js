@@ -81,29 +81,44 @@ const PROVIDERS = {
     parse: (json) => json?.choices?.[0]?.message?.content || '',
   }),
   gemini: (model) => ({
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-1.5-flash'}:generateContent`,
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent`,
     body: { contents: [{ parts: [{ text: '' }] }] },
     parse: (json) => json?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('\n') || '',
+  }),
+  openrouter: (model) => ({
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    body: { model: model || 'openrouter/free', messages: [{ role: 'user', content: '' }], temperature: 0.2 },
+    parse: (json) => json?.choices?.[0]?.message?.content || '',
   }),
 };
 
 async function remoteSummary(prompt) {
-  const provider = String(settings.get('ai_provider') || '').toLowerCase();
+  let provider = String(settings.get('ai_provider') || '').toLowerCase();
   const apiKey = settings.get('ai_api_key');
+  if (apiKey?.startsWith('sk-or-')) provider = 'openrouter';
+  else if (apiKey?.startsWith('AIza')) provider = 'gemini';
   const spec = PROVIDERS[provider];
   if (!spec || !apiKey) throw new Error(`AI provider "${provider || 'local'}" is not configured`);
 
   const model = String(settings.get('ai_model') || '').trim();
   const { url, body, parse } = spec(model);
-  if (provider === 'openai') body.messages[0].content = prompt;
+  if (provider === 'openai' || provider === 'openrouter') body.messages[0].content = prompt;
   else body.contents[0].parts[0].text = prompt;
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (provider === 'openai') {
+    headers.Authorization = `Bearer ${apiKey}`;
+  } else if (provider === 'openrouter') {
+    headers.Authorization = `Bearer ${apiKey}`;
+    headers['HTTP-Referer'] = 'https://pulsegrowth.dk';
+    headers['X-Title'] = 'Pulse Dialer';
+  } else {
+    headers['x-goog-api-key'] = apiKey;
+  }
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(provider === 'openai' ? { Authorization: `Bearer ${apiKey}` } : { 'x-goog-api-key': apiKey }),
-    },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(12000),
   });

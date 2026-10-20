@@ -9,7 +9,7 @@ const get = (id) => db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
 const update = (id, body) => { db.prepare('UPDATE notes SET body = ? WHERE id = ?').run(body, id); return get(id); };
 const remove = (id) => db.prepare('DELETE FROM notes WHERE id = ?').run(id);
 const listByProspect = (prospectId) => db.prepare('SELECT * FROM notes WHERE prospect_id = ? ORDER BY id DESC').all(prospectId);
-const all = () => db.prepare('SELECT prospect_id, body, created_at FROM notes ORDER BY id DESC').all();
+const all = () => db.prepare('SELECT id, prospect_id, body, created_at FROM notes ORDER BY id DESC').all();
 
 // Email is a first-class touchpoint, so a sent email has to land in the same activity feed as
 // the call notes — otherwise the agent's history has holes exactly where a conversation

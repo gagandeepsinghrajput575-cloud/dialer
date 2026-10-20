@@ -1,7 +1,7 @@
 // Versioned migrations. Every entry runs exactly once, inside a transaction, and is
 // recorded in _migrations — so upgrading an existing database never loses data.
 const { db } = require('./index');
-const { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL } = require('./schema');
+const { BASELINE_SQL, OUTBOX_SQL, RECORDINGS_SQL, RECORDING_CHATS_SQL, INBOUND_DEDUP_SQL } = require('./schema');
 const { SETTING_KEYS } = require('../config/defaults');
 
 function hasColumn(table, column) {
@@ -105,6 +105,8 @@ const MIGRATIONS = [
       backfillProspectPronunciations(d);
     },
   },
+  // Inbound dedup index: minimizes lock window for concurrent forked INVITEs (G-9).
+  { version: 13, name: 'calls-inbound-dedup-index', up: (d) => d.exec(INBOUND_DEDUP_SQL) },
 ];
 
 function backfillProspectPronunciations(d) {

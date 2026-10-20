@@ -32,10 +32,10 @@ async function generatePronunciations(rawNames = [], options = {}) {
     return result;
   }
 
-  // Use Gemini to enhance/refine pronunciations
+  // Use AI (OpenRouter or Gemini) to enhance/refine pronunciations
   try {
-    const activeModel = model || settings.get('ai_model') || GEMINI_DEFAULT_MODEL;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent`;
+    const isOr = activeKey.startsWith('sk-or-') || settings.get('ai_provider') === 'openrouter';
+    const activeModel = model || settings.get('ai_model') || (isOr ? 'openrouter/free' : GEMINI_DEFAULT_MODEL);
 
     // Process in batches of 40 to stay well within token limits and latency budgets
     const BATCH_SIZE = 40;
@@ -52,43 +52,66 @@ RULES:
 NAMES TO PRONOUNCE:
 ${JSON.stringify(chunk, null, 2)}`;
 
-      const body = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: 'application/json',
-        },
-      };
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': activeKey,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(12000),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (rawText) {
-          try {
-            const parsed = JSON.parse(rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim());
-            if (Array.isArray(parsed)) {
-              for (const item of parsed) {
-                if (item?.name && item?.pronunciation) {
-                  let p = String(item.pronunciation).trim();
-                  if (!p.startsWith('[')) p = `[${p}`;
-                  if (!p.endsWith(']')) p = `${p}]`;
-                  result[item.name] = p;
-                }
+      let rawText = '';
+      if (isOr) {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${activeKey}`,
+            'HTTP-Referer': 'https://pulsegrowth.dk',
+            'X-Title': 'Pulse Dialer',
+          },
+          body: JSON.stringify({
+            model: activeModel,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            response_format: { type: 'json_object' },
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          rawText = data?.choices?.[0]?.message?.content || '';
+        }
+      } else {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent`;
+        const body = {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+          },
+        };
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': activeKey,
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(12000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        }
+      }
+      if (rawText) {
+        try {
+          const parsed = JSON.parse(rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim());
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              if (item?.name && item?.pronunciation) {
+                let p = String(item.pronunciation).trim();
+                if (!p.startsWith('[')) p = `[${p}`;
+                if (!p.endsWith(']')) p = `${p}]`;
+                result[item.name] = p;
               }
             }
-          } catch {
-            // Keep deterministic fallback on JSON parse failure
           }
+        } catch {
+          // Keep deterministic fallback on JSON parse failure
         }
       }
     }

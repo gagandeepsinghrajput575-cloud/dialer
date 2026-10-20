@@ -15,6 +15,16 @@ async function run() {
   console.log('--- Unit: AI Lead Sorter & Auto-Extraction ---');
 
   // 1. Without key, returns needsKey gracefully
+  const savedKey = process.env.PULSE_AI_API_KEY;
+  const savedOrKey = process.env.OPENROUTER_API_KEY;
+  const savedGemKey = process.env.GEMINI_API_KEY;
+  delete process.env.PULSE_AI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  const settings = require('../../server/repositories/settingsRepo');
+  const savedDbKey = settings.get('ai_api_key');
+  settings.set('ai_api_key', '');
+
   const noKey = await aiLeadSorter.analyzeLeadStructure({
     headers: ['Category', 'Phone', 'Google Maps URL'],
     sampleRows: [],
@@ -23,6 +33,12 @@ async function run() {
   assert.strictEqual(noKey.needsKey, true, 'prompts user for key if not configured');
   assert.strictEqual(noKey.configured, false);
   ok('requires key when unconfigured');
+
+  // Restore keys for subsequent tests
+  if (savedKey) process.env.PULSE_AI_API_KEY = savedKey;
+  if (savedOrKey) process.env.OPENROUTER_API_KEY = savedOrKey;
+  if (savedGemKey) process.env.GEMINI_API_KEY = savedGemKey;
+  settings.set('ai_api_key', savedDbKey);
 
   // 2. With key and mocked Gemini response, parses mapping and secondary columns
   const originalFetch = global.fetch;
@@ -76,6 +92,111 @@ async function run() {
     assert.strictEqual(aiRes.categoryDetected, 'Bathroom Remodelers');
     ok('successfully parses Gemini AI response into clean mapping and secondary columns');
   } finally {
+    global.fetch = originalFetch;
+  }
+
+  // 2b. OpenRouter support (when key starts with sk-or-)
+  try {
+    global.fetch = async (url, opts) => {
+      assert.ok(url.includes('openrouter.ai'));
+      assert.strictEqual(opts.headers.Authorization, 'Bearer sk-or-v1-testkey');
+      const body = JSON.parse(opts.body);
+      assert.strictEqual(body.model, 'openrouter/free');
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  mapping: {
+                    name: 'Navn på Indehaver',
+                    company: 'Virksomhedsnavn',
+                    phone: 'Telefonnummer',
+                    email: 'E-mail',
+                    title: 'Direktør Stilling',
+                    location: 'Postnr og By',
+                    website: 'Hjemmeside',
+                  },
+                  secondaryColumns: ['CVR-nummer', 'Google Maps Link', 'Reklamebeskyttelse'],
+                  summary: 'OpenRouter analyzed Danish B2B lead list.',
+                  categoryDetected: 'Danish Construction & Trades',
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    };
+
+    const orRes = await aiLeadSorter.analyzeLeadStructure({
+      headers: ['Navn på Indehaver', 'Virksomhedsnavn', 'Telefonnummer', 'E-mail', 'Direktør Stilling', 'Postnr og By', 'Hjemmeside', 'CVR-nummer', 'Google Maps Link', 'Reklamebeskyttelse'],
+      sampleRows: [{ 'Virksomhedsnavn': 'Nordic Solutions ApS', 'Telefonnummer': '4532331610' }],
+      apiKey: 'sk-or-v1-testkey',
+    });
+
+    assert.strictEqual(orRes.success, true);
+    assert.strictEqual(orRes.provider, 'openrouter');
+    assert.strictEqual(orRes.mapping.name, 'Navn på Indehaver');
+    assert.strictEqual(orRes.mapping.company, 'Virksomhedsnavn');
+    assert.strictEqual(orRes.mapping.phone, 'Telefonnummer');
+    assert.deepStrictEqual(orRes.secondaryColumns, ['CVR-nummer', 'Google Maps Link', 'Reklamebeskyttelse']);
+    ok('successfully identifies sk-or- key, queries OpenRouter, and parses Danish mapping');
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  // 2c. Resilient 503 fallback from Gemini to OpenRouter
+  try {
+    process.env.OPENROUTER_API_KEY = 'sk-or-v1-fallback-key';
+    let geminiCalls = 0;
+    let openrouterCalls = 0;
+
+    global.fetch = async (url, opts) => {
+      if (url.includes('googleapis.com')) {
+        geminiCalls++;
+        return {
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ error: { code: 503, message: 'This model is currently experiencing high demand. Please try again later.' } }),
+        };
+      }
+      if (url.includes('openrouter.ai')) {
+        openrouterCalls++;
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  mapping: { name: 'Owner', company: 'Firm', phone: 'Tel' },
+                  secondaryColumns: ['CVR'],
+                  summary: 'Sorted via OpenRouter fallback after Gemini 503.',
+                  categoryDetected: 'General Leads',
+                }),
+              },
+            }],
+          }),
+        };
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    };
+
+    const fallbackRes = await aiLeadSorter.analyzeLeadStructure({
+      headers: ['Owner', 'Firm', 'Tel', 'CVR'],
+      sampleRows: [{ Firm: 'Test ApS', Tel: '12345678' }],
+      apiKey: 'AIzaSyFakeGeminiKey',
+    });
+
+    assert.strictEqual(geminiCalls, 1, 'called gemini first');
+    assert.strictEqual(openrouterCalls, 1, 'fell back to openrouter after gemini 503');
+    assert.strictEqual(fallbackRes.success, true);
+    assert.strictEqual(fallbackRes.provider, 'openrouter');
+    assert.strictEqual(fallbackRes.fallbackUsed, true);
+    assert.strictEqual(fallbackRes.mapping.name, 'Owner');
+    ok('automatically catches Gemini 503 high demand spikes and falls back seamlessly to OpenRouter');
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
     global.fetch = originalFetch;
   }
 

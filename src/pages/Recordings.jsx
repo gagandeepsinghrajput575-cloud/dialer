@@ -678,12 +678,18 @@ export default function Recordings() {
 
   const handleSaveApiKey = async (e) => {
     e?.preventDefault();
-    if (!apiKeyInput.trim()) return;
+    const key = apiKeyInput.trim();
+    if (!key) return;
     try {
-      await updateSettings({ ai_api_key: apiKeyInput.trim(), ai_provider: 'gemini' });
+      const isOr = key.startsWith('sk-or-');
+      await updateSettings({
+        ai_api_key: key,
+        ai_provider: isOr ? 'openrouter' : 'gemini',
+        ...(isOr ? { ai_model: 'openrouter/free' } : {}),
+      });
       setShowKeyModal(false);
       setApiKeyInput('');
-      toast('Google Gemini API key saved! Ready for AI coaching.');
+      toast(`${isOr ? 'OpenRouter' : 'Google Gemini'} API key saved! Ready for AI coaching.`);
     } catch (err) {
       toast(err?.message || 'Could not save API key', 'error');
     }

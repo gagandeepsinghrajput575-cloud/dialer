@@ -64,7 +64,7 @@ const DEFAULTS = {
   vm_auto_advance: '1', // V (voicemail drop) advances to the next prospect instantly
   vm_greeting: '', // filename inside data/audio
   // ---- post-call copilot & AI audio coach ----
-  ai_provider: 'local', // 'local' | 'openai' | 'gemini'
+  ai_provider: 'local', // 'local' | 'openai' | 'gemini' | 'openrouter'
   ai_model: '',
   ai_api_key: '', // secret
   sales_script: DEFAULT_SALES_SCRIPT, // cold calling target script & objection battlecard

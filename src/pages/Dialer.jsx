@@ -7,7 +7,8 @@ import {
   Loader2, Keyboard, Mail, Building2, NotebookPen, Plus, X,
   Headphones, RotateCw, FlaskConical, Wifi, Send,
   Mic, MicOff, Radio, Grid3x3, Trophy, LayoutDashboard, Repeat, Trash2,
-  ChevronDown, ExternalLink, ShieldX, MapPin, Volume2, Globe
+  ChevronDown, ExternalLink, ShieldX, MapPin, Volume2, Globe,
+  History, Users, ArrowUpRight, ArrowDownLeft
 } from 'lucide-react';
 import { api } from '../api';
 import { useStore } from '../store.jsx';
@@ -20,7 +21,7 @@ import Notes, { CallHistory, useDetail } from '../components/Notes.jsx';
 import { Avatar, Editable, Empty, Switch } from '../components/ui.jsx';
 import useServerQueue from '../useServerQueue.js';
 import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueProgress, queueTab, stepIndex, tabForProspect } from '../queue.js';
-import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, getProspectDisplayName, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
+import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, getProspectDisplayName, outcomeMeta, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 import { extraInsights, clip, isUrlValue } from '../registry.js';
 import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
 
@@ -39,32 +40,34 @@ const TABS = [
 ];
 
 function Waveform({ active, level }) {
-  // With a live microphone the bars follow the actual input level — a quiet agent looks
-  // quiet. Without one (external softphone, or a browser with no audio support) they fall
-  // back to the ambient animation.
-  const live = typeof level === 'number';
+  // Fluid, living audio equalizer animation that continuously flows during active calls,
+  // dynamically modulated when live voice input is detected so it never sits frozen or flat.
+  const voiceBoost = typeof level === 'number' && level > 0.04 ? Math.min(1.35, 0.95 + level * 0.8) : 1;
+
   return (
     <div className={`wave ${active ? 'on' : ''}`}>
       {Array.from({ length: 24 }).map((_, i) => (
-        live
-          ? (
-            <i
-              key={i}
-              style={{
-                transform: `scaleY(${active
-                  ? Math.max(0.12, Math.min(1, level * (0.55 + (i % 6) * 0.16)))
-                  : 0.2})`,
-                transition: 'transform 90ms linear',
-              }}
-            />
-          )
-          : (
-            <motion.i
-              key={i}
-              animate={active ? { scaleY: [0.25, 1, 0.35, 0.8, 0.25] } : { scaleY: 0.2 }}
-              transition={active ? { duration: 1.1 + (i % 5) * 0.15, repeat: Infinity, delay: i * 0.04, ease: 'easeInOut' } : { duration: 0.3 }}
-            />
-          )
+        <motion.i
+          key={i}
+          animate={active
+            ? {
+              scaleY: [
+                0.22,
+                Math.min(1, 1.0 * voiceBoost),
+                0.34,
+                Math.min(1, 0.82 * voiceBoost),
+                0.22,
+              ]
+            }
+            : { scaleY: 0.2 }
+          }
+          transition={active ? {
+            duration: 1.1 + (i % 5) * 0.15,
+            repeat: Infinity,
+            delay: i * 0.04,
+            ease: 'easeInOut',
+          } : { duration: 0.3 }}
+        />
       ))}
     </div>
   );
@@ -502,6 +505,24 @@ export default function Dialer() {
   const mailingRef = useRef(false);
   mailingRef.current = mailing;
 
+  const [sidebarMode, setSidebarMode] = useState('queue'); // 'queue' | 'recents'
+  const [cockpitRecents, setCockpitRecents] = useState([]);
+  const [cockpitRecentsLoading, setCockpitRecentsLoading] = useState(false);
+
+  const loadCockpitRecents = useCallback(() => {
+    setCockpitRecentsLoading(true);
+    api.calls({ limit: 15 })
+      .then((res) => setCockpitRecents(res.calls || []))
+      .catch(() => { })
+      .finally(() => setCockpitRecentsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (sidebarMode === 'recents') {
+      loadCockpitRecents();
+    }
+  }, [sidebarMode, loadCockpitRecents]);
+
   const sec = useTimer(phase === 'active');
   const secRef = useRef(0);
   secRef.current = sec;
@@ -576,7 +597,9 @@ export default function Dialer() {
     if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
   }, []);
   const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
-    const idToUpload = recCallId || callId || classifyRef.current?.callId;
+    // SoftphoneProvider already uploads when recCallId is attached to the engine.
+    if (recCallId) return;
+    const idToUpload = callId || classifyRef.current?.callId;
     if (idToUpload && blob && blob.size > 0) {
       try {
         await api.uploadRecording(idToUpload, blob, durationSec);
@@ -997,6 +1020,7 @@ export default function Dialer() {
       later(() => setFlash(null), 1300);
       setDone((d) => new Set(d).add(finished));
       setPhaseSafe('idle');
+      if (isWebrtcRef.current) webrtcRef.current?.hangUp?.();
       setCallId(null);
       setDial(null);
       setLaunched(false);
@@ -1052,6 +1076,7 @@ export default function Dialer() {
 
   // Direct dial any custom/ad-hoc phone number directly
   const handleDirectDial = useCallback(async ({ phone, name }) => {
+    if (dialLockRef.current || ringingRef.current || phaseRef.current !== 'idle' || classifyRef.current) return;
     dialLockRef.current = true;
     setPhaseSafe('dialing');
     setLaunched(false);
@@ -1285,54 +1310,166 @@ export default function Dialer() {
 
   return (
     <div className="dialer">
-      {/* QUEUE SIDEBAR */}
+      {/* QUEUE / RECENTS SIDEBAR */}
       <section className="glass queue">
-        <div className="seg">
-          {TABS.map((t) => (
-            <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => handleTabChange(t.id)}>
-              {tab === t.id && <motion.span layoutId="segpill" className="seg-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
-              <span>{t.label}</span>
-              {counts?.[t.id] ? <em className="seg-count">{counts[t.id]}</em> : null}
-            </button>
-          ))}
+        <div className="cockpit-mode-toggle">
+          <button
+            type="button"
+            className={`cockpit-tab ${sidebarMode === 'queue' ? 'active' : ''}`}
+            onClick={() => setSidebarMode('queue')}
+          >
+            <Users size={12} /> Queue ({total || items.length})
+          </button>
+          <button
+            type="button"
+            className={`cockpit-tab ${sidebarMode === 'recents' ? 'active' : ''}`}
+            onClick={() => setSidebarMode('recents')}
+          >
+            <History size={12} /> Recents
+          </button>
         </div>
-        <div className="search">
-          <Search size={15} />
-          <input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
-        <div className="queue-meta">
-          <span>{total || items.length} in queue</span>
-          {phonelessLeft > 0 && (
-            <span className="meta-warn" title="These leads are in the queue but cannot be dialled until a number is added">
-              {phonelessLeft} without a number
-            </span>
-          )}
-          <span>{done.size} dialed</span>
-          <div style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
-            <button className="btn xs" onClick={() => setManualDialOpen(true)} title="Dial any number directly (D)">
-              <Grid3x3 size={12} /> Keypad
-            </button>
-            <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue">
-              <Plus size={12} /> Add
+
+        {sidebarMode === 'queue' ? (
+          <>
+            <div className="seg">
+              {TABS.map((t) => (
+                <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => handleTabChange(t.id)}>
+                  {tab === t.id && <motion.span layoutId="segpill" className="seg-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
+                  <span>{t.label}</span>
+                  {counts?.[t.id] ? <em className="seg-count">{counts[t.id]}</em> : null}
+                </button>
+              ))}
+            </div>
+            <div className="search">
+              <Search size={15} />
+              <input placeholder="Search queue…" value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+            <div className="queue-meta">
+              <span>{total || items.length} in queue</span>
+              {phonelessLeft > 0 && (
+                <span className="meta-warn" title="These leads are in the queue but cannot be dialled until a number is added">
+                  {phonelessLeft} without a number
+                </span>
+              )}
+              <span>{done.size} dialed</span>
+              <div style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
+                <button className="btn xs" onClick={() => setManualDialOpen(true)} title="Dial any number directly (D)">
+                  <Grid3x3 size={12} /> Keypad
+                </button>
+                <button className="btn xs primary" onClick={() => setShowAdd(true)} title="Add prospect directly to queue">
+                  <Plus size={12} /> Add
+                </button>
+              </div>
+            </div>
+            <QueueList
+              items={items}
+              activeId={active?.id ?? null}
+              done={done}
+              progress={progress}
+              locked={calling || !!classifyModal}
+              total={total}
+              hasMore={hasMore}
+              loading={loading}
+              loadingMore={loadingMore}
+              error={error}
+              onSelect={setActiveId}
+              onLoadMore={queue.loadMore}
+              onRetry={queue.retry}
+              activeItemRef={activeItemRef}
+            />
+          </>
+        ) : (
+          <div className="cockpit-recents-list">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 4px 8px' }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Recent Activity
+              </span>
+              <button
+                type="button"
+                className="btn xs"
+                onClick={loadCockpitRecents}
+                disabled={cockpitRecentsLoading}
+                title="Refresh recent calls"
+              >
+                <RotateCw size={11} className={cockpitRecentsLoading ? 'spin' : ''} />
+              </button>
+            </div>
+
+            {cockpitRecentsLoading && cockpitRecents.length === 0 ? (
+              <div style={{ padding: '30px 10px', textAlign: 'center', color: '#64748b', fontSize: 12 }}>
+                <RotateCw size={18} className="spin text-cyan" style={{ margin: '0 auto 8px', display: 'block' }} />
+                Loading recent calls…
+              </div>
+            ) : cockpitRecents.length === 0 ? (
+              <div style={{ padding: '30px 10px', textAlign: 'center', color: '#64748b', fontSize: 12 }}>
+                No recent calls logged yet.
+              </div>
+            ) : (
+              cockpitRecents.map((rc) => {
+                const isMissed = rc.direction === 'inbound' && ['ringing', 'missed', 'declined'].includes(rc.status);
+                const isInbound = rc.direction === 'inbound';
+                const meta = outcomeMeta(rc.outcome) || { label: rc.outcome || 'Logged', color: '#94a3b8' };
+                return (
+                  <div
+                    key={rc.id}
+                    className="cockpit-recent-item"
+                    onClick={() => {
+                      if (rc.prospect_id) {
+                        setActiveId(rc.prospect_id);
+                        toast(`Loaded ${rc.prospect_name || 'prospect'} into dialer`);
+                      }
+                    }}
+                    title={rc.prospect_id ? `Click to view ${rc.prospect_name || 'prospect'}` : rc.phone || rc.caller_id}
+                  >
+                    <div className={`recent-icon ${isMissed ? 'missed' : isInbound ? 'inbound' : 'outbound'}`}>
+                      {isMissed ? <PhoneMissed size={12} /> : isInbound ? <ArrowDownLeft size={12} /> : <ArrowUpRight size={12} />}
+                    </div>
+                    <div className="cockpit-recent-info">
+                      <div className="cockpit-recent-title">
+                        {rc.prospect_name || rc.caller_id || rc.phone || 'Unknown'}
+                      </div>
+                      <div className="cockpit-recent-sub">
+                        <span>{isMissed ? 'Missed' : fmtDur(rc.duration_sec)}</span>
+                        <span>•</span>
+                        <span>{(rc.started_at || '').slice(11, 16)}</span>
+                        {rc.outcome && (
+                          <>
+                            <span>•</span>
+                            <span style={{ color: meta.color }}>{meta.label}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn xs primary"
+                      style={{ padding: '3px 8px', fontSize: 11, flexShrink: 0 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (rc.prospect_id) {
+                          setActiveId(rc.prospect_id);
+                          toast(`Loaded ${rc.prospect_name || 'prospect'} into dialer`);
+                        }
+                      }}
+                      title="Load into dialer"
+                    >
+                      <PhoneCall size={10} />
+                    </button>
+                  </div>
+                );
+              })
+            )}
+
+            <button
+              type="button"
+              className="btn sm ghost"
+              style={{ width: '100%', marginTop: 10, fontSize: 12, justifyContent: 'center' }}
+              onClick={() => setView('recents')}
+            >
+              Open Full Recents Page →
             </button>
           </div>
-        </div>
-        <QueueList
-          items={items}
-          activeId={active?.id ?? null}
-          done={done}
-          progress={progress}
-          locked={calling || !!classifyModal}
-          total={total}
-          hasMore={hasMore}
-          loading={loading}
-          loadingMore={loadingMore}
-          error={error}
-          onSelect={setActiveId}
-          onLoadMore={queue.loadMore}
-          onRetry={queue.retry}
-          activeItemRef={activeItemRef}
-        />
+        )}
       </section>
 
       {/* CENTER STAGE */}
@@ -1780,9 +1917,7 @@ export default function Dialer() {
         )}
       </AnimatePresence>
 
-      {/* Remote audio for the in-browser call. Hidden, but a real <audio> element — WebRTC
-          audio only plays through a media element the document actually holds. */}
-      <audio ref={webrtc.audioRef} autoPlay playsInline className="webrtc-audio" />
+      {/* Remote audio is mounted persistently at the App root level so audio plays across all views */}
 
       {/* CLASSIFICATION MODAL ON HANG UP */}
       <AnimatePresence>

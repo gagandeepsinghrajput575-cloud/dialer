@@ -264,15 +264,16 @@ const DEMO = [
 const DEMO_STAGES = ['new', 'new', 'contacted', 'interested', 'followup', 'new', 'meeting', 'new'];
 
 function loadDemo() {
+  const { db } = require('../db');
   const sizes = ['11-50', '51-200', '201-500'];
-  const inserted = DEMO.map((d, i) => {
+  const inserted = db.transaction(() => DEMO.map((d, i) => {
     const p = prospects.insert({
       name: d[0], phone: d[1], email: d[2], company: d[3], title: d[4], location: d[5],
       extra: { 'Lead source': 'Demo list', 'Company size': sizes[i % 3] }, stage: DEMO_STAGES[i],
     });
     if (DEMO_STAGES[i] !== 'new') notes.insert(p.id, 'Sample note: asked to send a short deck over email.');
     return p;
-  });
+  }))();
   return { added: inserted.length };
 }
 
@@ -339,11 +340,11 @@ function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
   const now = Date.now();
 
   const allFiltered = prospects.list().filter((p) => !p.dnc);
-  const counts = {
-    new: allFiltered.filter((p) => QUEUE_TABS.new(p)).length,
-    follow: allFiltered.filter((p) => QUEUE_TABS.follow(p)).length,
-    all: allFiltered.length,
-  };
+  const counts = { new: 0, follow: 0, all: allFiltered.length };
+  for (const p of allFiltered) {
+    if (QUEUE_TABS.new(p)) counts.new++;
+    else if (QUEUE_TABS.follow(p)) counts.follow++;
+  }
 
   const rows = allFiltered
     .filter((p) => test(p))
@@ -386,21 +387,26 @@ function rankedQueue({ tab = 'all', search: q = '', limit, cursor } = {}) {
 }
 
 async function bulkPronunciations({ ids = [] } = {}) {
-  const targetRows = (ids && ids.length)
-    ? ids.map((id) => prospects.get(id)).filter(Boolean)
+  const { db } = require('../db');
+  const clean = cleanIds(ids);
+  const targetRows = clean.length
+    ? clean.map((id) => prospects.get(id)).filter(Boolean)
     : prospects.list().filter((p) => p.name);
   if (!targetRows.length) return { updated: 0, total: 0 };
 
   const names = targetRows.map((r) => r.name);
   const map = await aiPronunciationService.generatePronunciations(names);
-  let updated = 0;
-  for (const r of targetRows) {
-    const p = map[r.name] || danishPhonetics.getPronunciation(r.name);
-    if (p && p !== r.pronunciation) {
-      prospects.update(r.id, { pronunciation: p });
-      updated++;
+  const updated = db.transaction(() => {
+    let n = 0;
+    for (const r of targetRows) {
+      const p = map[r.name] || danishPhonetics.getPronunciation(r.name);
+      if (p && p !== r.pronunciation) {
+        prospects.update(r.id, { pronunciation: p });
+        n++;
+      }
     }
-  }
+    return n;
+  })();
   return { updated, total: targetRows.length };
 }
 

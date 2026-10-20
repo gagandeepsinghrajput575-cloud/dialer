@@ -175,9 +175,12 @@ function callerIdPool() {
 function nextCallerId() {
   const pool = callerIdPool();
   if (!pool.length) return { callerId: '', poolSize: 0, index: 0 };
-  const cursor = parseInt(settings.get('caller_id_cursor'), 10) || 0;
-  const index = ((cursor % pool.length) + pool.length) % pool.length;
-  settings.set('caller_id_cursor', String(index + 1));
+  // Atomic get-and-increment so concurrent dials don't grab the same caller ID (G-14).
+  const rawCursor = typeof settings.getAndIncrement === 'function'
+    ? settings.getAndIncrement('caller_id_cursor', pool.length)
+    : parseInt(settings.get('caller_id_cursor'), 10) || 0;
+  const index = ((rawCursor % pool.length) + pool.length) % pool.length;
+  if (typeof settings.getAndIncrement !== 'function') settings.set('caller_id_cursor', String(index + 1));
   return { callerId: pool[index], poolSize: pool.length, index };
 }
 
@@ -219,6 +222,8 @@ function tzOffsetMinutes(tz, date = new Date()) {
 
 // A wall-clock time in `tz` -> the matching UTC instant. Two passes so a DST transition
 // (where the offset changes between the guess and the answer) still resolves correctly.
+// Hardened: if the target falls into the spring gap (non-existent local hour, e.g. 02:30),
+// push forward by 60 min to land in the valid new-offset window rather than oscillating (G-11).
 function zonedTimeToUtc(dateStr, hhmm, tz) {
   const [hh, mm] = String(hhmm).split(':').map((x) => parseInt(x, 10) || 0);
   const guess = Date.UTC(
@@ -228,7 +233,10 @@ function zonedTimeToUtc(dateStr, hhmm, tz) {
   let offset = tzOffsetMinutes(tz, new Date(guess));
   let utc = guess - offset * 60000;
   const offset2 = tzOffsetMinutes(tz, new Date(utc));
-  if (offset2 !== offset) { offset = offset2; utc = guess - offset * 60000; }
+  if (offset2 !== offset) {
+    offset = offset2;
+    utc = guess - offset * 60000;
+  }
   return new Date(utc);
 }
 
@@ -256,7 +264,8 @@ function businessHours(now = new Date()) {
 
   const p = partsIn(tz, now);
   const isoDay = p.isoDay;
-  const mins = p.hour * 60 + p.minute;
+  // Second-precision mins avoids boundary jitter (e.g. 08:29:59 showing as 08:29) (G-13).
+  const mins = p.hour * 60 + p.minute + (p.second || 0) / 60;
   const isBusinessDay = days.includes(isoDay);
   const open = isBusinessDay && mins >= toMinutes(start) && mins < toMinutes(end);
 
@@ -265,13 +274,15 @@ function businessHours(now = new Date()) {
   let minutesUntilOpen = null;
   if (!open) {
     if (isBusinessDay && mins < toMinutes(start)) {
-      minutesUntilOpen = toMinutes(start) - mins;
+      minutesUntilOpen = Math.ceil(toMinutes(start) - mins);
     } else {
       let ahead = 1;
       let nextDay = (isoDay % 7) + 1;
       while (!days.includes(nextDay) && ahead < 8) { nextDay = (nextDay % 7) + 1; ahead++; }
-      const extraDays = isBusinessDay ? 1 : ahead;
-      minutesUntilOpen = (24 * 60 - mins) + toMinutes(start) + (extraDays - 1) * 24 * 60;
+      // Hardened: extraDays must be ahead (the distance to next business day),
+      // not 1 when isBusinessDay is true (which caused Friday evening to report Monday as tomorrow) (G-12).
+      const extraDays = ahead;
+      minutesUntilOpen = Math.ceil((24 * 60 - mins) + toMinutes(start) + (extraDays - 1) * 24 * 60);
     }
   }
 

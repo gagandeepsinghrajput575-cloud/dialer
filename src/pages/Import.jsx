@@ -84,8 +84,9 @@ export default function ImportPage() {
         setMapping(res.mapping);
         setGuessed(res.mapping);
       }
-      setAiSummary(res.summary || 'Columns successfully classified by Google Gemini.');
-      toast('✨ AI mapped primary calling fields and routed secondary details into the drop-down menu!');
+      const provName = res.provider === 'openrouter' ? 'OpenRouter' : 'Google Gemini';
+      setAiSummary(res.summary || `Columns successfully classified by ${provName}.`);
+      toast(`✨ ${provName} mapped primary calling fields and routed secondary details into the drop-down menu!`);
       setShowKeyModal(false);
     } catch (e) {
       toast(e.message, 'error');
@@ -253,7 +254,7 @@ export default function ImportPage() {
         )}
       </AnimatePresence>
 
-      {/* GOOGLE GEMINI API KEY MODAL */}
+      {/* AI API KEY MODAL (OpenRouter / Google Gemini) */}
       <AnimatePresence>
         {showKeyModal && (
           <>
@@ -262,20 +263,20 @@ export default function ImportPage() {
               <div className="modal-head">
                 <div className="row gap" style={{ alignItems: 'center' }}>
                   <Sparkles size={18} style={{ color: '#c4b5fd' }} />
-                  <h3 style={{ margin: 0 }}>Connect Google Gemini AI</h3>
+                  <h3 style={{ margin: 0 }}>Connect AI Lead Sorter</h3>
                 </div>
                 <button className="icon-btn" onClick={() => setShowKeyModal(false)}><X size={16} /></button>
               </div>
               <div className="form">
                 <p className="muted small" style={{ marginTop: 0 }}>
-                  Enter your Google Gemini API key to let Gemini analyze raw lead sheets, sort the primary calling fields, and organize secondary registry info into the dialer dropdown menu.
+                  Enter your <b>OpenRouter API key</b> (recommended for free heavyweights with zero queue wait) or <b>Google Gemini API key</b> to let AI analyze raw lead sheets, sort the primary calling fields, and organize secondary registry info into the dialer dropdown menu.
                 </p>
                 <label>
-                  Google AI Key
+                  API Key
                   <input
                     type="password"
                     autoFocus
-                    placeholder="AIzaSy..."
+                    placeholder="sk-or-v1-... (OpenRouter) or AIzaSy... (Gemini)"
                     value={customKey}
                     onChange={(e) => setCustomKey(e.target.value)}
                   />
@@ -285,7 +286,7 @@ export default function ImportPage() {
                   Save key to settings for future lead imports
                 </label>
                 <p className="muted small" style={{ marginBottom: 0 }}>
-                  Don&apos;t have an AI key? Get a free API key from <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>Google AI Studio</a>.
+                  Need a key? Get a free key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>OpenRouter</a> or <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8' }}>Google AI Studio</a>.
                 </p>
               </div>
               <div className="modal-foot">
@@ -295,7 +296,7 @@ export default function ImportPage() {
                   onClick={() => runAiSort(customKey)}
                   disabled={aiBusy || !customKey.trim()}
                 >
-                  {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} Analyze with Gemini
+                  {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} Analyze with AI
                 </button>
               </div>
             </motion.div>

@@ -53,4 +53,24 @@ const exportData = asyncHandler(async (req, res) => {
   res.send(csv);
 });
 
-module.exports = { list, detail, create, patch, remove, clearAll, bulk, bulkStage, bulkDelete, batchPronunciations, search, queue, followUps, demo, exportData };
+const speak = asyncHandler(async (req, res) => {
+  const text = String(req.query.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'No text provided' });
+  const voice = String(req.query.voice || '').trim();
+  const kokoroUrl = process.env.KOKORO_TTS_URL || 'http://localhost:5050';
+
+  try {
+    const url = `${kokoroUrl}/?text=${encodeURIComponent(text)}${voice ? `&voice=${encodeURIComponent(voice)}` : ''}`;
+    const upstream = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!upstream.ok) throw new Error(`Kokoro status ${upstream.status}`);
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Content-Length', buf.length);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.end(buf);
+  } catch (err) {
+    return res.status(502).json({ error: 'Kokoro speaker offline', details: err.message });
+  }
+});
+
+module.exports = { list, detail, create, patch, remove, clearAll, bulk, bulkStage, bulkDelete, batchPronunciations, search, queue, followUps, demo, exportData, speak };

@@ -11,6 +11,7 @@ migrate.run();
 const prospects = require('../../server/repositories/prospectRepo');
 const calls = require('../../server/repositories/callRepo');
 const recordingRepo = require('../../server/repositories/recordingRepo');
+const settings = require('../../server/repositories/settingsRepo');
 const chatRepo = require('../../server/repositories/recordingChatRepo');
 const aiRecordingCoach = require('../../server/services/aiRecordingCoach');
 const { recordingsDir } = require('../../server/config/env');
@@ -93,11 +94,21 @@ async function run() {
   ok('chatRepo persists multi-turn coaching sessions and messages');
 
   // 4. Test without API key returns needsKey gracefully
-  const noKey = await aiRecordingCoach.processCoachingTurn({
-    callId: c.id,
-    message: 'Audit my script adherence',
-    apiKey: '',
-  });
+  const savedEnvKey = process.env.GEMINI_API_KEY;
+  const savedDbKey = settings.get('ai_api_key');
+  delete process.env.GEMINI_API_KEY;
+  settings.set('ai_api_key', '');
+  let noKey;
+  try {
+    noKey = await aiRecordingCoach.processCoachingTurn({
+      callId: c.id,
+      message: 'Audit my script adherence',
+      apiKey: '',
+    });
+  } finally {
+    if (savedEnvKey) process.env.GEMINI_API_KEY = savedEnvKey;
+    if (savedDbKey) settings.set('ai_api_key', savedDbKey);
+  }
   assert.strictEqual(noKey.needsKey, true);
   assert.strictEqual(noKey.success, false);
   ok('returns needsKey flag when Gemini API key is unconfigured');

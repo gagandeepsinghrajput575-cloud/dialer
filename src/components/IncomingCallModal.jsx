@@ -4,7 +4,7 @@
 // for the Dialer page — and it is a modal on purpose: while the phone rings, nothing else on
 // screen may claim the keyboard. Enter answers, Escape declines, and every other keystroke is
 // swallowed so a half-typed shortcut cannot dial somebody else mid-ring.
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Phone, PhoneOff, PhoneIncoming, UserPlus, Building2, History, Mic } from 'lucide-react';
 import { useStore } from '../store.jsx';
@@ -37,9 +37,21 @@ export default function IncomingCallModal() {
   const { incomingCall, answerInbound, declineInbound } = useSoftphone();
   const answerRef = useRef(null);
   const restoreFocusRef = useRef(null);
+  const [answering, setAnswering] = useState(false);
   const open = !!inbound && !!incomingCall && !incomingCall.answered;
 
-  const answer = () => { if (open) answerInbound(); };
+  const answer = async () => {
+    if (open && !answering) {
+      setAnswering(true);
+      try {
+        await answerInbound();
+      } catch (err) {
+        console.error('Failed to answer inbound call:', err);
+      } finally {
+        setAnswering(false);
+      }
+    }
+  };
   const decline = () => { if (open) declineInbound(); };
 
   useEffect(() => {
@@ -103,77 +115,77 @@ export default function IncomingCallModal() {
   return (
     <AnimatePresence>
       {open && (
-      <>
-      <motion.div
-        className="incoming-scrim"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        aria-hidden
-      />
-      <motion.section
-        className="incoming-call glass"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="incoming-title"
-        aria-describedby="incoming-sub"
-        initial={{ opacity: 0, y: 26, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 18, scale: 0.98 }}
-        transition={{ type: 'spring', stiffness: 380, damping: 32 }}
-      >
-        {/* The screen reader announcement carries the identity, not just the noise. */}
-        <p className="incoming-live sr-only" role="alert" aria-live="assertive">
-          {`Incoming call from ${title}${known && p.company ? `, ${p.company}` : ''}`}
-        </p>
-
-        <div className="incoming-head">
-          <span className="incoming-badge"><PhoneIncoming size={13} /> Incoming call</span>
-          <CallerWave />
-        </div>
-
-        <div className="incoming-body">
-          <Avatar name={p?.name || inbound.callerNumber} size={52} seed={p?.id || inbound.callerNumber} />
-          <div className="incoming-id">
-            <h3 id="incoming-title" className="incoming-name">{title}</h3>
-            <p id="incoming-sub" className="incoming-sub">
-              {known && p.company ? <Building2 size={13} /> : <Phone size={13} />}
-              <span>{line}</span>
+        <>
+          <motion.div
+            className="incoming-scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            aria-hidden
+          />
+          <motion.section
+            className="incoming-call glass"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="incoming-title"
+            aria-describedby="incoming-sub"
+            initial={{ opacity: 0, y: 26, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 18, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+          >
+            {/* The screen reader announcement carries the identity, not just the noise. */}
+            <p className="incoming-live sr-only" role="alert" aria-live="assertive">
+              {`Incoming call from ${title}${known && p.company ? `, ${p.company}` : ''}`}
             </p>
-            <p className="incoming-number">{inbound.callerNumber}</p>
-          </div>
-        </div>
 
-        {known && (
-          <div className="incoming-crm">
-            <span className="incoming-chip">
-              <History size={12} /> {previousCalls === 0 ? 'First call' : `${previousCalls} previous call${previousCalls === 1 ? '' : 's'}`}
-            </span>
-            {p.stage && <span className="incoming-chip stage">{stageMeta(p.stage).label}</span>}
-            {lastNote && <p className="incoming-note" title={lastNote}>“{lastNote.slice(0, 120)}”</p>}
-          </div>
-        )}
+            <div className="incoming-head">
+              <span className="incoming-badge"><PhoneIncoming size={13} /> Incoming call</span>
+              <CallerWave />
+            </div>
 
-        {!known && !inbound.loading && !inbound.logError && (
-          <p className="incoming-hint">
-            <UserPlus size={13} /> Answering creates a new lead with this number.
-          </p>
-        )}
-        {inbound.logError && <p className="incoming-hint warn">{inbound.logError}</p>}
-        {!incomingCall.simulated && (
-          <p className="incoming-hint quiet"><Mic size={12} /> Your microphone opens when you answer.</p>
-        )}
+            <div className="incoming-body">
+              <Avatar name={p?.name || inbound.callerNumber} size={52} seed={p?.id || inbound.callerNumber} />
+              <div className="incoming-id">
+                <h3 id="incoming-title" className="incoming-name">{title}</h3>
+                <p id="incoming-sub" className="incoming-sub">
+                  {known && p.company ? <Building2 size={13} /> : <Phone size={13} />}
+                  <span>{line}</span>
+                </p>
+                <p className="incoming-number">{inbound.callerNumber}</p>
+              </div>
+            </div>
 
-        <div className="incoming-actions">
-          <button type="button" className="btn incoming-decline" onClick={decline} title="Decline (Esc)">
-            <PhoneOff size={16} /> Decline <kbd className="chip-kbd">Esc</kbd>
-          </button>
-          <button type="button" ref={answerRef} className="btn incoming-answer" onClick={answer} title="Answer (Enter)">
-            <Phone size={16} /> Answer <kbd className="chip-kbd">Enter</kbd>
-          </button>
-        </div>
-      </motion.section>
-      </>
+            {known && (
+              <div className="incoming-crm">
+                <span className="incoming-chip">
+                  <History size={12} /> {previousCalls === 0 ? 'First call' : `${previousCalls} previous call${previousCalls === 1 ? '' : 's'}`}
+                </span>
+                {p.stage && <span className="incoming-chip stage">{stageMeta(p.stage).label}</span>}
+                {lastNote && <p className="incoming-note" title={lastNote}>“{lastNote.slice(0, 120)}”</p>}
+              </div>
+            )}
+
+            {!known && !inbound.loading && !inbound.logError && (
+              <p className="incoming-hint">
+                <UserPlus size={13} /> Answering creates a new lead with this number.
+              </p>
+            )}
+            {inbound.logError && <p className="incoming-hint warn">{inbound.logError}</p>}
+            {!incomingCall.simulated && (
+              <p className="incoming-hint quiet"><Mic size={12} /> Your microphone opens when you answer.</p>
+            )}
+
+            <div className="incoming-actions">
+              <button type="button" className="btn incoming-decline" onClick={decline} title="Decline (Esc)">
+                <PhoneOff size={16} /> Decline <kbd className="chip-kbd">Esc</kbd>
+              </button>
+              <button type="button" ref={answerRef} className="btn incoming-answer" onClick={answer} disabled={answering} title="Answer (Enter)">
+                <Phone size={16} /> {answering ? 'Answering…' : 'Answer'} <kbd className="chip-kbd">Enter</kbd>
+              </button>
+            </div>
+          </motion.section>
+        </>
       )}
     </AnimatePresence>
   );

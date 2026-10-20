@@ -263,36 +263,74 @@ export function getDanishPronunciation(fullName) {
   return `[${respelled.join(' ')}]`;
 }
 
+let activeAudio = null;
+
 /**
- * Triggers audio pronunciation using native Web Speech Synthesis.
+ * Triggers audio pronunciation using local Kokoro Neural Speaker (port 5050),
+ * falling back to native Web Speech Synthesis if Kokoro is offline.
  */
-export function speakPronunciation(name, pronunciation) {
-  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+export async function speakPronunciation(name, pronunciation) {
+  const cleanPhonetic = (pronunciation || '').replace(/[\[\]]/g, '').trim();
+  const cleanName = (name || '').trim();
+  const textToSpeak = cleanName || cleanPhonetic;
+  if (!textToSpeak) return;
+
+  // Stop previous playback
+  if (activeAudio) {
+    try {
+      activeAudio.pause();
+      activeAudio.currentTime = 0;
+    } catch {}
+    activeAudio = null;
+  }
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    try { window.speechSynthesis.cancel(); } catch {}
+  }
+
+  // 1. Primary: Use local Kokoro neural speaker
   try {
-    window.speechSynthesis.cancel();
-    const cleanPhonetic = (pronunciation || '').replace(/[\[\]]/g, '').trim();
-    const cleanName = (name || '').trim();
-    
-    // Choose speech text
-    const textToSpeak = cleanName || cleanPhonetic;
-    if (!textToSpeak) return;
+    const res = await fetch(`/api/prospects/speak?text=${encodeURIComponent(textToSpeak)}`, {
+      signal: AbortSignal.timeout(3500),
+    });
 
-    const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    const voices = window.speechSynthesis.getVoices() || [];
-    const daVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('da'));
-    const enVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('en'));
-
-    if (daVoice) {
-      utterance.voice = daVoice;
-      utterance.lang = 'da-DK';
-    } else if (enVoice) {
-      utterance.voice = enVoice;
-      utterance.text = cleanPhonetic || cleanName;
-      utterance.lang = 'en-US';
+    if (res.ok) {
+      const blob = await res.blob();
+      if (blob.size > 200) {
+        const audioUrl = URL.createObjectURL(blob);
+        const audio = new Audio(audioUrl);
+        activeAudio = audio;
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl);
+          if (activeAudio === audio) activeAudio = null;
+        };
+        await audio.play();
+        return;
+      }
     }
-    utterance.rate = 0.88;
-    window.speechSynthesis.speak(utterance);
   } catch {
-    // Graceful silence if audio permissions or speech synthesis unsupported
+    // Kokoro server offline, fall back to Web Speech
+  }
+
+  // 2. Fallback: Browser native SpeechSynthesis
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    try {
+      const utterance = new SpeechSynthesisUtterance(textToSpeak);
+      const voices = window.speechSynthesis.getVoices() || [];
+      const daVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('da'));
+      const enVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('en'));
+
+      if (daVoice) {
+        utterance.voice = daVoice;
+        utterance.lang = 'da-DK';
+      } else if (enVoice) {
+        utterance.voice = enVoice;
+        utterance.text = cleanPhonetic || cleanName;
+        utterance.lang = 'en-US';
+      }
+      utterance.rate = 0.88;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Graceful silence if audio permissions or speech synthesis unsupported
+    }
   }
 }

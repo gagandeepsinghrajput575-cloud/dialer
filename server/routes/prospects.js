@@ -17,6 +17,7 @@ router.post('/bulk', validate(s.bulkImport), c.bulk);
 router.post('/bulk-stage', validate(s.bulkStage), c.bulkStage);
 router.post('/bulk-delete', validate(s.bulkDelete), c.bulkDelete);
 router.post('/pronunciations/batch', c.batchPronunciations);
+router.get('/speak', c.speak);
 router.post('/clear', c.clearAll);
 
 router.get('/:id', c.detail);

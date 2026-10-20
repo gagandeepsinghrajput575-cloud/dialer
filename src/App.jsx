@@ -1,10 +1,11 @@
 import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { LayoutDashboard, PhoneCall, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical, Headphones, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { LayoutDashboard, PhoneCall, History, Users, KanbanSquare, Upload, Settings as Cog, Activity, FlaskConical, Headphones, PanelLeftClose, PanelLeft } from 'lucide-react';
 import { useStore } from './store.jsx';
 import { softphoneLabel } from './utils.js';
 import Dashboard from './pages/Dashboard.jsx';
 import Dialer from './pages/Dialer.jsx';
+import Recents from './pages/Recents.jsx';
 import Prospects from './pages/Prospects.jsx';
 import Pipeline from './pages/Pipeline.jsx';
 import ImportPage from './pages/Import.jsx';
@@ -14,18 +15,19 @@ import Drawer from './components/Drawer.jsx';
 import Toasts from './components/Toasts.jsx';
 import OutboxModal from './components/OutboxModal.jsx';
 import IncomingCallModal from './components/IncomingCallModal.jsx';
-import { SoftphoneProvider } from './softphone.jsx';
+import { SoftphoneProvider, useSoftphone } from './softphone.jsx';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'dialer', label: 'Dialer', icon: PhoneCall },
+  { id: 'recents', label: 'Recents', icon: History },
   { id: 'prospects', label: 'Prospects', icon: Users },
   { id: 'pipeline', label: 'Pipeline', icon: KanbanSquare },
   { id: 'recordings', label: 'Recordings', icon: Headphones },
   { id: 'import', label: 'Import', icon: Upload },
   { id: 'settings', label: 'Settings', icon: Cog },
 ];
-const PAGES = { dashboard: Dashboard, dialer: Dialer, prospects: Prospects, pipeline: Pipeline, recordings: Recordings, import: ImportPage, settings: SettingsPage };
+const PAGES = { dashboard: Dashboard, dialer: Dialer, recents: Recents, prospects: Prospects, pipeline: Pipeline, recordings: Recordings, import: ImportPage, settings: SettingsPage };
 
 // The softphone wraps the whole shell: one engine, one registration, and an incoming call
 // rings on every page — a callback does not wait for the agent to be looking at the dialer.
@@ -39,6 +41,7 @@ export default function App() {
 
 function Shell() {
   const { view, setView, settings, stats, prospects } = useStore();
+  const { audioRef } = useSoftphone();
   const [collapsed, setCollapsed] = React.useState(() => {
     try { return localStorage.getItem('pulse_sidebar_collapsed') === '1'; } catch { return false; }
   });
@@ -146,6 +149,8 @@ function Shell() {
           are on when somebody calls back. */}
       <IncomingCallModal />
       <Toasts />
+      {/* Root-level WebRTC audio element: guarantees audio plays on every page (Recents, Dialer, etc.) */}
+      <audio ref={audioRef} autoPlay playsInline className="webrtc-audio" style={{ display: 'none' }} />
     </div>
   );
 }

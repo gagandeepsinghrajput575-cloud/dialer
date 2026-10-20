@@ -1,8 +1,18 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const ownTmp = !process.env.DATA_DIR ? fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-hist-')) : null;
+if (ownTmp) process.env.DATA_DIR = ownTmp;
+
 const { db } = require('../../server/db');
+const migrate = require('../../server/db/migrate');
 const callRepo = require('../../server/repositories/callRepo');
 const prospectRepo = require('../../server/repositories/prospectRepo');
 const callService = require('../../server/services/callService');
+
+migrate.run();
 
 console.log('--- Unit: Call History & Recents API ---');
 
@@ -114,5 +124,6 @@ callRepo.remove(c3.id);
 callRepo.remove(c4.id);
 prospectRepo.remove(p1.id);
 prospectRepo.remove(p2.id);
+if (ownTmp) fs.rmSync(ownTmp, { recursive: true, force: true });
 
 console.log('All 8 call history unit & integration checks passed!\n');

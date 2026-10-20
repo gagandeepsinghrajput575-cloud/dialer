@@ -368,7 +368,7 @@ async function run() {
   assert.ok(sess.json.wsUrl.startsWith('wss://'), `the signalling gateway is a wss URL (got ${sess.json.wsUrl})`);
   assert.strictEqual(sess.json.provider, 'telnyx', 'the descriptor names the carrier it is aiming at');
   assert.strictEqual(sess.json.server, 'sip.telnyx.com');
-  assert.strictEqual(sess.json.wsUrl, 'wss://rtc.telnyx.com', "an unset gateway means Telnyx's own");
+  assert.strictEqual(sess.json.wsUrl, 'wss://sip.telnyx.com:7443', "an unset gateway means Telnyx's SIP over WSS proxy");
   assert.strictEqual(sess.json.username, '1001');
 
   // The SIP secret stays on the server unless the agent explicitly opts into the handoff —

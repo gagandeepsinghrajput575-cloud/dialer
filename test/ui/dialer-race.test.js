@@ -669,7 +669,21 @@ async function run() {
     check(String(inRow?.id) === String(patchedId),
       `the classification landed on the row the ring opened (${patchedId} vs ${inRow?.id})`);
     check(inRow?.outcome === 'conversation', `the outcome is saved on the inbound row (${inRow?.outcome})`);
+    check(inRow?.status === 'completed', `the inbound row transitions to status=completed instead of staying ringing (${inRow?.status})`);
+    check(!iApp.consoleErrors.some((m) => /Failed to answer inbound call/i.test(m)),
+      'answering an inbound call throws zero console errors');
     check((inRow?.duration_sec || 0) > 0, `the inbound call has a real talk time (${inRow?.duration_sec}s)`);
+
+    // Verify the answered & classified inbound call renders cleanly in #recents (NOT as Missed Call)
+    iwin.location.hash = '#recents';
+    iwin.dispatchEvent(new iwin.HashChangeEvent('hashchange'));
+    await wait(() => idoc.querySelector('.recents-card'), 8000, 'Recents ledger cards');
+    const answeredCard = [...idoc.querySelectorAll('.recents-card')].find((el) => /Inbound Caller/.test(el.textContent) && !/No Answer/.test(el.textContent));
+    check(!!answeredCard && !answeredCard.querySelector('.missed-pill'),
+      'answered inbound call renders in Recents as a connected call rather than Missed Call');
+    iwin.location.hash = '#dialer';
+    iwin.dispatchEvent(new iwin.HashChangeEvent('hashchange'));
+    await wait(() => idoc.querySelector('.callbar'), 8000, 'return to Dialer');
 
     // --- I6: a second tab must not ring, and says why ----------------------------
     // jsdom has no navigator.locks. Install one that refuses the inbound audio lock, the way

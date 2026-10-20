@@ -1,9 +1,19 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const ownTmp = !process.env.DATA_DIR ? fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-pron-')) : null;
+if (ownTmp) process.env.DATA_DIR = ownTmp;
+
 const danishPhonetics = require('../../server/services/danishPhonetics');
 const aiPronunciationService = require('../../server/services/aiPronunciationService');
 const prospectService = require('../../server/services/prospectService');
 const prospectsRepo = require('../../server/repositories/prospectRepo');
 const { db } = require('../../server/db');
+const migrate = require('../../server/db/migrate');
+
+migrate.run();
 
 console.log('--- Unit: Danish Pronunciation Engine & AI Batch Service ---');
 
@@ -47,6 +57,7 @@ console.log('--- Unit: Danish Pronunciation Engine & AI Batch Service ---');
 
   // Clean up test prospect
   db.prepare('DELETE FROM prospects WHERE id = ?').run(newProspect.id);
+  if (ownTmp) fs.rmSync(ownTmp, { recursive: true, force: true });
 
   console.log('\nAll Danish Pronunciation & AI Batch checks passed!\n');
 })();

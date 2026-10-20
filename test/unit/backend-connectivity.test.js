@@ -3,11 +3,20 @@ const assert = require('assert');
 const dns = require('dns').promises;
 const net = require('net');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+const ownTmp = !process.env.DATA_DIR ? fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-conn-')) : null;
+if (ownTmp) process.env.DATA_DIR = ownTmp;
+
 const { db } = require('../../server/db');
+const migrate = require('../../server/db/migrate');
+const { createApp } = require('../../server/app');
 const { audioDir, recordingsDir, backupDir } = require('../../server/config/env');
 
-const BASE = process.env.API_BASE || 'http://127.0.0.1:3001';
+migrate.run();
+
+let BASE = process.env.API_BASE || 'http://127.0.0.1:3001';
 
 console.log('--- Deep Backend Connectivity, Carrier Reachability & Bug Test ---');
 
@@ -83,15 +92,15 @@ async function runTests() {
     console.warn(`  ⚠️ DNS warning for sip.telnyx.com: ${err.message}`);
   }
 
-  // DNS lookup for Telnyx WebRTC WSS domain
+  // DNS lookup for Telnyx SIP over WSS proxy domain (wss://sip.telnyx.com:7443)
   try {
-    const telnyxRtc = await dns.lookup('rtc.telnyx.com');
-    assert.ok(telnyxRtc.address, 'rtc.telnyx.com must resolve to an IP address');
-    ok(`Telnyx WebRTC domain resolved successfully (rtc.telnyx.com -> ${telnyxRtc.address})`);
+    const telnyxWss = await dns.lookup('sip.telnyx.com');
+    assert.ok(telnyxWss.address, 'sip.telnyx.com must resolve to an IP address');
+    ok(`Telnyx SIP WSS domain resolved successfully (sip.telnyx.com -> ${telnyxWss.address})`);
 
-    // TCP connectivity probe to WebRTC gateway port 443
-    await checkTcpSocket('rtc.telnyx.com', 443, 5000);
-    ok('Telnyx WebRTC WSS gateway socket connectable (rtc.telnyx.com:443 reachable)');
+    // TCP connectivity probe to SIP over WSS gateway port 7443
+    await checkTcpSocket('sip.telnyx.com', 7443, 5000);
+    ok('Telnyx SIP WSS gateway socket connectable (sip.telnyx.com:7443 reachable)');
   } catch (err) {
     console.warn(`  ⚠️ WebRTC gateway network probe: ${err.message}`);
   }
@@ -110,6 +119,23 @@ async function runTests() {
   // =========================================================================
   console.log('\n[3/5] HTTP API Security, Session Gate & Contracts');
 
+  let localServer = null;
+  const parsedBase = new URL(BASE);
+  const probePort = Number(parsedBase.port || 3001);
+  try {
+    await checkTcpSocket(parsedBase.hostname, probePort, 500);
+  } catch {
+    localServer = await new Promise((resolve) => {
+      const app = createApp();
+      const s = app.listen(0, '127.0.0.1', () => {
+        BASE = `http://127.0.0.1:${s.address().port}`;
+        resolve(s);
+      });
+    });
+  }
+  const activePort = Number(new URL(BASE).port);
+
+  try {
   // Obtain session token
   const sessionRes = await fetch(`${BASE}/api/session`);
   assert.strictEqual(sessionRes.status, 200, 'Session endpoint must return 200');
@@ -144,7 +170,7 @@ async function runTests() {
   const rebindingStatus = await new Promise((resolve, reject) => {
     const r = http.request({
       hostname: '127.0.0.1',
-      port: 3001,
+      port: activePort,
       path: '/api/session',
       method: 'GET',
       headers: { host: 'attacker-controlled-domain.com' },
@@ -182,9 +208,10 @@ async function runTests() {
   assert.strictEqual(webrtcSessionRes.status, 200, 'WebRTC session must return 200');
   const webrtcSessionData = await webrtcSessionRes.json();
   assert.strictEqual(webrtcSessionData.provider, 'telnyx', 'Provider must be telnyx');
-  assert.ok(
-    webrtcSessionData.wsUrl === 'wss://sip.telnyx.com:7443' || webrtcSessionData.wsUrl === 'wss://rtc.telnyx.com',
-    'WebRTC wsUrl must be a valid Telnyx gateway'
+  assert.strictEqual(
+    webrtcSessionData.wsUrl,
+    'wss://sip.telnyx.com:7443',
+    'WebRTC wsUrl must default strictly to wss://sip.telnyx.com:7443'
   );
   ok(`WebRTC session descriptor contract verified (${webrtcSessionData.wsUrl}, Telnyx provider)`);
 
@@ -270,6 +297,10 @@ async function runTests() {
   }
 
   console.log(`\n🎉 ALL ${passed} BACKEND CONNECTIVITY & BUG CHECKS PASSED SUCCESSFULLY!\n`);
+  } finally {
+    if (localServer) await new Promise((r) => localServer.close(r));
+    if (ownTmp) fs.rmSync(ownTmp, { recursive: true, force: true });
+  }
 }
 
 runTests().catch((err) => {

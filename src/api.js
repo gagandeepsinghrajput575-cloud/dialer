@@ -15,6 +15,12 @@ function loadToken() {
   return tokenLoad;
 }
 
+// Proactively warm the session token on boot so synchronous unload/pagehide beacons
+// (`navigator.sendBeacon`) always have a valid session token ready without awaiting fetch().
+if (typeof window !== 'undefined' && typeof fetch === 'function') {
+  loadToken();
+}
+
 function toFetchSignal(sig) {
   if (!sig) return undefined;
   if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent)) {
@@ -77,6 +83,15 @@ export const api = {
   directDial: (b) => req('POST', '/api/calls/direct', { ...b, tzOffset: new Date().getTimezoneOffset() }),
   // A ring that ended unanswered — the caller hung up, or the agent declined.
   missCall: (id, b) => req('POST', `/api/calls/${id}/missed`, b || {}),
+  abandonCall: (id, b) => req('POST', `/api/calls/${id}/abandon`, b || {}),
+  getToken: () => sessionToken,
+  sendBeacon: (url, payload = {}, beaconFn = (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function'
+    ? navigator.sendBeacon.bind(navigator)
+    : null)) => {
+    if (typeof beaconFn !== 'function') return false;
+    const enriched = sessionToken ? { ...payload, _token: sessionToken } : { ...payload };
+    return beaconFn(url, JSON.stringify(enriched));
+  },
   discardCall: (id) => req('POST', `/api/calls/${id}/discard`, {}),
   stats: () => req('GET', `/api/stats?tzOffset=${new Date().getTimezoneOffset()}`),
   calls: (opts = {}) => {

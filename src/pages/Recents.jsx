@@ -396,6 +396,7 @@ export default function Recents() {
                     {groupItems.map((c) => {
                       const isLiveRinging = c.direction === 'inbound' && c.status === 'ringing' && inbound?.callId === c.id && !inbound?.answered;
                       const isMissed = !isLiveRinging && c.direction === 'inbound' && ['ringing', 'missed', 'declined'].includes(c.status);
+                      const isAbandoned = c.status === 'abandoned' || c.outcome === 'dropped';
                       const isLiveConnected = c.status === 'connected' && !c.ended_at;
                       const isInbound = c.direction === 'inbound';
                       const outcomeInfo = outcomeMeta(c.outcome);
@@ -440,6 +441,9 @@ export default function Recents() {
                                 )}
                                 {isLiveConnected && (
                                   <span className="connected-pill">Live Call</span>
+                                )}
+                                {isAbandoned && (
+                                  <span className="abandoned-pill">Dropped / Reloaded</span>
                                 )}
                                 {isMissed && (
                                   <span className="missed-pill">Missed Call</span>

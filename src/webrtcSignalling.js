@@ -521,7 +521,7 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
         : `The call could not be placed — ${msg}`);
   }
 
-  return { stop, inviter, userAgent: self.ua, registerer: self.registerer, reusedRegistration: true };
+  return { stop, bye: stop, inviter, userAgent: self.ua, registerer: self.registerer, reusedRegistration: true };
 }
 
 /**

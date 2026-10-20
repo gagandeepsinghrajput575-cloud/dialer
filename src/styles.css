@@ -3323,6 +3323,64 @@ tr.row-selected:hover { background: rgba(139,92,246,0.18); }
   gap: 6px;
 }
 
+/* Deep Edge-Case Hardening UI Strips & Status Pills (Vanilla CSS, #0f172a Glassmorphic) */
+.standby-strip.follower {
+  border-color: rgba(148, 163, 184, 0.26);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.standby-strip.follower .standby-dot {
+  background: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.45);
+}
+
+.audio-alert-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  border-color: rgba(248, 113, 113, 0.42);
+  background: rgba(127, 29, 29, 0.28);
+  color: #fecaca;
+}
+
+.audio-alert-strip .standby-dot {
+  background: #f87171;
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.65);
+}
+
+.audio-alert-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.window-closed-strip {
+  margin-top: 6px;
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(120, 53, 15, 0.24);
+  color: #fde68a;
+}
+
+.window-closed-strip .standby-dot {
+  background: #fbbf24;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.55);
+}
+
+.abandoned-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+
 
 
 

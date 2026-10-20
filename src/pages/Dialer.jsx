@@ -24,6 +24,7 @@ import { QUEUE_TABS, QUEUE_LIMIT, firstFreshId, pickNextId, queueProgress, queue
 import { OUTCOMES, STAGES, ccLabel, dispatchDialUri, fmtDur, getProspectDisplayName, outcomeMeta, phoneIssue, softphoneLabel, stageMeta, useTimer, withCrossTabLock } from '../utils.js';
 import { extraInsights, clip, isUrlValue } from '../registry.js';
 import { getDanishPronunciation, speakPronunciation } from '../utils/phonetics.js';
+import { createCallingWindowMonitor } from '../utils/callingWindow.js';
 
 const ICONS = { PhoneOff, Voicemail, Ban, ShieldHalf, PhoneMissed, MessagesSquare, CalendarCheck, OctagonX };
 
@@ -616,6 +617,43 @@ export default function Dialer() {
   const ringingRef = useRef(null);
   ringingRef.current = webrtc?.incomingCall || null;
 
+  // Keep engine callId synchronized so beforeunload / pagehide abandon beacons always resolve the live row.
+  useEffect(() => {
+    webrtc?.setActiveCallId?.(callId || null, phase === 'active');
+  }, [webrtc, callId, phase]);
+
+  // Challenge 6: Danish B2B Calling Window (08:30–16:30 Europe/Copenhagen) live monitor.
+  // Never aborts an active call when 16:30:00 arrives, notifies the agent once to wrap up,
+  // disables auto-next queuing, and inhibits new outbound dials until 08:30 next business day.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const windowMonitorRef = useRef(null);
+  if (!windowMonitorRef.current) {
+    windowMonitorRef.current = createCallingWindowMonitor({
+      getSettings: () => settingsRef.current || {},
+      isCallActive: () => phaseRef.current === 'active',
+      onWindowClosed: (notice) => {
+        setAutoNext(false);
+        toast(notice);
+      },
+    });
+  }
+  const [callingWindow, setCallingWindow] = useState(() => windowMonitorRef.current.tick());
+  const callingWindowRef = useRef(callingWindow);
+  callingWindowRef.current = callingWindow;
+
+  useEffect(() => {
+    const syncWindow = () => {
+      const nowOverride = typeof window !== 'undefined' && typeof window.__pulseNow === 'function'
+        ? window.__pulseNow()
+        : new Date();
+      setCallingWindow(windowMonitorRef.current.tick(nowOverride));
+    };
+    syncWindow();
+    const id = setInterval(syncWindow, 1000);
+    return () => clearInterval(id);
+  }, [settings]);
+
   // Server-backed queue: filtering, ranking, and paging live on the server
   const queue = useServerQueue({ tab, q, limit: QUEUE_LIMIT });
   const { items, total, counts, hasMore, loading, loadingMore, error } = queue;
@@ -763,6 +801,13 @@ export default function Dialer() {
     if (dialLockRef.current) return;
     if (ringingRef.current) return;   // the phone is ringing: answer or decline it first
     if (!active || phaseRef.current !== 'idle' || classifyRef.current) return;
+    const latestWindow = windowMonitorRef.current.tick(
+      typeof window !== 'undefined' && typeof window.__pulseNow === 'function' ? window.__pulseNow() : new Date(),
+    );
+    setCallingWindow(latestWindow);
+    if (!latestWindow.allowOutboundDial) {
+      return toast(`Calling window closed (${latestWindow.startsAt}–${latestWindow.endsAt} ${latestWindow.tz}). New calls resume at ${latestWindow.startsAt}.`, 'error');
+    }
     if (active.dnc) return toast('This prospect is marked Do Not Call.', 'error');
     if (!active.phone) {
       // A lead with no number cannot be dialled, and refusing in place left the agent pressing
@@ -985,7 +1030,7 @@ export default function Dialer() {
         setFollowUp({ id: pid, name: getProspectDisplayName(modal.prospect), email: modal.prospect.email, noteText: noteToSave });
       }
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcomeId !== 'meeting_booked' && nextId) {
+      if (autoNext && callingWindowRef.current?.allowAutoNext !== false && outcomeId !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
       }
     } catch (e) {
@@ -1029,7 +1074,7 @@ export default function Dialer() {
         setFollowUp({ id: finished, name: active.name, email: active.email, noteText: noteToSave });
       }
       await Promise.all([queue.refresh(), refreshProspects(), refreshStats(), reload()]);
-      if (autoNext && outcome !== 'meeting_booked' && nextId) {
+      if (autoNext && callingWindowRef.current?.allowAutoNext !== false && outcome !== 'meeting_booked' && nextId) {
         later(() => setActiveId(nextId), 750);
       }
     } catch (e) {
@@ -1077,6 +1122,13 @@ export default function Dialer() {
   // Direct dial any custom/ad-hoc phone number directly
   const handleDirectDial = useCallback(async ({ phone, name }) => {
     if (dialLockRef.current || ringingRef.current || phaseRef.current !== 'idle' || classifyRef.current) return;
+    const latestWindow = windowMonitorRef.current.tick(
+      typeof window !== 'undefined' && typeof window.__pulseNow === 'function' ? window.__pulseNow() : new Date(),
+    );
+    setCallingWindow(latestWindow);
+    if (!latestWindow.allowOutboundDial) {
+      return toast(`Calling window closed (${latestWindow.startsAt}–${latestWindow.endsAt} ${latestWindow.tz}). New calls resume at ${latestWindow.startsAt}.`, 'error');
+    }
     dialLockRef.current = true;
     setPhaseSafe('dialing');
     setLaunched(false);
@@ -1580,6 +1632,36 @@ export default function Dialer() {
               </div>
             )}
 
+            {/* Challenge 3: Hardware microphone loss recovery strip */}
+            {isWebrtc && webrtc.audioDeviceAlert && (
+              <div className="standby-strip audio-alert-strip" role="alert">
+                <span className="standby-dot" />
+                <span className="standby-txt">{webrtc.audioDeviceAlert}</span>
+                <div className="audio-alert-actions">
+                  <button type="button" className="btn xs primary" onClick={() => webrtc.retryMicrophone?.()}>
+                    <Mic size={11} /> Reconnect Mic
+                  </button>
+                  {phase === 'active' && (
+                    <button type="button" className="btn xs danger" onClick={hangUp}>
+                      <PhoneOff size={11} /> Hang up
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Challenge 6: Danish B2B Calling Window wrap-up / closed notice */}
+            {callingWindow.locked && (
+              <div className="standby-strip window-closed-strip" role="status">
+                <span className="standby-dot" />
+                <span className="standby-txt">
+                  {phase === 'active'
+                    ? callingWindow.notice
+                    : `Calling window closed (${callingWindow.startsAt}–${callingWindow.endsAt} ${callingWindow.tz}). Outbound dialing resumes at ${callingWindow.startsAt}.`}
+                </span>
+              </div>
+            )}
+
             {/* HYBRID VOIP COPENHAGEN ROUTE STRIP */}
             <div className="standby-strip ready" style={{ margin: '6px 0', border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(15, 23, 42, 0.5)' }} title="Outbound via Telnyx wholesale · Inbound Callbacks via FlyNumber free SIP">
               <span className="standby-dot" style={{ background: '#38bdf8' }} />
@@ -1675,8 +1757,8 @@ export default function Dialer() {
                         whileTap={{ scale: 0.94 }}
                         className={`call-btn ${phase === 'active' ? 'hangup-active' : phase}`}
                         onClick={phase === 'active' ? hangUp : (inbound && !inbound.answered ? () => webrtc.answerInbound?.() : startCall)}
-                        disabled={(phase === 'dialing') || active.dnc || !active.phone}
-                        title={phase === 'active' ? "Hang up & Classify (H or C)" : active.phone ? "Call (C)" : "Add phone number to dial"}
+                        disabled={(phase === 'dialing') || active.dnc || !active.phone || (phase === 'idle' && !inbound && !callingWindow.allowOutboundDial)}
+                        title={phase === 'active' ? "Hang up & Classify (H or C)" : !callingWindow.allowOutboundDial ? `Calling window closed until ${callingWindow.startsAt}` : active.phone ? "Call (C)" : "Add phone number to dial"}
                       >
                         {phase === 'dialing' ? (
                           <Loader2 size={26} className="spin" />

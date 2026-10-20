@@ -12,6 +12,8 @@ import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
 import { installGlobalAudioUnlock } from './utils/ringer.js';
+import { uploadWithOutbox, drainPendingRecordings } from './utils/recordingsStorage.js';
+import { FOLLOWER_STANDBY_LABEL } from './utils/tabLeadership.js';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -126,15 +128,45 @@ export function SoftphoneProvider({ children }) {
 
   const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {
     if (callId && blob && blob.size > 0) {
-      try {
-        await api.uploadRecording(callId, blob, durationSec);
+      const outcome = await uploadWithOutbox({
+        callId,
+        blob,
+        durationSec,
+        uploadFn: (id, data, dur) => api.uploadRecording(id, data, dur),
+      });
+      if (outcome.ok) {
         bumpLedger();
-      } catch (e) {
-        console.warn('Background recording upload non-fatal failure:', e);
+      } else {
+        console.warn('Recording buffered in IndexedDB outbox for automatic retry:', outcome.error);
       }
     }
     handlersRef.current.onRecordingReady?.({ blob, durationSec, callId });
   }, [bumpLedger]);
+
+  // Challenge 5: Drain buffered IndexedDB recordings on app startup AND whenever network reconnects.
+  useEffect(() => {
+    const flush = () => {
+      drainPendingRecordings({
+        uploadFn: (id, blob, dur) => api.uploadRecording(id, blob, dur),
+        onUploaded: () => bumpLedger(),
+      }).catch(() => {});
+    };
+    flush();
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('online', flush);
+      return () => window.removeEventListener('online', flush);
+    }
+    return undefined;
+  }, [bumpLedger]);
+
+  const onAudioDeviceEvent = useCallback((ev) => {
+    if (!ev) return;
+    if (ev.type === 'switched') {
+      toast(ev.message || 'Audio device switched to default microphone');
+    } else if (ev.type === 'failed') {
+      toast(ev.message || 'Audio input device lost — reconnect microphone or hang up.', 'error');
+    }
+  }, [toast]);
 
   const engine = useWebRtc({
     enabled,
@@ -146,6 +178,7 @@ export function SoftphoneProvider({ children }) {
     onIncoming,
     onIncomingEnded,
     onRecordingReady,
+    onAudioDeviceEvent,
   });
 
   const { simulateIncomingCall, simulateCallerHangup, incomingCall } = engine;
@@ -187,9 +220,10 @@ export function SoftphoneProvider({ children }) {
     standbyLabel: dryRun
       ? 'Standby · Test mode (calls simulated)'
       : engine.standby.state === 'ready' ? 'Standby · Ready for calls'
-        : engine.standby.state === 'registering' ? 'Standby · Registering…'
-          : engine.standby.state === 'unavailable' ? 'Standby unavailable'
-            : 'Standby · Off',
+        : engine.standby.state === 'follower' ? FOLLOWER_STANDBY_LABEL
+          : engine.standby.state === 'registering' ? 'Standby · Registering…'
+            : engine.standby.state === 'unavailable' ? 'Standby unavailable'
+              : 'Standby · Off',
     setCallHandlers,
     simulateIncomingCall,
     simulateCallerHangup,

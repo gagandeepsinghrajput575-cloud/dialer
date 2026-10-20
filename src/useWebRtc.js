@@ -29,9 +29,196 @@
 //                 │           └──▶ (declined / missed) ──▶ standby
 //                 └──▶ registering ──▶ dialing ──▶ ringing ──▶ active   (outbound)
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from './api';
+import { api } from './api.js';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
 import { createRinger } from './utils/ringer.js';
+import { acquireSipLeadership } from './utils/tabLeadership.js';
+
+// ---- Challenge 1: Page Reload / Navigation / Tab Close Resilience ----
+// Installs synchronous beforeunload confirmation + pagehide/unload sendBeacon & SIP BYE/486
+// handlers so carrier legs never hang in dead silence and SQLite rows never stay orphaned.
+export function registerCallUnloadGuards({
+  target = typeof window !== 'undefined' ? window : null,
+  sendBeacon = typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function'
+    ? navigator.sendBeacon.bind(navigator)
+    : null,
+  getToken = () => api.getToken?.() || '',
+  getActiveCall = () => null,
+  getIncomingRing = () => null,
+} = {}) {
+  if (!target?.addEventListener) return () => {};
+
+  const handledKeys = new Set();
+
+  const onBeforeUnload = (e) => {
+    const active = getActiveCall?.();
+    if (!active) return undefined;
+    try { e.preventDefault?.(); } catch { /* ignore */ }
+    const msg = 'Call in progress. Are you sure?';
+    try { e.returnValue = msg; } catch { /* ignore */ }
+    return msg;
+  };
+
+  const onPageTeardown = () => {
+    const token = getToken?.() || '';
+
+    // Failure Mode A: Active live conversation reload/close
+    const active = getActiveCall?.();
+    if (active) {
+      const key = `active:${active.callId || 'session'}`;
+      if (!handledKeys.has(key)) {
+        handledKeys.add(key);
+        if (active.callId && typeof sendBeacon === 'function') {
+          const body = token
+            ? JSON.stringify({ reason: 'page_unload', _token: token })
+            : JSON.stringify({ reason: 'page_unload' });
+          try { sendBeacon(`/api/calls/${active.callId}/abandon`, body); } catch { /* ignore */ }
+        }
+        try {
+          if (typeof active.bye === 'function') active.bye();
+          else active.stop?.();
+        } catch { /* ignore */ }
+        try { active.cleanup?.(); } catch { /* ignore */ }
+      }
+      return;
+    }
+
+    // Failure Mode B: Inbound ringing INVITE reload/close
+    const incoming = getIncomingRing?.();
+    if (incoming && !incoming.answered) {
+      const key = `ringing:${incoming.callId || incoming.startedAt || 'invite'}`;
+      if (!handledKeys.has(key)) {
+        handledKeys.add(key);
+        if (incoming.callId && typeof sendBeacon === 'function') {
+          const body = token
+            ? JSON.stringify({ reason: 'abandoned', duration_sec: 0, _token: token })
+            : JSON.stringify({ reason: 'abandoned', duration_sec: 0 });
+          try { sendBeacon(`/api/calls/${incoming.callId}/missed`, body); } catch { /* ignore */ }
+        }
+        try { incoming.reject?.({ statusCode: 486 }); } catch { /* ignore */ }
+        try { incoming.cleanup?.(); } catch { /* ignore */ }
+      }
+    }
+  };
+
+  target.addEventListener('beforeunload', onBeforeUnload);
+  target.addEventListener('pagehide', onPageTeardown);
+  target.addEventListener('unload', onPageTeardown);
+
+  return () => {
+    try { target.removeEventListener('beforeunload', onBeforeUnload); } catch { /* ignore */ }
+    try { target.removeEventListener('pagehide', onPageTeardown); } catch { /* ignore */ }
+    try { target.removeEventListener('unload', onPageTeardown); } catch { /* ignore */ }
+  };
+}
+
+// ---- Challenge 3: Audio Hardware Loss & Device Hot-Swapping Mid-Call ----
+// Watches active microphone tracks (`track.addEventListener('ended', ...)`) plus media topology
+// updates (`mediaDevices.addEventListener('devicechange', ...)`). When Bluetooth battery dies or
+// a USB dongle disconnects mid-call, automatically requests the default system microphone and
+// hot-swaps via `RTCRtpSender.replaceTrack(newTrack)` without dropping the active SIP session.
+export function monitorMicrophoneFailover({
+  getStream,
+  setStream,
+  getPeerConnection,
+  isCallLive = () => true,
+  isMuted = () => false,
+  mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : null,
+  onSwitched,
+  onFailed,
+} = {}) {
+  let disposed = false;
+  let swapping = false;
+  const cleanupTrackFns = new Set();
+
+  const clearTrackWatchers = () => {
+    for (const fn of cleanupTrackFns) {
+      try { fn(); } catch { /* ignore */ }
+    }
+    cleanupTrackFns.clear();
+  };
+
+  const performHotSwap = async () => {
+    if (disposed || swapping || !isCallLive?.()) return;
+    swapping = true;
+    try {
+      if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
+        throw new Error('Browser audio capture API unavailable');
+      }
+      const nextStream = await mediaDevices.getUserMedia({ audio: true });
+      if (disposed) {
+        for (const t of nextStream.getTracks?.() || []) { try { t.stop?.(); } catch {} }
+        return;
+      }
+      const nextTrack = nextStream.getAudioTracks?.()[0];
+      if (!nextTrack) {
+        throw new Error('No fallback audio input track available');
+      }
+      nextTrack.enabled = !isMuted?.();
+
+      const pc = getPeerConnection?.();
+      const senders = pc?.getSenders?.() || [];
+      const audioSender = senders.find((s) => !s?.track || s.track.kind === 'audio') || senders[0];
+      if (audioSender && typeof audioSender.replaceTrack === 'function') {
+        await audioSender.replaceTrack(nextTrack);
+      }
+
+      clearTrackWatchers();
+      setStream?.(nextStream);
+      bindCurrentTracks(nextStream);
+
+      onSwitched?.({
+        message: 'Audio device switched to default microphone',
+        stream: nextStream,
+        track: nextTrack,
+        label: nextTrack.label || 'Default Microphone',
+      });
+    } catch (err) {
+      onFailed?.({
+        message: 'Audio input device disconnected — reconnect your headset or hang up.',
+        error: err,
+      });
+    } finally {
+      swapping = false;
+    }
+  };
+
+  function bindCurrentTracks(stream) {
+    if (!stream || typeof stream.getAudioTracks !== 'function') return;
+    for (const track of stream.getAudioTracks()) {
+      if (!track?.addEventListener) continue;
+      const onEnded = () => {
+        if (!disposed && isCallLive?.()) performHotSwap();
+      };
+      track.addEventListener('ended', onEnded);
+      cleanupTrackFns.add(() => {
+        try { track.removeEventListener?.('ended', onEnded); } catch { /* ignore */ }
+      });
+    }
+  }
+
+  const onDeviceChange = () => {
+    if (disposed || swapping || !isCallLive?.()) return;
+    const stream = getStream?.();
+    const tracks = stream?.getAudioTracks?.() || [];
+    if (tracks.length > 0 && tracks.every((t) => t.readyState === 'ended')) {
+      performHotSwap();
+    }
+  };
+
+  bindCurrentTracks(getStream?.());
+  if (mediaDevices?.addEventListener) {
+    mediaDevices.addEventListener('devicechange', onDeviceChange);
+  }
+
+  return () => {
+    disposed = true;
+    clearTrackWatchers();
+    if (mediaDevices?.removeEventListener) {
+      try { mediaDevices.removeEventListener('devicechange', onDeviceChange); } catch { /* ignore */ }
+    }
+  };
+}
 
 export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
 
@@ -81,12 +268,13 @@ export function mediaUnavailableReason() {
  */
 export default function useWebRtc({
   enabled = false, dryRun = false, countryCode = '', micDevice = '',
-  onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady,
+  onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady, onAudioDeviceEvent,
 } = {}) {
   const [state, setState] = useState('idle');
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);        // 0..1, drives the waveform
   const [error, setError] = useState('');
+  const [audioDeviceAlert, setAudioDeviceAlert] = useState('');
   const [target, setTarget] = useState('');     // the number being called
   const [dtmfLog, setDtmfLog] = useState([]);   // tones sent, newest last
   const [micLabel, setMicLabel] = useState('');
@@ -98,6 +286,9 @@ export default function useWebRtc({
   // Everything that must be released on hang-up lives in refs: React state is asynchronous,
   // and a hang-up has to stop audio *now*, not on the next render.
   const streamRef = useRef(null);
+  const micFailoverCleanupRef = useRef(null);
+  const activeCallIdRef = useRef(null);
+  const externalActiveRef = useRef(false);
   const pcRef = useRef(null);
   const audioRef = useRef(null);
   const ctxRef = useRef(null);
@@ -107,7 +298,7 @@ export default function useWebRtc({
   const tonesRef = useRef([]);
   const recorderRef = useRef(null);
   const recordingCallIdRef = useRef(null);
-  const callbacksRef = useRef({ onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady });
+  const callbacksRef = useRef({ onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady, onAudioDeviceEvent });
   const stateRef = useRef('idle');
   const mutedRef = useRef(false);
   const enabledRef = useRef(enabled);
@@ -124,7 +315,7 @@ export default function useWebRtc({
   const declineInboundRef = useRef(null);
   const glareMutexRef = useRef(false); // glare window: outbound invite in-flight vs inbound INVITE
 
-  callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
+  callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady, onAudioDeviceEvent };
   enabledRef.current = enabled;
 
   const setStateSafe = useCallback((next) => {
@@ -217,6 +408,12 @@ export default function useWebRtc({
 
   // ---- teardown. Idempotent, and never throws. ----
   const releaseMedia = useCallback(() => {
+    // Disarm hardware failover monitor FIRST so stopping tracks intentionally never triggers hot-swap.
+    if (micFailoverCleanupRef.current) {
+      try { micFailoverCleanupRef.current(); } catch { /* ignore */ }
+      micFailoverCleanupRef.current = null;
+    }
+    setAudioDeviceAlert('');
     stopRecording();
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     if (simRef.current) { clearInterval(simRef.current); simRef.current = 0; }
@@ -363,19 +560,71 @@ export default function useWebRtc({
   }, []);
 
   // ---- opening the microphone. One implementation for both directions. ----
-  const openMicrophone = useCallback(async () => {
+  const openMicrophone = useCallback(async (preferredDeviceId = micDevice) => {
+    if (micFailoverCleanupRef.current) {
+      try { micFailoverCleanupRef.current(); } catch { /* ignore */ }
+      micFailoverCleanupRef.current = null;
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: micDevice ? { deviceId: { ideal: micDevice } } : true,
+      audio: preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : true,
     });
     streamRef.current = stream;
+    setAudioDeviceAlert('');
     try { setMicLabel(stream.getAudioTracks()[0]?.label || ''); } catch { /* label is optional */ }
     startLevelMeter(stream);
+    micFailoverCleanupRef.current = monitorMicrophoneFailover({
+      getStream: () => streamRef.current,
+      setStream: (nextStream) => {
+        streamRef.current = nextStream;
+        setAudioDeviceAlert('');
+        try { setMicLabel(nextStream.getAudioTracks()[0]?.label || ''); } catch {}
+        startLevelMeter(nextStream);
+      },
+      getPeerConnection: () => pcRef.current,
+      isCallLive: () => ['dialing', 'ringing', 'active'].includes(stateRef.current),
+      isMuted: () => mutedRef.current,
+      onSwitched: (info) => {
+        setAudioDeviceAlert('');
+        callbacksRef.current.onAudioDeviceEvent?.({ type: 'switched', ...info });
+      },
+      onFailed: (info) => {
+        setAudioDeviceAlert(info.message);
+        callbacksRef.current.onAudioDeviceEvent?.({ type: 'failed', ...info });
+      },
+    });
     return stream;
   }, [micDevice, startLevelMeter]);
+
+  // Allow manual recovery / device re-selection if all audio inputs dropped mid-call.
+  const retryMicrophone = useCallback(async (deviceId = '') => {
+    try {
+      const stream = await openMicrophone(deviceId);
+      const track = stream.getAudioTracks?.()[0];
+      if (track) {
+        track.enabled = !mutedRef.current;
+        const senders = pcRef.current?.getSenders?.() || [];
+        const sender = senders.find((s) => !s?.track || s.track.kind === 'audio') || senders[0];
+        if (sender && typeof sender.replaceTrack === 'function') {
+          await sender.replaceTrack(track);
+        }
+      }
+      setAudioDeviceAlert('');
+      callbacksRef.current.onAudioDeviceEvent?.({
+        type: 'switched',
+        message: 'Audio device switched to default microphone',
+      });
+      return { ok: true };
+    } catch (err) {
+      const msg = 'Audio input device still unavailable — check your headset connection or hang up.';
+      setAudioDeviceAlert(msg);
+      return { ok: false, reason: msg, error: err };
+    }
+  }, [openMicrophone]);
 
   // ---- inbound ---------------------------------------------------------------------------
   const finishActiveCall = useCallback((dir) => {
     // Declared before hangUp uses it: closes the media and reports the end exactly once.
+    activeCallIdRef.current = null;
     if (dir === 'inbound') { inboundActiveRef.current = false; answeredInboundRef.current = null; }
     try { sipRef.current?.stop?.(); } catch { /* already gone */ }
     sipRef.current = null;
@@ -604,8 +853,10 @@ export default function useWebRtc({
     const answered = { ...entry, answered: true };
     incomingRef.current = null;
     answeredInboundRef.current = answered;
+    activeCallIdRef.current = answered.callId || null;
     try { entry.onStateChange = null; } catch { /* a frozen entry is fine too */ }
-    sipRef.current = { stop: () => { try { entry.terminate?.(); } catch { /* already gone */ } } };
+    const byeFn = () => { try { entry.terminate?.(); } catch { /* already gone */ } };
+    sipRef.current = { stop: byeFn, bye: byeFn };
     setIncomingCall(null);          // the call bar takes it from here
     inboundActiveRef.current = true;
     setDirection('inbound');
@@ -677,15 +928,18 @@ export default function useWebRtc({
     return { ok: true };
   }, [endIncoming]);
 
-  // ---- the persistent registration -------------------------------------------------------
-  // A softphone that only registers when you dial cannot receive a call. While the tab is in
-  // WebRTC mode and no call is in flight, one UserAgent stays registered and listening.
+  // ---- the persistent registration (Challenge 4: single active SIP leader across tabs) ----
+  // Multiple open tabs must never register separate SIP UserAgents with the same Telnyx SIP
+  // credentials. Web Locks ('pulse-sip-registration') + BroadcastChannel('pulse-telephony')
+  // elect a single leader tab; follower tabs display "Standby · Active in another tab" and
+  // claim leadership automatically within <500ms if the leader tab closes or reloads.
   useEffect(() => {
     if (!enabled || dryRun) {
       setStandby((s) => (s.state === 'off' ? s : { state: 'off', reason: '' }));
       return undefined;
     }
     let cancelled = false;
+    let leadership = null;
     setStandby({ state: 'registering', reason: '' });
 
     (async () => {
@@ -706,26 +960,62 @@ export default function useWebRtc({
         });
         return;
       }
-      try {
-        const { initStandbySession } = await import('./webrtcSignalling.js');
-        if (cancelled) return;
-        await initStandbySession({
-          session,
-          onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
-          onState: (s, detail) => {
+
+      leadership = await acquireSipLeadership({
+        onFollower: () => {
+          if (!cancelled) setStandby({ state: 'follower', reason: '' });
+        },
+        onLeader: async () => {
+          if (cancelled) return;
+          setStandby({ state: 'registering', reason: '' });
+          try {
+            const { initStandbySession } = await import('./webrtcSignalling.js');
             if (cancelled) return;
-            if (s === 'ready') setStandby({ state: 'ready', reason: '' });
-            else if (s === 'registering') setStandby({ state: 'registering', reason: '' });
-            else if (s === 'retrying') setStandby({ state: 'ready', reason: detail || '' });
-          },
-        });
-      } catch (e) {
-        if (!cancelled) setStandby({ state: 'unavailable', reason: e?.message || String(e) });
-      }
+            await initStandbySession({
+              session,
+              onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
+              onState: (s, detail) => {
+                if (cancelled) return;
+                if (s === 'ready') setStandby({ state: 'ready', reason: '' });
+                else if (s === 'registering') setStandby({ state: 'registering', reason: '' });
+                else if (s === 'retrying') setStandby({ state: 'ready', reason: detail || '' });
+              },
+            });
+          } catch (e) {
+            if (!cancelled) setStandby({ state: 'unavailable', reason: e?.message || String(e) });
+          }
+        },
+      });
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (leadership) {
+        leadership.release().catch(() => {});
+        import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => {});
+      }
+    };
   }, [enabled, dryRun]);
+
+  // ---- Challenge 1: Unload / Reload Guards on Window ----
+  useEffect(() => registerCallUnloadGuards({
+    getActiveCall: () => ((stateRef.current === 'active' || externalActiveRef.current)
+      ? {
+          callId: activeCallIdRef.current || recordingCallIdRef.current,
+          bye: () => {
+            if (typeof sipRef.current?.bye === 'function') sipRef.current.bye();
+            else sipRef.current?.stop?.();
+          },
+          cleanup: () => { stopRinger(); },
+        }
+      : null),
+    getIncomingRing: () => incomingRef.current,
+  }), [stopRinger]);
+
+  const setActiveCallId = useCallback((id, isLive = false) => {
+    activeCallIdRef.current = id || null;
+    externalActiveRef.current = Boolean(id && isLive);
+  }, []);
 
   // Switching the mode, or leaving the tab idle for good, must not leave a registration open.
   useEffect(() => {
@@ -755,6 +1045,7 @@ export default function useWebRtc({
     setDirection('outbound');
     setStateSafe('registering');
     recordingCallIdRef.current = callId || null;
+    activeCallIdRef.current = callId || null;
 
     if (callDryRun) {
       // Test mode never touches the microphone. It plays a ringback, then pretends to connect.
@@ -920,9 +1211,11 @@ export default function useWebRtc({
   }, [playTone]);
 
   const reset = useCallback(() => {
+    activeCallIdRef.current = null;
     releaseMedia();
     setStateSafe(enabledRef.current ? 'standby' : 'idle');
     setError('');
+    setAudioDeviceAlert('');
     setDtmfLog([]);
     setTarget('');
     setDirection(null);
@@ -941,7 +1234,7 @@ export default function useWebRtc({
   }, [enabled, endIncoming, reset, stopRinger]);
 
   return useMemo(() => ({
-    state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
+    state, muted, level, error, audioDeviceAlert, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
     active: state === 'active',
     ringing: state === 'incoming',
     busy: state !== 'idle' && state !== 'standby' && state !== 'ended' && state !== 'error',
@@ -949,11 +1242,14 @@ export default function useWebRtc({
     audioRef,
     silenceRinger: stopRinger,
     start, hangUp, toggleMute, sendDtmf, reset,
+    retryMicrophone, setActiveCallId,
     answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
   }), [
-    state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
-    stopRinger, start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
+    state, muted, level, error, audioDeviceAlert, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
+    stopRinger, start, hangUp, toggleMute, sendDtmf, reset,
+    retryMicrophone, setActiveCallId,
+    answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
   ]);
 }

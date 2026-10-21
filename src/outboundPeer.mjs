@@ -1,40 +1,29 @@
-// The outbound peer connection: the microphone goes in, the carrier's audio comes out, and the
-// ICE states that may end a call are decided here — in one place, with one policy.
+// The outbound call's media policy, applied to the peer connection that actually carries it.
 //
-// `disconnected` is not `failed`. The WebRTC spec calls it transient: a Wi-Fi roam, a NAT
-// rebind, a laptop lid for two seconds. Treating it as a dropped call cut live conversations
-// that would have healed on their own, so it gets a grace window and a chance to reconnect.
-// `failed` is still fatal, immediately.
+// A note on which peer that is: sip.js's session description handler creates the
+// RTCPeerConnection that negotiates SDP with the carrier. The engine must not create a second
+// one and quietly listen to its ICE events — that peer never receives a remote description,
+// so its ICE never leaves `new`, and any policy attached to it is decoration.
+//
+// `disconnected` is not `failed`: the WebRTC spec calls it transient (Wi-Fi roam, NAT rebind,
+// a laptop lid). It gets a grace window. `failed` is fatal immediately. The listener is
+// registered with `addEventListener`, never by assigning `oniceconnectionstatechange`, because
+// sip.js owns that property.
 
 export const ICE_GRACE_MS = 5000;
 
-// Telnyx's STUN first; a public fallback second, so a network that blocks the carrier's STUN
-// still gathers a candidate set instead of failing to connect.
-export const ICE_SERVERS = Object.freeze([
-  { urls: 'stun:stun.telnyx.com:3478' },
-  { urls: 'stun:stun.l.google.com:19302' },
-]);
-
 /**
- * @param {object}   opts
- * @param {function} [opts.RTCPeerConnection] constructor (absent in tests and old browsers)
- * @param {MediaStream} [opts.stream]         microphone to publish
- * @param {{current: HTMLAudioElement|null}} [opts.audioRef] where remote audio is played
- * @param {function} [opts.onLive]  audio is genuinely flowing (once)
- * @param {function} [opts.onFatal] (message) the call is over
- * @param {number}   [opts.graceMs]  how long `disconnected` may last before it is fatal
+ * @param {RTCPeerConnection} pc  the SIP session's peer connection
+ * @param {object}   [opts]
+ * @param {function} [opts.onFatal] (message) the audio path is gone for good
+ * @param {number}   [opts.graceMs] how long `disconnected` may last
  * @param {{set: Function, clear: Function}} [opts.timers] injectable clock
- * @returns {{pc: RTCPeerConnection, close: function}|null}
+ * @returns {function} unsubscribe
  */
-export function createOutboundPeer({
-  RTCPeerConnection, stream, audioRef, onLive = () => {}, onFatal = () => {},
-  graceMs = ICE_GRACE_MS, timers,
-} = {}) {
-  if (typeof RTCPeerConnection !== 'function') return null;
+export function watchIceConnection(pc, { onFatal, graceMs = ICE_GRACE_MS, timers } = {}) {
+  if (!pc?.addEventListener) return () => {};
   const clock = timers || { set: setTimeout, clear: clearTimeout };
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS.map((s) => ({ ...s })) });
   let grace = null;
-  let live = false;
   let dead = false;
 
   const isClosed = () => pc.signalingState === 'closed' || pc.connectionState === 'closed';
@@ -43,32 +32,25 @@ export function createOutboundPeer({
     if (dead || isClosed()) return;
     dead = true;
     clearGrace();
-    onFatal(message);
+    onFatal?.(message);
   };
-
-  pc.ontrack = (ev) => {
-    const [remote] = ev.streams || [];
-    if (audioRef?.current && remote) {
-      audioRef.current.srcObject = remote;
-      audioRef.current.play?.().catch(() => {});
-    }
-  };
-
-  pc.oniceconnectionstatechange = () => {
+  const onIceChange = () => {
     if (dead || isClosed()) return;
     const state = pc.iceConnectionState;
-    if (state === 'connected' || state === 'completed') {
-      clearGrace();
-      if (!live) { live = true; onLive(); }
-    } else if (state === 'failed') {
-      endCall('The audio connection dropped.');
-    } else if (state === 'disconnected' && grace === null) {
+    if (state === 'connected' || state === 'completed') clearGrace();
+    else if (state === 'failed') endCall('The audio connection dropped.');
+    else if (state === 'disconnected' && grace === null) {
       grace = clock.set(() => { grace = null; endCall('The audio connection dropped.'); }, graceMs);
     }
   };
 
-  for (const track of stream?.getTracks?.() || []) pc.addTrack(track, stream);
-  return { pc, close() { clearGrace(); dead = true; try { pc.close(); } catch { /* already closed */ } } };
+  pc.addEventListener('iceconnectionstatechange', onIceChange);
+  // A connection that is already dead when we attach must not wait five seconds to say so.
+  if (pc.iceConnectionState === 'failed') endCall('The audio connection dropped.');
+  return () => {
+    clearGrace();
+    pc.removeEventListener?.('iceconnectionstatechange', onIceChange);
+  };
 }
 
 /**

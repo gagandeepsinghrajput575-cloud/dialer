@@ -32,7 +32,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
 import { createRinger } from './utils/ringer.js';
-import { attachRemoteAudio, createOutboundPeer } from './outboundPeer.mjs';
+import { attachRemoteAudio, watchIceConnection } from './outboundPeer.mjs';
 import { isRestingState } from './outboundFailure.mjs';
 
 export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
@@ -128,6 +128,7 @@ export default function useWebRtc({
   const cancelRef = useRef(false);        // the agent hung up before the INVITE existed
   const cancelWaitRef = useRef(null);     // resolves a dial that is still registering
   const rejectReasonRef = useRef('');     // what the carrier said, for the disposition toast
+  const iceWatchRef = useRef(null);       // unsubscribe for the SIP peer's ICE listener
 
   callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
@@ -237,7 +238,9 @@ export default function useWebRtc({
       const pc = pcRef.current;
       if (pc) {
         pc.ontrack = null;
-        pc.oniceconnectionstatechange = null;
+        // sip.js owns `oniceconnectionstatechange` on its peer; remove only our listener.
+        iceWatchRef.current?.();
+        iceWatchRef.current = null;
         try {
           for (const sender of (pc.getSenders?.() || [])) {
             try {
@@ -784,9 +787,8 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    let stream;
     try {
-      stream = await openMicrophone();
+      await openMicrophone();   // the stream lands in streamRef and is handed to sip.js
     } catch (e) {
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
       const reason = denied
@@ -797,28 +799,18 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    // A peer connection is created and the microphone attached even before signalling
-    // succeeds, so the session is ready the moment an offer comes back.
-    try {
-      // Media policy (STUN, audio sink, ICE grace window) lives in outboundPeer.mjs.
-      const peer = createOutboundPeer({
-        RTCPeerConnection: typeof window !== 'undefined' ? window.RTCPeerConnection : null,
-        stream,
-        audioRef,
-        onLive: () => {
-          if (cancelRef.current || stateRef.current === 'active') return;
-          setStateSafe('active');
-          callbacksRef.current.onActive?.('outbound');
-          if (recordingCallIdRef.current) startRecording(recordingCallIdRef.current);
-        },
-        // Audio is gone for good: tear the call down so the agent can classify it.
-        onFatal: (msg) => { setError(msg); setStateSafe('error'); finishActiveCall('outbound', msg); },
-      });
-      if (peer) pcRef.current = peer.pc;
-    } catch { /* the media element still plays the local stream back */ }
-
     // Signalling is the one piece that needs the provider's SIP-over-WebSocket gateway. It is
     // deliberately isolated behind this boundary: swap the adapter and the engine is unchanged.
+    // The peer that negotiates with the carrier belongs to sip.js. Watch that one: a peer we
+    // create ourselves never receives a remote description, so its ICE never leaves `new`.
+    const watchCallMedia = (pc) => {
+      if (!pc) return;
+      pcRef.current = pc;
+      iceWatchRef.current?.();
+      iceWatchRef.current = watchIceConnection(pc, {
+        onFatal: (msg) => { setError(msg); setStateSafe('error'); finishActiveCall('outbound', msg); },
+      });
+    };
     let signalCancel;
     const cancelled = new Promise((resolve) => { signalCancel = resolve; });
     cancelWaitRef.current = signalCancel;
@@ -846,10 +838,8 @@ export default function useWebRtc({
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
-            if (sipPc && pcRef.current !== sipPc) {
-              try { pcRef.current?.close?.(); } catch {}
-              pcRef.current = sipPc;
-            }
+            if (sipPc && pcRef.current !== sipPc) pcRef.current = sipPc;
+            watchCallMedia(sipPc);   // the SDH may only exist once the call is established
             attachRemoteAudio({ sessionDescriptionHandler: sdh, sipPc, audioRef });
           } catch {}
           callbacksRef.current.onActive?.('outbound');
@@ -865,6 +855,7 @@ export default function useWebRtc({
       const handle = await Promise.race([pending, cancelled]);
       if (cancelRef.current) return { ok: false, reason: 'cancelled', cancelled: true };
       sipRef.current = handle;
+      watchCallMedia(handle?.inviter?.sessionDescriptionHandler?.peerConnection);
       return { ok: true, simulated: false };
     } catch (e) {
       releaseMedia();

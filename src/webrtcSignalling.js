@@ -22,6 +22,7 @@
 // the agent can act on instead of letting the cockpit pretend a call is up.
 
 import { rejectionDelegate } from './outboundFailure.mjs';
+import { WEBRTC_PEER_CONFIGURATION } from './webrtcConfig.mjs';
 import { extractCallerNumber } from './callerNumber.mjs';
 
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
@@ -102,12 +103,7 @@ export async function acceptInvitation(invitation, localStream, options = {}) {
       // 1 s was too aggressive: a slow STUN round trip produced an answer with no candidates,
       // and the carrier tore the call down a couple of seconds after the 200 OK.
       iceGatheringTimeout: 3000,
-      peerConnectionConfiguration: {
-        iceServers: [
-          { urls: 'stun:stun.telnyx.com:3478' },
-          { urls: 'stun:stun.l.google.com:19302' },
-        ],
-      },
+      peerConnectionConfiguration: WEBRTC_PEER_CONFIGURATION,
       ...options,
     },
   });
@@ -214,12 +210,7 @@ export async function initStandbySession({ session, onIncomingCall, onState } = 
     displayName: session.username,
     logLevel: 'error',
     sessionDescriptionHandlerFactoryOptions: {
-      peerConnectionConfiguration: {
-        iceServers: [
-          { urls: 'stun:stun.telnyx.com:3478' },
-          { urls: 'stun:stun.l.google.com:19302' },
-        ],
-      },
+      peerConnectionConfiguration: WEBRTC_PEER_CONFIGURATION,
       iceGatheringTimeout: 1000,
     },
   });

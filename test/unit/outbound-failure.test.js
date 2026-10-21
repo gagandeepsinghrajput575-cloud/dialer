@@ -82,23 +82,21 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     console.log('  ✓ only a live call is torn down when the engine reports "ended"');
   }
 
-  // ---- ICE: a hiccup is not a hang-up ------------------------------------------------------
-  const { createOutboundPeer, ICE_GRACE_MS, ICE_SERVERS } = await importEsm('src/outboundPeer.mjs');
+  // ---- ICE: a hiccup is not a hang-up, and it must be the carrier's peer we watch ---------
+  const { watchIceConnection, ICE_GRACE_MS, attachRemoteAudio } = await importEsm('src/outboundPeer.mjs');
   {
+    // A stand-in for the RTCPeerConnection that sip.js's session description handler owns.
     class FakePC {
-      constructor(cfg) {
-        this.cfg = cfg;
+      constructor(state = 'new') {
         this.signalingState = 'stable';
         this.connectionState = 'new';
-        this.iceConnectionState = 'new';
-        this.tracks = [];
-        this.closed = false;
+        this.iceConnectionState = state;
+        this.listeners = new Set();
       }
-      addTrack(track, stream) { this.tracks.push({ track, stream }); }
-      close() { this.closed = true; this.signalingState = 'closed'; this.connectionState = 'closed'; }
-      // the test drives the browser's event surface
-      ice(state) { this.iceConnectionState = state; this.oniceconnectionstatechange?.(); }
-      track(stream) { this.ontrack?.({ streams: [stream] }); }
+      addEventListener(type, fn) { if (type === 'iceconnectionstatechange') this.listeners.add(fn); }
+      removeEventListener(type, fn) { this.listeners.delete(fn); }
+      close() { this.signalingState = 'closed'; this.connectionState = 'closed'; }
+      ice(state) { this.iceConnectionState = state; for (const fn of [...this.listeners]) fn(); }
     }
     const fakeTimers = () => {
       const pending = new Map();
@@ -111,42 +109,31 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
       };
     };
 
-    // construction: carrier STUN first, one track per microphone track
+    // the exact regression: sip.js owns `oniceconnectionstatechange`, so we must not overwrite it
     {
-      const timers = fakeTimers();
       const pc = new FakePC();
-      const stream = { getTracks: () => ['a', 'b'] };
-      const live = [];
-      createOutboundPeer({
-        RTCPeerConnection: function (cfg) { Object.assign(pc, { cfg }); return pc; },
-        stream, audioRef: { current: null }, onLive: () => live.push(1), timers,
-      });
-      assert.ok(pc.cfg.iceServers.some((s) => /telnyx/.test(s.urls)), 'the carrier STUN server is offered first');
-      assert.deepStrictEqual(ICE_SERVERS.map((s) => s.urls), pc.cfg.iceServers.map((s) => s.urls));
-      assert.strictEqual(pc.tracks.length, 2, 'every microphone track is attached');
-
-      // onLive fires once, even if the browser reports connected then completed
-      pc.ice('connected');
-      pc.ice('completed');
-      assert.strictEqual(live.length, 1, 'audio is announced exactly once');
+      const sipJsHandler = () => {};
+      pc.oniceconnectionstatechange = sipJsHandler;
+      const stop = watchIceConnection(pc, { onFatal: () => {} });
+      assert.strictEqual(pc.oniceconnectionstatechange, sipJsHandler,
+        'watching ICE must not clobber sip.js\'s own handler');
+      assert.strictEqual(pc.listeners.size, 1, 'the watcher attaches a listener instead');
+      stop();
+      assert.strictEqual(pc.listeners.size, 0, 'and can be detached on teardown');
     }
 
     // disconnected: grace, then fatal — unless it reconnects first
     {
       const timers = fakeTimers();
       const pc = new FakePC();
-      const live = [];
       const fatal = [];
-      createOutboundPeer({
-        RTCPeerConnection: function () { return pc; }, stream: { getTracks: () => [] }, audioRef: { current: null },
-        onLive: () => live.push(1), onFatal: (m) => fatal.push(m), timers,
-      });
+      watchIceConnection(pc, { onFatal: (m) => fatal.push(m), timers });
       pc.ice('disconnected');
       assert.strictEqual(fatal.length, 0, 'a disconnected transport is not a dead call yet');
       assert.strictEqual(timers.pending.size, 1, 'a grace timer is armed');
       pc.ice('connected');
       assert.strictEqual(timers.pending.size, 0, 'reconnecting cancels the grace timer');
-      assert.strictEqual(live.length, 1, 'and the call is still live');
+      pc.ice('completed');
       assert.deepStrictEqual(fatal, [], 'a two-second hiccup never becomes a dropped call');
     }
 
@@ -154,76 +141,77 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
       const timers = fakeTimers();
       const pc = new FakePC();
       const fatal = [];
-      createOutboundPeer({
-        RTCPeerConnection: function () { return pc; }, stream: { getTracks: () => [] }, audioRef: { current: null },
-        onFatal: (m) => fatal.push(m), timers,
-      });
+      watchIceConnection(pc, { onFatal: (m) => fatal.push(m), timers });
       pc.ice('disconnected');
       timers.runAll();
-      assert.strictEqual(fatal.length, 1, 'disconnected for longer than the grace window does end the call');
+      assert.strictEqual(fatal.length, 1, 'disconnected past the grace window does end the call');
       assert.match(fatal[0], /audio/i);
       assert.ok(ICE_GRACE_MS >= 3000, 'the grace window is long enough to survive a Wi-Fi roam');
+      pc.ice('failed');
+      assert.strictEqual(fatal.length, 1, 'a call is only ended once');
     }
 
-    // failed is fatal immediately
     {
       const fatal = [];
-      const pc = new FakePC();
-      createOutboundPeer({
-        RTCPeerConnection: function () { return pc; }, stream: { getTracks: () => [] }, audioRef: { current: null },
-        onFatal: (m) => fatal.push(m), timers: fakeTimers(),
-      });
-      pc.ice('failed');
-      assert.strictEqual(fatal.length, 1, 'ICE failure ends the call at once');
+      const pc = new FakePC('failed');
+      watchIceConnection(pc, { onFatal: (m) => fatal.push(m), timers: fakeTimers() });
+      assert.strictEqual(fatal.length, 1, 'a peer that is already failed when we attach reports at once');
     }
 
-    // no callbacks after the peer is closed (hang-up must not be followed by a phantom error)
     {
       const timers = fakeTimers();
       const fatal = [];
       const pc = new FakePC();
-      const peer = createOutboundPeer({
-        RTCPeerConnection: function () { return pc; }, stream: { getTracks: () => [] }, audioRef: { current: null },
-        onFatal: (m) => fatal.push(m), timers,
-      });
+      const stop = watchIceConnection(pc, { onFatal: (m) => fatal.push(m), timers });
       pc.ice('disconnected');
-      peer.close();
+      stop();
       timers.runAll();
-      assert.deepStrictEqual(fatal, [], 'a closed peer connection reports nothing');
+      assert.deepStrictEqual(fatal, [], 'a detached watcher reports nothing after teardown');
+      assert.doesNotThrow(() => watchIceConnection(null)(), 'no peer, no crash');
     }
 
-    // a browser without RTCPeerConnection simply gets no peer, never a crash
-    assert.strictEqual(createOutboundPeer({ RTCPeerConnection: null, stream: { getTracks: () => [] } }), null);
-    console.log('  ✓ ICE "disconnected" gets a grace window; "failed" is fatal; closed peers are silent');
+    console.log('  ✓ ICE is watched on the carrier peer without stealing sip.js\'s handler');
+  }
 
-    // ---- remote audio: sip.js's stream first, receiver tracks as the fallback --------------
-    const { attachRemoteAudio } = await importEsm('src/outboundPeer.mjs');
-    {
-      const played = [];
-      const audioRef = { current: { set srcObject(v) { played.push(v); }, play: () => Promise.resolve() } };
-      const sdhStream = { getAudioTracks: () => ['t'] };
-      attachRemoteAudio({ sessionDescriptionHandler: { remoteMediaStream: sdhStream }, audioRef });
-      assert.strictEqual(played[0], sdhStream, 'the session description handler stream is played as-is');
+  // ---- remote audio: sip.js's stream first, receiver tracks as the fallback ----------------
+  {
+    const played = [];
+    const audioRef = { current: { set srcObject(v) { played.push(v); }, play: () => Promise.resolve() } };
+    const sdhStream = { getAudioTracks: () => ['t'] };
+    attachRemoteAudio({ sessionDescriptionHandler: { remoteMediaStream: sdhStream }, audioRef });
+    assert.strictEqual(played[0], sdhStream, 'the session description handler stream is played as-is');
 
-      class FakeStream {
-        constructor() { this.tracks = []; }
-        addTrack(t) { this.tracks.push(t); }
-        getAudioTracks() { return this.tracks; }
-      }
-      const realMediaStream = globalThis.MediaStream;
-      globalThis.MediaStream = FakeStream;
-      try {
-        const sipPc = { getReceivers: () => [{ track: { kind: 'audio' } }, { track: { kind: 'video' } }] };
-        attachRemoteAudio({ sipPc, audioRef });
-        assert.strictEqual(played[1].tracks.length, 1, 'only audio receivers become the remote stream');
-      } finally {
-        globalThis.MediaStream = realMediaStream;
-      }
-
-      attachRemoteAudio({ sessionDescriptionHandler: {}, sipPc: null, audioRef: { current: null } });
-      assert.strictEqual(played.length, 2, 'no audio element means no playback and no crash');
-      console.log('  ✓ remote audio prefers the sip.js stream and falls back to audio receivers');
+    class FakeStream {
+      constructor() { this.tracks = []; }
+      addTrack(t) { this.tracks.push(t); }
+      getAudioTracks() { return this.tracks; }
     }
+    const realMediaStream = globalThis.MediaStream;
+    globalThis.MediaStream = FakeStream;
+    try {
+      const sipPc = { getReceivers: () => [{ track: { kind: 'audio' } }, { track: { kind: 'video' } }] };
+      attachRemoteAudio({ sipPc, audioRef });
+      assert.strictEqual(played[1].tracks.length, 1, 'only audio receivers become the remote stream');
+    } finally {
+      globalThis.MediaStream = realMediaStream;
+    }
+
+    attachRemoteAudio({ sessionDescriptionHandler: {}, sipPc: null, audioRef: { current: null } });
+    assert.strictEqual(played.length, 2, 'no audio element means no playback and no crash');
+    console.log('  ✓ remote audio prefers the sip.js stream and falls back to audio receivers');
+  }
+
+  // ---- SDP policy: accept a non-muxed answer instead of failing the call -------------------
+  {
+    const { WEBRTC_PEER_CONFIGURATION } = await importEsm('src/webrtcConfig.mjs');
+    assert.strictEqual(WEBRTC_PEER_CONFIGURATION.rtcpMuxPolicy, 'negotiate',
+      'a carrier answer without a=rtcp-mux must not fail setRemoteDescription');
+    assert.ok(/telnyx/.test(WEBRTC_PEER_CONFIGURATION.iceServers[0].urls), 'the carrier STUN is first');
+    const signalling = code(read('src/webrtcSignalling.js'));
+    assert.strictEqual((signalling.match(/peerConnectionConfiguration: WEBRTC_PEER_CONFIGURATION/g) || []).length, 2,
+      'both the standby UA and the inbound accept path share the policy');
+    assert.ok(!/ensureRtcpMux/i.test(signalling), 'no SDP rewrite pretends the far end muxes');
+    console.log('  ✓ RTCP mux is negotiated, not required, and the policy is shared by both paths');
   }
 
   // ---- wiring: the engine, the hook and the cockpit ---------------------------------------
@@ -252,6 +240,11 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     assert.ok(/finishActiveCall/.test(startBody),
       'a terminated outbound session runs the same teardown as a hang-up');
     assert.ok(/cancelRef/.test(startBody), 'a hang-up before the INVITE exists is remembered, not lost');
+    assert.ok(/watchIceConnection/.test(startBody), 'ICE is watched on the peer that negotiated');
+    assert.ok(!/new PC\(|createOutboundPeer/.test(startBody),
+      'no second peer is created: a peer without a remote description never negotiates');
+    assert.ok(/sessionDescriptionHandler\?\.peerConnection/.test(startBody),
+      'the watched peer is the one sip.js created');
     assert.ok(/onEnded\?\.\(dir, reason\)/.test(hook), 'the engine hands the failure reason to the cockpit');
 
     const cockpit = code(read('src/pages/Dialer.jsx'));

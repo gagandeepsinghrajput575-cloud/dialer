@@ -88,6 +88,24 @@ export function attachRemoteAudio({ sessionDescriptionHandler, sipPc, audioRef }
 export const EARLY_MEDIA_VOLUME = 0.45;
 
 /**
+ * Is this session description handler the one that carries early media?
+ *
+ * sip.js is inconsistent about the flag it passes to `delegate.onSessionDescriptionHandler`:
+ * only the rare reliable-provisional path reports `true` (`lib/api/inviter.js`, the
+ * HaveRemoteOffer branch). The mainstream case — an offer in the INVITE, an answer in a 183 —
+ * builds the handler from `setupSessionDescriptionHandler` and reports `false`
+ * (`lib/api/session.js`), which is why gating on the flag alone plays no carrier audio at all.
+ * So anything handed over before the call is established is early media; if a 200 OK arrives
+ * without a preceding 183, the same handler is reused and the volume is restored on pickup.
+ *
+ * @param {boolean} provisional what sip.js reported
+ * @param {boolean} established the session has reached `Established`
+ */
+export function isEarlyMedia(provisional, established) {
+  return !!provisional || !established;
+}
+
+/**
  * @param {object} opts
  * @param {object} [opts.sessionDescriptionHandler] the provisional SDH sip.js created for 183
  * @param {{current: HTMLAudioElement|null}} [opts.audioRef]

@@ -18,10 +18,8 @@
 //
 //   3. **A call can arrive, not just leave.** While the tab is open in WebRTC mode the engine
 //      sits in 'standby' on one persistent registration, so the number rings in the browser.
-//      The ring is synthesised (no assets, nothing to fetch), it is owned by exactly one tab
-//      (navigator.locks — two tabs must never fight over the speakers), and it is torn down on
-//      every single way out of 'incoming': answered, declined, cancelled by the caller, the
-//      mode switched, the tab closed.
+//      The ring is synthesised, owned by exactly one tab (navigator.locks), and torn down on
+//      every way out of 'incoming': answered, declined, cancelled, mode switched, tab closed.
 //
 // The state machine, in full:
 //
@@ -451,10 +449,9 @@ export default function useWebRtc({
       matched: false,
       provisional: false,
       callId: null,
-      // The CRM half (prospect, call id) is filled in once the server answers; the media half
-      // lives here from the first ring. It mutates in place on purpose: the SIP state-change
-      // handler closes over this exact object to tell "my ring ended" from "some other ring
-      // ended", and a copy would break that comparison, leaving the phone ringing forever.
+      // Filled in once the server answers; the media half lives here from the first ring. It
+      // mutates in place on purpose: the state-change handler compares this exact object to tell
+      // "my ring ended" from another call's, and a copy would break that check.
       attachCrm: (patch) => {
         const current = incomingRef.current;
         if (!current) return;
@@ -468,9 +465,8 @@ export default function useWebRtc({
     entry.onStateChange = onStateChange;
     entry.accept = accept;
     entry.reject = reject;
-    // Declining emits the local 'terminated' transition before the caller ever hears the 603.
-    // Without this, the teardown would report 'canceled' and the agent would be told the
-    // caller gave up when in fact they hung up on the caller.
+    // Declining emits the local 'terminated' transition before the caller hears the 603; without
+    // this the teardown would report 'canceled' and blame the caller for hanging up on us.
     entry.endReason = null;
 
     incomingRef.current = entry;
@@ -592,9 +588,8 @@ export default function useWebRtc({
       console.warn('Inbound remote audio binding non-fatal:', err);
     }
 
-    // The ring is over. Clearing the ref is what lets the *next* call in: while it is set, the
-    // engine answers every fresh INVITE with 486 "busy" and the tab is deaf for the rest of the
-    // session. The session handle moves to sipRef so hang-up still sends the BYE.
+    // The ring is over. Clearing the ref is what lets the *next* call in: while it is set, every
+    // fresh INVITE gets 486 "busy". The handle moves to sipRef so hang-up still sends the BYE.
     const answered = { ...entry, answered: true };
     incomingRef.current = null;
     answeredInboundRef.current = answered;
@@ -799,9 +794,9 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    // Signalling needs the provider's SIP-over-WebSocket gateway; it hides behind this boundary
-    // so the adapter can be swapped. The peer that negotiates belongs to sip.js — watch that one:
-    // a peer we create ourselves never gets a remote description, so its ICE never leaves `new`.
+    // Signalling needs the provider's SIP gateway; it hides behind this boundary so the adapter
+    // can be swapped. The peer that negotiates belongs to sip.js — watch that one: a peer we
+    // create ourselves never gets a remote description, so its ICE never leaves `new`.
     const watchCallMedia = (pc) => {
       if (!pc) return;
       pcRef.current = pc;
@@ -835,10 +830,16 @@ export default function useWebRtc({
         },
         // Recorded, not fatal-yet: `Terminated` follows and its teardown hands this to the UI.
         onError: (msg) => { rejectReasonRef.current = msg; setError(msg); },
-        // 183 with SDP: play what the carrier sent, ducked. `active` still needs Established.
-        onEarlyMedia: (sdh) => { if (!cancelRef.current) playEarlyMedia({ sessionDescriptionHandler: sdh, audioRef }); },
+        // The far end is ringing: a quiet 180 Hz heartbeat, so dead air does not read as a crash.
+        onRinging: () => { if (!cancelRef.current) chime.ringing(); },
+        // 183 with SDP: the carrier's own audio replaces the heartbeat. `active` still needs a 200.
+        onEarlyMedia: (sdh) => {
+          chime.stopRinging();
+          if (!cancelRef.current) playEarlyMedia({ sessionDescriptionHandler: sdh, audioRef });
+        },
         onActive: () => {
           if (cancelRef.current) return;
+          chime.stopRinging();                                 // the heartbeat never outlives the ring
           if (audioRef.current) audioRef.current.volume = 1;   // full volume for the conversation
           chime.connected();                                   // 520 → 660 Hz heads-up
           try {

@@ -61,24 +61,49 @@ export function describeReject({ statusCode, reasonPhrase, number } = {}) {
  *
  * @param {object}   opts
  * @param {string}   [opts.remoteNumber] the number being dialled, for the message
- * @param {function} [opts.onRinging]    a 180/183 arrived: the far end is actually ringing
+ * @param {function} [opts.onRinging]    (code) a 180/183 arrived: the far end is ringing
  * @param {function} [opts.onReject]     (message, code) the carrier refused the call
  */
 export function rejectionDelegate({ remoteNumber, onRinging, onReject } = {}) {
+  // Despite the published types, sip.js hands this delegate the *core* reply object —
+  // `{ message, session }` — not an IncomingResponse. The status code lives on `message`
+  // (`lib/core/user-agents/invite-user-agent-client.js`, the onProgress/onReject callbacks).
+  // Reading only `response.statusCode` is how a 180 and a 486 both became "no response at all".
+  const statusOf = (response) => ({
+    statusCode: response?.statusCode ?? response?.message?.statusCode,
+    reasonPhrase: response?.reasonPhrase ?? response?.message?.reasonPhrase,
+  });
   return {
     onProgress: (response) => {
-      const code = Number(response?.statusCode);
-      if (code === 180 || code === 183) onRinging?.();
+      const code = Number(statusOf(response).statusCode);
+      // 100 Trying has its own callback; only 180/183 mean the far end actually rang. The code
+      // travels with the event because 183 usually carries carrier audio and 180 does not.
+      if (code === 180 || code === 183) onRinging?.(code);
     },
     onReject: (response) => {
-      const { code, message } = describeReject({
-        statusCode: response?.statusCode,
-        reasonPhrase: response?.reasonPhrase,
-        number: remoteNumber,
-      });
+      const { code, message } = describeReject({ ...statusOf(response), number: remoteNumber });
       onReject?.(message, code);
     },
   };
+}
+
+/**
+ * Send the INVITE, with the delegate that reports progress and rejection.
+ *
+ * `requestDelegate` belongs to the *invite* options, not to the Inviter constructor. sip.js
+ * 0.21.2 never copies it out of the constructor options: every read is `options.requestDelegate`
+ * inside `sendInvite`, which is handed only what `invite()` receives
+ * (`node_modules/sip.js/lib/api/inviter.js` — the onProgress/onReject hooks of `sendInvite`).
+ * Passing it to `new Inviter(...)` looks right and is silently ignored, which is how a call can
+ * ring forever with the cockpit still saying "Dialing". This indirection exists so a unit test
+ * can prove the delegate reaches `inviter.invite`.
+ *
+ * @param {object} inviter  a sip.js Inviter (or anything with the same `invite` shape)
+ * @param {object} requestDelegate
+ */
+export function inviteWithDelegate(inviter, requestDelegate) {
+  if (typeof inviter?.invite !== 'function') throw new Error('No invitation to send.');
+  return inviter.invite({ requestDelegate });
 }
 
 // States in which nothing is on the wire any more. A `Terminated` reported in one of these is

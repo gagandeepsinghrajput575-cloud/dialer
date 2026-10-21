@@ -67,6 +67,22 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     assert.strictEqual(rejects[0].code, 486);
     delegate.onReject({ statusCode: 404, reasonPhrase: 'Not Found' });
     assert.match(rejects[1].message, /\+4520123456/, 'the rejected number is named');
+
+    // The shape sip.js actually passes: `{ message, session }`, with the code inside `message`.
+    // Reading `response.statusCode` alone leaves every response looking empty — which is how a
+    // ringing call stays on "Dialing" forever and a 486 reads as "the call failed".
+    const coreStyle = rejectionDelegate({
+      remoteNumber: '+4520123456',
+      onRinging: (c) => rings.push(c),
+      onReject: (message, code) => rejects.push({ message, code }),
+    });
+    const before = rings.length;
+    coreStyle.onProgress({ message: { statusCode: 180, reasonPhrase: 'Ringing' }, session: {} });
+    assert.strictEqual(rings.length, before + 1, 'a core-style 180 rings');
+    assert.strictEqual(rings[rings.length - 1], 180, 'and reports its code');
+    coreStyle.onReject({ message: { statusCode: 486, reasonPhrase: 'Busy Here' } });
+    assert.strictEqual(rejects[rejects.length - 1].code, 486, 'a core-style rejection keeps its code');
+    assert.match(rejects[rejects.length - 1].message, /busy/i, 'and its meaning');
     console.log('  ✓ the delegate turns 180 into ringing and 4xx/5xx into a reason with a code');
   }
 
@@ -292,6 +308,93 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     console.log('  ✓ 183 audio is played softly, the CLI is sent, and the Request-URI stays canonical');
   }
 
+  // ---- the delegate has to ride on invite(), not on the constructor -----------------------
+  // Regression: `new Inviter(ua, target, { requestDelegate })` looks right and is silently
+  // ignored. sip.js 0.21.2 reads `options.requestDelegate` inside sendInvite, which only ever
+  // sees the object passed to `invite()`. With the delegate in the wrong bucket, a call rings
+  // forever while the cockpit says "Dialing", and a 486 never becomes a message.
+  {
+    const { inviteWithDelegate } = await importEsm('src/outboundFailure.mjs');
+    const seen = [];
+    const fakeInviter = { invite: (opts) => { seen.push(opts); return Promise.resolve('sent'); } };
+    const delegate = { onProgress() {}, onReject() {} };
+    assert.strictEqual(await inviteWithDelegate(fakeInviter, delegate), 'sent', 'the INVITE result is passed through');
+    assert.strictEqual(seen.length, 1, 'the INVITE is sent exactly once');
+    assert.strictEqual(seen[0].requestDelegate, delegate,
+      'the delegate must be handed to invite(), because that is the only place sip.js reads it');
+    assert.throws(() => inviteWithDelegate({}, delegate), /invitation/i, 'a session without invite() is refused');
+
+    const signalling = code(read('src/webrtcSignalling.js'));
+    const ctorStart = signalling.indexOf('new Inviter(self.ua, target, {');
+    const ctor = signalling.slice(ctorStart, signalling.indexOf('inviter.delegate = {'));
+    assert.ok(ctorStart > 0, 'the Inviter is constructed where the test can see it');
+    assert.ok(!/requestDelegate/.test(ctor), 'requestDelegate must not be in the constructor bucket');
+    assert.ok(/inviteWithDelegate\(inviter, requestDelegate\)/.test(signalling),
+      'the delegate is passed to the call that sends the INVITE');
+    assert.ok(!/inviter\.invite\(\)/.test(signalling), 'a bare invite() would drop the delegate again');
+    console.log('  ✓ the request delegate reaches sip.js through invite(), never the constructor');
+  }
+
+  // ---- early media is decided by the session, not by sip.js's inconsistent flag ------------
+  {
+    const { isEarlyMedia } = await importEsm('src/outboundPeer.mjs');
+    assert.strictEqual(isEarlyMedia(false, false), true,
+      'a 183 SDH arrives with provisional=false (sip.js builds it from setupSessionDescriptionHandler)');
+    assert.strictEqual(isEarlyMedia(true, false), true, 'a reliable provisional is early media too');
+    assert.strictEqual(isEarlyMedia(false, true), false, 'after Established the handler is the call itself');
+    console.log('  ✓ carrier audio is recognised even when sip.js reports provisional=false');
+  }
+
+  // ---- the ring heartbeat: quiet, slow, and stoppable --------------------------------------
+  {
+    const { createChime, RING_PULSE, RING_PULSE_EVERY_MS, CONNECT_CHIME } = await importEsm('src/utils/chime.js');
+    const realSet = global.setInterval;
+    const realClear = global.clearInterval;
+    const timers = [];
+    let cleared = 0;
+    global.setInterval = (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; };
+    global.clearInterval = () => { cleared += 1; };
+    const tones = [];
+    class Osc {
+      constructor() { this.frequency = { value: 0 }; }
+      connect() {}
+      start() { tones.push(this.frequency.value); }
+      stop() {}
+    }
+    class Gain { constructor() { this.gain = { value: 1, setValueAtTime() {}, linearRampToValueAtTime() {} }; } connect() {} }
+    class Ctx {
+      constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {}; }
+      createOscillator() { return new Osc(); }
+      createGain() { return new Gain(); }
+      close() { this.state = 'closed'; }
+    }
+    try {
+      const chime = createChime({ AudioContext: function () { return new Ctx(); } });
+      assert.strictEqual(chime.ringing(), true, 'the heartbeat starts');
+      assert.deepStrictEqual(tones, [RING_PULSE.frequency], 'the first beat lands immediately');
+      assert.strictEqual(timers.length, 1, 'one tempo, not one per 180');
+      assert.strictEqual(timers[0].ms, RING_PULSE_EVERY_MS, `a beat every ${RING_PULSE_EVERY_MS} ms`);
+      chime.ringing();
+      assert.strictEqual(timers.length, 1, 'a second 180 does not stack a second tempo');
+      timers[0].fn();
+      assert.strictEqual(tones.length, 2, 'each tick is one pulse');
+      chime.stopRinging();
+      assert.strictEqual(cleared, 1, 'the tempo is cleared when the ring ends');
+      chime.ringing();
+      chime.stop();
+      assert.strictEqual(cleared, 2, 'teardown clears the tempo as well as the context');
+
+      assert.ok(RING_PULSE.frequency < 200, 'the heartbeat sits well below the 425 Hz ringback');
+      assert.ok(RING_PULSE.ms <= 100, 'and is a pulse, not a tone');
+      assert.ok(RING_PULSE.gain < CONNECT_CHIME[0].gain, 'quieter than the pickup chime');
+      assert.ok(RING_PULSE.gain <= 0.03, 'quiet enough to ignore');
+    } finally {
+      global.setInterval = realSet;
+      global.clearInterval = realClear;
+    }
+    console.log('  ✓ ringing is a 180 Hz heartbeat every 3 s, never a ringback loop');
+  }
+
   // ---- SDP policy: accept a non-muxed answer instead of failing the call -------------------
   {
     const { WEBRTC_PEER_CONFIGURATION } = await importEsm('src/webrtcConfig.mjs');
@@ -312,9 +415,12 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     const dial = signalling.slice(dialStart, signalling.indexOf('export async function startSignalling'));
     assert.ok(/requestDelegate/.test(dial), 'dialOutbound registers a requestDelegate');
     assert.ok(/onReject/.test(dial), 'the rejection response is read, not discarded');
-    assert.ok(/onRinging:\s*\(\)\s*=>\s*onState\?\.\('ringing'\)/.test(dial),
+    assert.ok(/onRinging:\s*\(code\)\s*=>/.test(dial) && /onState\?\.\('ringing'\)/.test(dial),
       'a 180/183 turns into the Ringing state (see rejectionDelegate)');
-    assert.ok(/requestDelegate,/.test(dial), 'the delegate is passed to the Inviter');
+    assert.ok(/onRinging:\s*\(\)\s*=>\s*\{\s*if \(!cancelRef\.current\) chime\.ringing\(\)/.test(code(read('src/useWebRtc.js'))),
+      'and the ringing state is also audible as the quiet heartbeat');
+    assert.ok(/inviteWithDelegate\(inviter, requestDelegate\)/.test(dial),
+      'the delegate is passed to the call that sends the INVITE');
     assert.ok(/rejectionDelegate/.test(dial), 'the rejection delegate is attached to the Inviter');
 
     const startSignalling = signalling.slice(signalling.indexOf('export async function startSignalling'));

@@ -2,10 +2,13 @@
 //
 // Cold calling is acoustically exhausting: a 425 Hz ringback tone looped into a headset for
 // thirty seconds, twenty times an hour, is a stressor. So the engine never synthesises
-// ringback. Instead it makes two small, local cues:
+// ringback. Instead it makes three small, local cues:
 //
 //   blip()      — a single 200 ms, 330 Hz sine at low gain when the INVITE leaves. It says
 //                 "the call went out" and then gets out of the way.
+//   ringing()   — a heartbeat while the far end rings: one 80 ms, 180 Hz pulse every 3 s, at
+//                 a gain you have to listen for. Not a ringback — it is the quiet "still
+//                 there" that stops dead air from reading as a crash.
 //   connected() — an ascending 520 → 660 Hz two-tone when the prospect picks up. It is the
 //                 heads-up to start talking, and it is deliberately short (~260 ms total).
 //
@@ -21,6 +24,11 @@ export const CONNECT_CHIME = Object.freeze([
   { at: 0.12, frequency: 660, ms: 140, gain: 0.06 },
 ]);
 
+// 180 Hz is below the band a headset renders harshly and low enough to feel like a pulse
+// rather than a tone. 80 ms is a heartbeat; 3 s apart is slow enough to ignore.
+export const RING_PULSE = Object.freeze({ at: 0, frequency: 180, ms: 80, gain: 0.03 });
+export const RING_PULSE_EVERY_MS = 3000;
+
 /**
  * @param {object} [opts]
  * @param {Function} [opts.AudioContext] constructor (injected in tests)
@@ -31,6 +39,11 @@ export function createChime({ AudioContext: Ctor } = {}) {
     ? (window.AudioContext || window.webkitAudioContext)
     : null);
   let ctx = null;
+  let pulseTimer = null;
+
+  // Idempotent on purpose: a carrier can send 180 and then 183, and a second tempo overlapping
+  // the first would turn a calm heartbeat into a rattle.
+  const stopPulse = () => { if (pulseTimer) clearInterval(pulseTimer); pulseTimer = null; };
 
   const ensure = () => {
     if (!Ctx) return null;
@@ -72,10 +85,24 @@ export function createChime({ AudioContext: Ctor } = {}) {
     return true;
   }
 
+  // The heartbeat is driven from JS rather than pre-scheduled: a ring can last three seconds
+  // or ninety, and clearing one interval is a cleaner stop than unwinding a queue of nodes.
+  const ringing = () => {
+    if (pulseTimer) return true;
+    if (!ensure()) return false;
+    play([RING_PULSE]);   // the first beat lands immediately, not 3 s from now
+    pulseTimer = setInterval(() => play([RING_PULSE]), RING_PULSE_EVERY_MS);
+    if (typeof pulseTimer?.unref === 'function') pulseTimer.unref();   // never hold a process open
+    return true;
+  };
+
   return {
     blip: () => play([DIAL_BLIP]),
+    ringing,
+    stopRinging: stopPulse,
     connected: () => play(CONNECT_CHIME),
     stop: () => {
+      stopPulse();
       try { if (ctx && ctx.state !== 'closed') ctx.close(); } catch { /* already closed */ }
       ctx = null;
     },

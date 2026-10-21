@@ -21,10 +21,11 @@
 // can prove the far end answers. If the stack cannot be loaded at all, this throws a message
 // the agent can act on instead of letting the cockpit pretend a call is up.
 
-import { rejectionDelegate } from './outboundFailure.mjs';
+import { inviteWithDelegate, rejectionDelegate } from './outboundFailure.mjs';
 import { WEBRTC_PEER_CONFIGURATION } from './webrtcConfig.mjs';
 import { callerIdHeaders, extractCallerNumber } from './callerNumber.mjs';
 import { clearActiveLocalStream, mediaStreamFactory, setActiveLocalStream } from './mediaStream.js';
+import { isEarlyMedia } from './outboundPeer.mjs';
 
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
 
@@ -299,7 +300,7 @@ export function standbySession() {
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, onError, onEarlyMedia, callerId, localStream } = {}) {
+export async function dialOutbound({ remoteNumber, onState, onActive, onError, onEarlyMedia, onRinging, callerId, localStream } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
@@ -316,27 +317,32 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, o
 
   setActiveLocalStream(localStream);
   let stopped = false;
+  let established = false;
   // sip.js reports a rejection only as `Terminated`, indistinguishable from our own hang-up:
   // the status code (486 busy, 404 unknown, 503 no route) is handed to Inviter's private
   // handler and dropped. Reading it here is the only way the agent can be told why.
   const requestDelegate = rejectionDelegate({
     remoteNumber,
-    onRinging: () => onState?.('ringing'),
+    // The far end is ringing. `code` is 180 (no audio yet) or 183 (carrier audio, played by the
+    // SDH delegate) — either way the UI leaves "Dialing" the moment this fires.
+    onRinging: (code) => { onRinging?.(code); onState?.('ringing'); },
     onReject: (message) => onError?.(message),
   });
+  // NOTE: `requestDelegate` is deliberately NOT here. sip.js reads it only from the options
+  // object passed to `invite()`, never from the constructor — a delegate put in this bucket is
+  // silently ignored, and then no 180/183 or 4xx ever reaches the cockpit.
   const inviter = new Inviter(self.ua, target, {
-    requestDelegate,
     // 183 with SDP is played to the agent instead of dropped (see the delegate below). sip.js
     // requires a non-forking INVITE for this; the carrier's PSTN leg does not fork.
     earlyMedia: true,
     extraHeaders: callerIdHeaders(callerId, server),
     sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false }, iceGatheringTimeout: 3000 },
   });
-  // The early description handler is a *different* SDH from the one the session will use only
-  // when the carrier answers a reliable provisional; handing it to the engine plays the
-  // announcement without touching the state machine (no talk timer until 200 OK).
+  // Hand the description handler to the engine as soon as it exists: that is what carries the
+  // carrier's 183 audio (an intercept message, foreign ringback). The talk timer still waits for
+  // the 200 OK — see the state machine below — so this cannot bill a second of silence.
   inviter.delegate = {
-    onSessionDescriptionHandler: (sdh, provisional) => { if (provisional) onEarlyMedia?.(sdh); },
+    onSessionDescriptionHandler: (sdh, provisional) => { if (isEarlyMedia(provisional, established)) onEarlyMedia?.(sdh); },
   };
 
   const stop = () => {
@@ -354,13 +360,13 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, o
     // `Establishing` fires when the INVITE leaves the browser, before the carrier has said
     // anything. Ringing is only claimed once a 180/183 actually arrives (see the delegate).
     if (name === SessionState.Establishing || name === 'Establishing') onState?.('dialing');
-    else if (name === SessionState.Established || name === 'Established') { onState?.('active'); onActive?.(); }
+    else if (name === SessionState.Established || name === 'Established') { established = true; onState?.('active'); onActive?.(); }
     else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) onState?.('ended');
   });
 
   onState?.('dialing');
   try {
-    await inviter.invite();
+    await inviteWithDelegate(inviter, requestDelegate);
   } catch (e) {
     // Local failures only (no SDP, no media, a dead socket): carrier rejections arrive later
     // through the delegate above, because `invite()` resolves once the request is *sent*.
@@ -384,12 +390,13 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, o
  * @param {function} opts.onState      (state) => void   — registering | dialing | ringing | active | ended
  * @param {function} opts.onError      (message) => void
  * @param {function} [opts.onEarlyMedia] (sdh) => void — 183 audio, before the call is up
+ * @param {function} [opts.onRinging]  (code) => void — 180/183 arrived, the far end is ringing
  * @param {function} opts.onActive     () => void
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @param {function} [opts.onIncomingCall] INVITE handler, when the engine wants standby calls
  * @returns {Promise<{stop: function}>}
  */
-export async function startSignalling({ session, remoteNumber, callerId, onState, onError, onEarlyMedia, onActive, localStream, onIncomingCall } = {}) {
+export async function startSignalling({ session, remoteNumber, callerId, onState, onError, onEarlyMedia, onRinging, onActive, localStream, onIncomingCall } = {}) {
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
@@ -402,5 +409,5 @@ export async function startSignalling({ session, remoteNumber, callerId, onState
     onState: (s, detail) => { if (s === 'unavailable') onError?.(detail || 'The in-browser softphone is unavailable.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, onError, onEarlyMedia, callerId: callerId || session?.callerId, localStream });
+  return dialOutbound({ remoteNumber, onRinging, onState, onActive, onError, onEarlyMedia, callerId: callerId || session?.callerId, localStream });
 }

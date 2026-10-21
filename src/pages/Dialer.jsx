@@ -14,6 +14,7 @@ import { api } from '../api';
 import { useStore } from '../store.jsx';
 import { DTMF_KEYS } from '../useWebRtc.js';
 import { useSoftphone } from '../softphone.jsx';
+import { recordUnconnected } from '../outboundLedger.mjs';
 import ProspectCard from '../components/ProspectCard.jsx';
 import EmailComposer, { VerifyBadge } from '../components/EmailComposer.jsx';
 import QueueList from '../components/QueueList.jsx';
@@ -598,10 +599,9 @@ export default function Dialer() {
     webrtcLiveRef.current = false;
     if (phaseRef.current === 'idle') return;
     if (wasLive) return webrtcFinishRef.current?.();
-    // Never connected: no talk time, no disposition. Say why (busy, no route, wrong number).
-    resetCallUi();
-    if (reason) toast(reason, 'error');
-  }, [resetCallUi, toast]);
+    // A dial that never connected is recorded, not silently dropped (inbound has its own path).
+    recordUnconnected(api, callId, dir, reason); resetCallUi(); if (reason) toast(reason, 'error');
+  }, [callId, resetCallUi, toast]);
   const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
     // SoftphoneProvider already uploads when recCallId is attached to the engine.
     if (recCallId) return;
@@ -807,12 +807,12 @@ export default function Dialer() {
       // here. The engine reports back only when the audio path is real (or, in test mode, when
       // the simulator has auto-connected), so the timer cannot start on a silent call.
       if (r.inBrowser) {
-        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
+        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId, callerId: r.callerId });
         if (!res.ok) {
           // Nothing ever left the machine, so the record the server just created is a phantom.
           // Remove it rather than leaving a call in history that no audio ever carried.
-          try { await api.discardCall(r.callId); } catch { /* best effort */ }
-          patchLocal(active.id, { call_count: active.call_count });
+          try { await api.abandonCall(r.callId, res.cancelled); } catch { /* best effort */ }
+          patchLocal(active.id, { call_count: active.call_count + (res.cancelled ? 1 : 0) });
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');
@@ -904,11 +904,11 @@ export default function Dialer() {
   // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
     const p = phaseRef.current;
-    // 'dialing' is cancellable too; before this, a stuck outbound call could only be cleared by a reload.
-    if ((p !== 'active' && p !== 'dialing') || !callId || !active) return;
-    // In-browser: the engine owns the mic and the INVITE, and reports back once both are down.
+    if (p !== 'active' && p !== 'dialing') return;
+    // In-browser the engine owns the INVITE; this must reach it while the call still rings.
     if (isWebrtcRef.current) return void webrtcRef.current?.hangUp();
-    if (p === 'active') openClassification();
+    if (p !== 'active' || !callId || !active) return;   // the softphone path has nothing to cancel
+    openClassification();
   }, [callId, active, openClassification]);
 
   // Inline edits in the hero banner. The server normalizes anyway, but a rejection that only
@@ -1101,9 +1101,9 @@ export default function Dialer() {
       const softphone = softphoneLabel(r.telephonyMode);
 
       if (r.inBrowser) {
-        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
+        const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId, callerId: r.callerId });
         if (!res.ok) {
-          try { await api.discardCall(r.callId); } catch { /* best effort */ }
+          try { await api.abandonCall(r.callId, res.cancelled); } catch { /* best effort */ }
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');

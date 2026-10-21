@@ -80,3 +80,22 @@ export function attachRemoteAudio({ sessionDescriptionHandler, sipPc, audioRef }
   }
   return remote.getAudioTracks().length > 0 ? play(remote) : undefined;
 }
+
+// Carrier audio that arrives before the 200 OK (ringback, "nummeret er ikke i brug") is real
+// audio and worth hearing — but it is not worth hearing at full volume in a headset while the
+// network plays its 425 Hz ringback. It is played gently, then restored the moment the call is
+// established. The local pickup chime is a separate Web Audio path, so ducking never touches it.
+export const EARLY_MEDIA_VOLUME = 0.45;
+
+/**
+ * @param {object} opts
+ * @param {object} [opts.sessionDescriptionHandler] the provisional SDH sip.js created for 183
+ * @param {{current: HTMLAudioElement|null}} [opts.audioRef]
+ * @param {number} [opts.volume]
+ */
+export function playEarlyMedia({ sessionDescriptionHandler, audioRef, volume = EARLY_MEDIA_VOLUME } = {}) {
+  attachRemoteAudio({ sessionDescriptionHandler, audioRef });
+  if (audioRef?.current) {
+    try { audioRef.current.volume = volume; } catch { /* a muted element still plays later */ }
+  }
+}

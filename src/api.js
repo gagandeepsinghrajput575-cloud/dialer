@@ -77,6 +77,12 @@ export const api = {
   // A ring that ended unanswered — the caller hung up, or the agent declined.
   missCall: (id, b) => req('POST', `/api/calls/${id}/missed`, b || {}),
   discardCall: (id) => req('POST', `/api/calls/${id}/discard`, {}),
+  // A dial that never left the machine is a phantom: delete the row. A dial the agent cancelled
+  // after the INVITE went out may have rung a real phone, so it keeps an honest `canceled` row
+  // (which the daily cap and the history funnel ignore).
+  abandonCall: (id, cancelled) => (cancelled
+    ? req('PATCH', `/api/calls/${id}`, { status: 'canceled' })
+    : req('POST', `/api/calls/${id}/discard`, {})),
   stats: () => req('GET', `/api/stats?tzOffset=${new Date().getTimezoneOffset()}`),
   calls: (opts = {}) => {
     const params = new URLSearchParams();

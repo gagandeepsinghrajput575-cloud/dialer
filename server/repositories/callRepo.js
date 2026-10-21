@@ -57,23 +57,25 @@ const all = () => db.prepare('SELECT * FROM calls').all();
 
 // `extraWhere` is a trusted, service-built SQL fragment (e.g. "AND dry_run = 0").
 const since = (sinceIso, extraWhere = '') =>
-  db.prepare(`SELECT * FROM calls WHERE started_at >= ? AND status != 'failed' AND status != 'discarded' ${extraWhere}`).all(sinceIso);
+  db.prepare(`SELECT * FROM calls WHERE started_at >= ? AND status NOT IN ('failed', 'discarded', 'canceled') ${extraWhere}`).all(sinceIso);
 
 const countSince = (sinceIso, extraWhere = '') =>
-  db.prepare(`SELECT COUNT(*) c FROM calls WHERE started_at >= ? AND status != 'failed' AND status != 'discarded' ${extraWhere}`).get(sinceIso).c;
+  db.prepare(`SELECT COUNT(*) c FROM calls WHERE started_at >= ? AND status NOT IN ('failed', 'discarded', 'canceled') ${extraWhere}`).get(sinceIso).c;
 
 const recent = (limit = 8, extraWhere = '') =>
   db.prepare(
     `SELECT c.id, c.outcome, c.duration_sec, c.started_at, c.status, c.vm_dropped, c.dial_uri,
             p.id prospect_id, p.name, p.company
      FROM calls c JOIN prospects p ON p.id = c.prospect_id
-     WHERE c.status != 'failed' AND c.status != 'discarded' ${extraWhere} ORDER BY c.id DESC LIMIT ?`
+     WHERE c.status NOT IN ('failed', 'discarded', 'canceled') ${extraWhere} ORDER BY c.id DESC LIMIT ?`
   ).all(limit);
 
 const escapeLike = (s) => String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
 
 function buildHistoryFilters({ search = '', direction = '', filter = '', outcome = '', dryRun = null } = {}) {
-  const wheres = ["c.status != 'discarded'"];
+  // Discarded rows never existed; canceled ones are dials the agent aborted before answer.
+  // Neither is an attempt worth reviewing, and neither may inflate the cap or the funnel.
+  const wheres = ["c.status NOT IN ('discarded', 'canceled')"];
   const params = [];
 
   if (dryRun !== null) {

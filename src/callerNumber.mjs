@@ -69,3 +69,22 @@ export function extractCallerNumber(invitation) {
 
   return (remoteUser && String(remoteUser).trim()) || 'Unknown';
 }
+
+/**
+ * The outbound CLI header.
+ *
+ * Telnyx takes the caller ID from P-Asserted-Identity when the number is provisioned on the
+ * connection, and falls back to the connection's portal `ani_override` otherwise. Sending it
+ * only for a plausible E.164 value keeps a malformed setting (or a header-injection attempt)
+ * off the wire.
+ *
+ * @param {string} callerId e.g. '+4532331610'
+ * @param {string} server   SIP domain, e.g. 'sip.telnyx.com'
+ * @returns {string[]} zero or one `P-Asserted-Identity` header
+ */
+export function callerIdHeaders(callerId, server) {
+  const id = String(callerId || '').trim();
+  if (!id || !server) return [];
+  if (!/^\+?\d{6,15}$/.test(id)) return [];
+  return [`P-Asserted-Identity: <sip:${id}@${server}>`];
+}

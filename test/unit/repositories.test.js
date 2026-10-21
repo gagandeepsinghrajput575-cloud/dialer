@@ -255,7 +255,7 @@ async function run() {
   settings.set('telnyx_sip_password', 'super-secret');
   settings.set('webrtc_ws_url', '');
   settings.set('webrtc_credential_handoff', '0');
-  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.telnyx.com;transport=ws');
+  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.telnyx.com', 'no next-hop transport parameter on a Request-URI');
   assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.telnyx.com', "an empty gateway means Telnyx's own gateway");
   assert.strictEqual(telephony.webrtcSession().provider, 'telnyx');
   const handoffOff = telephony.webrtcSession();

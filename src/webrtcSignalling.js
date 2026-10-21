@@ -23,7 +23,8 @@
 
 import { rejectionDelegate } from './outboundFailure.mjs';
 import { WEBRTC_PEER_CONFIGURATION } from './webrtcConfig.mjs';
-import { extractCallerNumber } from './callerNumber.mjs';
+import { callerIdHeaders, extractCallerNumber } from './callerNumber.mjs';
+import { clearActiveLocalStream, mediaStreamFactory, setActiveLocalStream } from './mediaStream.js';
 
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
 
@@ -60,32 +61,6 @@ export async function loadSipStack() {
 
 export async function sipStackAvailable() {
   return (await loadSipStack()) !== null;
-}
-
-// The microphone the cockpit opened for the call in progress.
-//
-// sip.js resolves the factory from `sessionDescriptionHandlerFactory`, and that accessor on a
-// Session is GETTER-ONLY (sip.js 0.21 `session.js`: `get sessionDescriptionHandlerFactory()`).
-// Assigning to it on an Invitation throws `TypeError: Cannot set property ... which has only a
-// getter`, which is exactly how every answered inbound call used to die before any 200 OK was
-// sent. The supported seam is the UserAgent's configuration factory plus this per-call slot.
-let activeLocalStream = null;
-
-export function setActiveLocalStream(stream) {
-  activeLocalStream = stream || null;
-}
-
-export function clearActiveLocalStream() {
-  activeLocalStream = null;
-}
-
-function mediaStreamFactory(constraints) {
-  if (activeLocalStream && activeLocalStream.getAudioTracks) {
-    const live = activeLocalStream.getAudioTracks().some((track) => track.readyState === 'live');
-    if (live) return Promise.resolve(activeLocalStream);
-  }
-  if (!navigator?.mediaDevices?.getUserMedia) return Promise.reject(new Error('Media devices are unavailable in this context.'));
-  return navigator.mediaDevices.getUserMedia(constraints || { audio: true, video: false });
 }
 
 // Answer an INVITE without ever touching a read-only accessor. Exported so the regression is
@@ -324,7 +299,7 @@ export function standbySession() {
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, onError, localStream } = {}) {
+export async function dialOutbound({ remoteNumber, onState, onActive, onError, onEarlyMedia, callerId, localStream } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
@@ -334,7 +309,9 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, l
   const { UserAgent, Inviter, SessionState } = sip;
 
   const server = self.session.server;
-  const target = UserAgent.makeURI(`sip:${remoteNumber}@${server};transport=ws`);
+  // The proxy's address, nothing else: `transport` is a next-hop parameter and our next hop is
+  // the WebSocket the UA already holds. Some SBC dial plans match the whole Request-URI.
+  const target = UserAgent.makeURI(`sip:${remoteNumber}@${server}`);
   if (!target) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
 
   setActiveLocalStream(localStream);
@@ -349,8 +326,18 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, l
   });
   const inviter = new Inviter(self.ua, target, {
     requestDelegate,
+    // 183 with SDP is played to the agent instead of dropped (see the delegate below). sip.js
+    // requires a non-forking INVITE for this; the carrier's PSTN leg does not fork.
+    earlyMedia: true,
+    extraHeaders: callerIdHeaders(callerId, server),
     sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false }, iceGatheringTimeout: 3000 },
   });
+  // The early description handler is a *different* SDH from the one the session will use only
+  // when the carrier answers a reliable provisional; handing it to the engine plays the
+  // announcement without touching the state machine (no talk timer until 200 OK).
+  inviter.delegate = {
+    onSessionDescriptionHandler: (sdh, provisional) => { if (provisional) onEarlyMedia?.(sdh); },
+  };
 
   const stop = () => {
     if (stopped) return;
@@ -396,12 +383,13 @@ export async function dialOutbound({ remoteNumber, onState, onActive, onError, l
  * @param {string}   opts.remoteNumber E.164 number to dial
  * @param {function} opts.onState      (state) => void   — registering | dialing | ringing | active | ended
  * @param {function} opts.onError      (message) => void
+ * @param {function} [opts.onEarlyMedia] (sdh) => void — 183 audio, before the call is up
  * @param {function} opts.onActive     () => void
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @param {function} [opts.onIncomingCall] INVITE handler, when the engine wants standby calls
  * @returns {Promise<{stop: function}>}
  */
-export async function startSignalling({ session, remoteNumber, onState, onError, onActive, localStream, onIncomingCall } = {}) {
+export async function startSignalling({ session, remoteNumber, callerId, onState, onError, onEarlyMedia, onActive, localStream, onIncomingCall } = {}) {
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
@@ -414,5 +402,5 @@ export async function startSignalling({ session, remoteNumber, onState, onError,
     onState: (s, detail) => { if (s === 'unavailable') onError?.(detail || 'The in-browser softphone is unavailable.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, onError, localStream });
+  return dialOutbound({ remoteNumber, onState, onActive, onError, onEarlyMedia, callerId: callerId || session?.callerId, localStream });
 }

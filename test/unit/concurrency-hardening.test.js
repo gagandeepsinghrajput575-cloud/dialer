@@ -227,9 +227,13 @@ async function run() {
   // getter-only session property — that TypeError is what killed answered calls.)
   {
     const sig = fs.readFileSync(path.join(__dirname, '../../src/webrtcSignalling.js'), 'utf8');
+    // The factory lives in its own module so signalling can stay inside the line ratchet.
+    const media = fs.readFileSync(path.join(__dirname, '../../src/mediaStream.js'), 'utf8');
     assert.ok(/sessionDescriptionHandlerFactory:\s*sip\.defaultSessionDescriptionHandlerFactory\(mediaStreamFactory\)/.test(sig),
       'the media factory is installed on the UserAgent configuration');
-    assert.ok(/function mediaStreamFactory/.test(sig), 'the cockpit microphone is resolved at SDP time');
+    assert.ok(/mediaStreamFactory/.test(sig) && /from '\.\/mediaStream\.js'/.test(sig),
+      'signalling wires the shared factory in');
+    assert.ok(/function mediaStreamFactory/.test(media), 'the cockpit microphone is resolved at SDP time');
     assert.ok(/setActiveLocalStream\(localStream\)/.test(sig), 'the opened stream is handed to the factory before accept');
     assert.ok(!/invitation\.sessionDescriptionHandlerFactory\s*=/.test(sig), 'never assigns to the read-only accessor');
     assert.ok(!/setTimeout\(attach,\s*0\)/.test(sig), 'no bare setTimeout(attach,0) race');

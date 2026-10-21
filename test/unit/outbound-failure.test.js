@@ -201,6 +201,97 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     console.log('  ✓ remote audio prefers the sip.js stream and falls back to audio receivers');
   }
 
+  // ---- caller ID: the header that makes the ledger's CLI true ------------------------------
+  {
+    const { callerIdHeaders } = await importEsm('src/callerNumber.mjs');
+    assert.deepStrictEqual(callerIdHeaders('+4532331610', 'sip.telnyx.com'),
+      ['P-Asserted-Identity: <sip:+4532331610@sip.telnyx.com>']);
+    assert.deepStrictEqual(callerIdHeaders('', 'sip.telnyx.com'), [], 'no caller ID, no header');
+    assert.deepStrictEqual(callerIdHeaders('+4532331610', ''), [], 'no server, no header');
+    assert.deepStrictEqual(callerIdHeaders('+45 32 33 16 10', 'sip.telnyx.com'), [],
+      'a malformed CLI is not put on the wire');
+    assert.deepStrictEqual(callerIdHeaders('+4532331610\r\nX-Injected: 1', 'sip.telnyx.com'), [],
+      'header injection is refused');
+    console.log('  ✓ the caller ID becomes one well-formed P-Asserted-Identity header');
+  }
+
+  // ---- anxiety-free dialing: a blip out, a chime on pickup, silence in between -------------
+  {
+    const { createChime, DIAL_BLIP, CONNECT_CHIME } = await importEsm('src/utils/chime.js');
+    const events = [];
+    class FakeParam {
+      constructor(value) { this.value = value; }
+      setValueAtTime(v) { events.push(['set', v]); }
+      linearRampToValueAtTime(v) { events.push(['ramp', v]); }
+    }
+    class FakeGain {
+      constructor() { this.gain = new FakeParam(1); }
+      connect(node) { events.push(['gain->', node?.kind]); }
+    }
+    class FakeOsc {
+      constructor() { this.frequency = { value: 0 }; this.type = ''; }
+      connect() { events.push(['osc->']); }
+      start(t) { events.push(['start', this.frequency.value, t]); }
+      stop(t) { events.push(['stop', t]); }
+    }
+    class FakeCtx {
+      constructor() { this.state = 'running'; this.currentTime = 1; this.destination = { kind: 'destination' }; this.closed = false; }
+      createOscillator() { return new FakeOsc(); }
+      createGain() { return new FakeGain(); }
+      close() { this.closed = true; this.state = 'closed'; }
+    }
+    const ctx = new FakeCtx();
+    const chime = createChime({ AudioContext: function () { return ctx; } });
+
+    assert.strictEqual(chime.blip(), true);
+    assert.deepStrictEqual(events.filter((e) => e[0] === 'start').map((e) => e[1]), [DIAL_BLIP.frequency],
+      'one blip at dial dispatch');
+    assert.ok(events.filter((e) => e[0] === 'gain->').every((e) => e[1] === 'destination'),
+      'the cue is wired to the local output only');
+    assert.ok(DIAL_BLIP.gain <= 0.06, 'the blip is a cue, not a ringtone');
+
+    events.length = 0;
+    chime.connected();
+    const started = events.filter((e) => e[0] === 'start');
+    assert.deepStrictEqual(started.map((e) => e[1]), [520, 660], 'the pickup cue is 520 → 660 Hz');
+    assert.ok(started[1][2] > started[0][2], 'and it ascends rather than sounding together');
+    assert.ok(Math.max(...events.filter((e) => e[0] === 'ramp').map((e) => e[1])) <= 0.06,
+      'low gain: it must not startle');
+    chime.stop();
+    assert.strictEqual(ctx.closed, true, 'the cue context is closed on teardown');
+
+    const noAudio = createChime({});
+    assert.strictEqual(noAudio.blip(), false, 'no Web Audio: silence, never a crash');
+    assert.doesNotThrow(() => noAudio.connected());
+    console.log('  ✓ dial blip and 520→660 pickup chime are local-only, quiet, and land on the right beats');
+  }
+
+  // ---- early media: carrier audio before the answer, ducked, never "active" ----------------
+  {
+    const { playEarlyMedia, EARLY_MEDIA_VOLUME } = await importEsm('src/outboundPeer.mjs');
+    const stream = { getAudioTracks: () => ['t'] };
+    const element = { volume: 1, srcObject: null, play: () => Promise.resolve() };
+    playEarlyMedia({ sessionDescriptionHandler: { remoteMediaStream: stream }, audioRef: { current: element } });
+    assert.strictEqual(element.srcObject, stream, '183 audio plays through the one audio element');
+    assert.strictEqual(element.volume, EARLY_MEDIA_VOLUME, 'network ringback is ducked, not screamed');
+    assert.ok(EARLY_MEDIA_VOLUME > 0.3 && EARLY_MEDIA_VOLUME < 1, 'still loud enough for an announcement');
+
+    const signalling = code(read('src/webrtcSignalling.js'));
+    const dialStart = signalling.indexOf('export async function dialOutbound');
+    const dial = signalling.slice(dialStart, signalling.indexOf('export async function startSignalling'));
+    assert.ok(/earlyMedia: true/.test(dial), 'sip.js is told to keep the 183 body');
+    assert.ok(/onSessionDescriptionHandler/.test(dial), 'the provisional SDH is handed to the engine');
+    assert.ok(/callerIdHeaders\(callerId, server\)/.test(dial), 'the CLI header is attached');
+    assert.ok(!/transport=ws/.test(signalling), 'the Request-URI carries no next-hop transport');
+
+    const hook = code(read('src/useWebRtc.js'));
+    assert.ok(/playEarlyMedia/.test(hook), 'the hook plays early media');
+    assert.ok(/chime\.blip\(\)/.test(hook) && /chime\.connected\(\)/.test(hook),
+      'a blip on dispatch, a chime on pickup');
+    assert.ok(/volume = 1/.test(hook), 'the duck is undone when the call is established');
+    console.log('  ✓ 183 audio is played softly, the CLI is sent, and the Request-URI stays canonical');
+  }
+
   // ---- SDP policy: accept a non-muxed answer instead of failing the call -------------------
   {
     const { WEBRTC_PEER_CONFIGURATION } = await importEsm('src/webrtcConfig.mjs');
@@ -248,9 +339,23 @@ const importEsm = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
     assert.ok(/onEnded\?\.\(dir, reason\)/.test(hook), 'the engine hands the failure reason to the cockpit');
 
     const cockpit = code(read('src/pages/Dialer.jsx'));
+    const ledger = code(read('src/outboundLedger.mjs'));
+    assert.ok(/recordUnconnected\(api, callId, dir, reason\)/.test(cockpit),
+      'a dial that never connected is recorded, not silently dropped');
+    assert.ok(/status: 'failed'/.test(ledger) && /status: 'canceled'/.test(ledger),
+      'and it is recorded as failed or canceled, never as a conversation');
+    assert.ok(/api\.abandonCall\(r\.callId, res\.cancelled\)/.test(cockpit),
+      'a cancelled attempt keeps its row; only a phantom is discarded');
     const hangUpStart = cockpit.indexOf('const hangUp = useCallback');
     const hangUpBody = cockpit.slice(hangUpStart, cockpit.indexOf('\n  }, [', hangUpStart));
     assert.ok(/'dialing'/.test(hangUpBody), 'the agent can hang up while the call is still dialing');
+    assert.ok(!/!callId \|\| !active\) return;\n\s*\/\/ In-browser/.test(hangUpBody),
+      'the engine is reached without waiting for a loaded prospect');
+    assert.ok(hangUpBody.indexOf('isWebrtcRef') < hangUpBody.indexOf('!callId'),
+      'cancelling is handed to the engine before the classification-only gate');
+    const hangUpHook = hook.slice(hook.indexOf('const hangUp = useCallback'));
+    assert.ok(/isRestingState\(stateRef\.current\)/.test(hangUpHook.slice(0, 400)),
+      'a resting state is not torn down twice');
     const endedStart = cockpit.indexOf('const engineEnded = useCallback');
     const endedBody = cockpit.slice(endedStart, cockpit.indexOf('\n  }, [', endedStart));
     assert.ok(/webrtcLiveRef\.current/.test(endedBody) && /phase/i.test(endedBody),

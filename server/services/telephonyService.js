@@ -106,12 +106,12 @@ function webrtcWsUrl() {
   return explicit || TELNYX_WEBRTC_WS;
 }
 
-// What the browser addresses the call to. transport=ws tells the far end this leg arrives
-// over the WebSocket gateway rather than a UDP/TCP trunk.
+// What the browser addresses the call to. No `;transport=ws`: that parameter describes the next
+// hop, which is the WebSocket the UA already holds, and SBC dial plans match the Request-URI.
 function buildWebRtcUri(phone) {
   const server = webrtcServer();
   const clean = String(phone || '').trim();
-  return server ? `sip:${clean}@${server};transport=ws` : `sip:${clean};transport=ws`;
+  return server ? `sip:${clean}@${server}` : `sip:${clean}`;
 }
 
 // Is the browser softphone in a state where pressing C could actually connect?

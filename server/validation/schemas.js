@@ -94,9 +94,11 @@ const callMissed = z.object({
 
 const callPatch = z.object({
   outcome: z.enum(OUTCOMES).optional(),
-  // Ledger lifecycle for calls answered outside the browser tab (native shell, Linphone).
-  // Terminal states stay with the dedicated /missed and /discard routes.
-  status: z.enum(['connected', 'completed']).optional(),
+  // Ledger lifecycle for calls answered outside the browser tab (native shell, Linphone), and
+  // for outbound attempts that never connected: a carrier rejection is `failed`, an agent
+  // cancel is `canceled`. Both are terminal and neither counts as a conversation.
+  status: z.enum(['connected', 'completed', 'failed', 'canceled']).optional(),
+  error: z.string().max(500).optional(),
   duration_sec: seconds.optional(),
   vm_dropped: boolish.optional(),
   follow_up_at: nullableDatetime().optional(),

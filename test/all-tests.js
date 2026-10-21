@@ -420,19 +420,19 @@ async function run() {
   assert.strictEqual(webCall.json.telephonyMode, 'webrtc');
   assert.strictEqual(webCall.json.inBrowser, true, 'the client is told to open an in-browser session');
   assert.strictEqual(webCall.json.protocol, 'webrtc');
-  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws',
+  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.telnyx.com',
     `webrtc dial URI (got ${webCall.json.dialUri})`);
   assert.ok(!/^tel:/.test(webCall.json.dialUri), 'a webrtc dial never degrades to a tel: URI');
   assert.strictEqual(webCall.json.callerId, '+4520123456', 'caller-ID rotation still applies in webrtc mode');
   assert.strictEqual((await req('GET', `/api/prospects/${webrtcProspect.json.id}`)).json.calls[0].dial_uri,
-    'sip:+4520334455@sip.telnyx.com;transport=ws', 'the gateway URI is what lands in call history');
+    'sip:+4520334455@sip.telnyx.com', 'the gateway URI is what lands in call history');
   await req('DELETE', `/api/prospects/${webrtcProspect.json.id}`);
 
   // The test-launch endpoint used to answer "configured: true" for webrtc unconditionally.
   const wt = await req('POST', '/api/settings/test-softphone', { number: SAMPLE });
   assert.strictEqual(wt.json.inBrowser, true);
   assert.strictEqual(wt.json.protocol, 'webrtc');
-  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.telnyx.com;transport=ws`, 'the test launch shows the gateway URI');
+  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.telnyx.com`, 'the test launch shows the gateway URI');
   assert.strictEqual(wt.json.configured, false, 'webrtc readiness is not claimed while the handoff is off');
   assert.match(wt.json.message, /handoff|Settings/i);
 

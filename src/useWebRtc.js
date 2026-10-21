@@ -32,7 +32,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
 import { createRinger } from './utils/ringer.js';
-import { attachRemoteAudio, watchIceConnection } from './outboundPeer.mjs';
+import { createChime } from './utils/chime.js';
+import { attachRemoteAudio, playEarlyMedia, watchIceConnection } from './outboundPeer.mjs';
 import { isRestingState } from './outboundFailure.mjs';
 
 export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
@@ -129,6 +130,7 @@ export default function useWebRtc({
   const cancelWaitRef = useRef(null);     // resolves a dial that is still registering
   const rejectReasonRef = useRef('');     // what the carrier said, for the disposition toast
   const iceWatchRef = useRef(null);       // unsubscribe for the SIP peer's ICE listener
+  const chime = useMemo(() => createChime(), []);   // local-only cues: dial blip + pickup
 
   callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
@@ -265,7 +267,8 @@ export default function useWebRtc({
     } catch { /* nothing to stop */ }
     streamRef.current = null;
 
-    try { if (audioRef.current) audioRef.current.srcObject = null; } catch { /* ignore */ }
+    try { chime.stop(); } catch { /* already closed */ }
+    try { if (audioRef.current) { audioRef.current.volume = 1; audioRef.current.srcObject = null; } } catch { /* ignore */ }
     try { if (ctxRef.current && ctxRef.current.state !== 'closed') ctxRef.current.close(); } catch { /* ignore */ }
     ctxRef.current = null;
     analyserRef.current = null;
@@ -282,7 +285,7 @@ export default function useWebRtc({
     setLevel(0);
     setMuted(false);
     mutedRef.current = false;
-  }, [releaseInboundLock, stopRecording, stopRinger]);
+  }, [chime, releaseInboundLock, stopRecording, stopRinger]);
 
   // Release the microphone if the component unmounts mid-call.
   useEffect(() => {
@@ -448,13 +451,10 @@ export default function useWebRtc({
       matched: false,
       provisional: false,
       callId: null,
-      // The CRM half (prospect, call id) is filled in by the softphone provider as soon as the
-      // server answers; the media half lives here from the first ring.
-      //
-      // It mutates in place on purpose. The SIP state-change handler closes over this exact
-      // object to tell "my ring ended" from "some other ring ended"; replacing the object with
-      // a copy would break that comparison, and a far-end CANCEL would leave the phone ringing
-      // forever. React gets a fresh object for its own equality check.
+      // The CRM half (prospect, call id) is filled in once the server answers; the media half
+      // lives here from the first ring. It mutates in place on purpose: the SIP state-change
+      // handler closes over this exact object to tell "my ring ended" from "some other ring
+      // ended", and a copy would break that comparison, leaving the phone ringing forever.
       attachCrm: (patch) => {
         const current = incomingRef.current;
         if (!current) return;
@@ -726,7 +726,7 @@ export default function useWebRtc({
     };
   }, [enabled]);
 
-  const start = useCallback(async (phone, { dryRun: callDryRun = false, callId = null } = {}) => {
+  const start = useCallback(async (phone, { dryRun: callDryRun = false, callId = null, callerId: dialCallerId = '' } = {}) => {
     if (!enabled) return { ok: false, reason: 'not-webrtc' };
     const origin = stateRef.current;
     // 'standby' is a resting state, not a call: an outbound dial from standby reuses the
@@ -799,10 +799,9 @@ export default function useWebRtc({
       return { ok: false, reason };
     }
 
-    // Signalling is the one piece that needs the provider's SIP-over-WebSocket gateway. It is
-    // deliberately isolated behind this boundary: swap the adapter and the engine is unchanged.
-    // The peer that negotiates with the carrier belongs to sip.js. Watch that one: a peer we
-    // create ourselves never receives a remote description, so its ICE never leaves `new`.
+    // Signalling needs the provider's SIP-over-WebSocket gateway; it hides behind this boundary
+    // so the adapter can be swapped. The peer that negotiates belongs to sip.js — watch that one:
+    // a peer we create ourselves never gets a remote description, so its ICE never leaves `new`.
     const watchCallMedia = (pc) => {
       if (!pc) return;
       pcRef.current = pc;
@@ -815,10 +814,13 @@ export default function useWebRtc({
     const cancelled = new Promise((resolve) => { signalCancel = resolve; });
     cancelWaitRef.current = signalCancel;
     try {
+      chime.blip();   // "it left the building" — then silence while the carrier rings
       const { startSignalling } = await import('./webrtcSignalling.js');
       const pending = startSignalling({
         session,
         remoteNumber: phone,
+        // The CLI this dial was logged with: a second rotation draw would send a different number.
+        callerId: dialCallerId || session?.callerId,
         localStream: streamRef.current,
         onState: (s) => {
           if (s === 'ended') {
@@ -833,8 +835,12 @@ export default function useWebRtc({
         },
         // Recorded, not fatal-yet: `Terminated` follows and its teardown hands this to the UI.
         onError: (msg) => { rejectReasonRef.current = msg; setError(msg); },
+        // 183 with SDP: play what the carrier sent, ducked. `active` still needs Established.
+        onEarlyMedia: (sdh) => { if (!cancelRef.current) playEarlyMedia({ sessionDescriptionHandler: sdh, audioRef }); },
         onActive: () => {
           if (cancelRef.current) return;
+          if (audioRef.current) audioRef.current.volume = 1;   // full volume for the conversation
+          chime.connected();                                   // 520 → 660 Hz heads-up
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
@@ -864,14 +870,15 @@ export default function useWebRtc({
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, finishActiveCall, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
+  }, [chime, enabled, finishActiveCall, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
-    const current = stateRef.current;
-    if (current === 'idle' || current === 'standby') return;
+    // Anything resting has nothing on the wire: re-running the teardown would report the end a
+    // second time and reopen a disposition the agent already closed.
+    if (isRestingState(stateRef.current)) return;
     const wasInbound = inboundActiveRef.current;
     // Nothing to cancel on the SIP side yet: start() stops the session when it appears.
-    if (!wasInbound && !sipRef.current && !isRestingState(current)) cancelRef.current = true;
+    if (!wasInbound && !sipRef.current) cancelRef.current = true;
     cancelWaitRef.current?.();
     finishActiveCall(wasInbound ? 'inbound' : 'outbound');
   }, [finishActiveCall]);

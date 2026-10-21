@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const calls = require('../repositories/callRepo');
+const { buildClassifyFields } = require('./callFields');
 const prospects = require('../repositories/prospectRepo');
 const notes = require('../repositories/noteRepo');
 const settings = require('../repositories/settingsRepo');
@@ -315,16 +316,7 @@ function classify(callId, input = {}) {
   const outcome = input.outcome || null;
   if (outcome && !OUTCOMES.includes(outcome)) throw ApiError.badRequest('Bad outcome');
 
-  const fields = { ended_at: sqlNow() };
-  if (outcome) fields.outcome = outcome;
-  // 'connected' arrives mid-call (no ended_at); classification closes ringing -> connected -> completed.
-  if (input.status === 'connected') { fields.status = 'connected'; delete fields.ended_at; }
-  else if (input.status === 'completed' || (call.direction === 'inbound' && call.status === 'connected')) fields.status = 'completed';
-  if (Number.isFinite(input.duration_sec)) fields.duration_sec = Math.round(input.duration_sec);
-  if (input.vm_dropped !== undefined) fields.vm_dropped = input.vm_dropped ? 1 : 0;
-  if (input.summary !== undefined) fields.summary = String(input.summary || '').slice(0, 4000);
-  if (input.next_step !== undefined) fields.next_step = String(input.next_step || '').slice(0, 1000);
-  if (input.follow_up_at !== undefined) fields.follow_up_at = input.follow_up_at || null;
+  const fields = buildClassifyFields(call, input, sqlNow());
 
   return db.transaction(() => {
     const updated = calls.patch(callId, fields);

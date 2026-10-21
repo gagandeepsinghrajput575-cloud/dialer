@@ -475,8 +475,8 @@ async function run() {
     const earlyClass = wApp.window.document.querySelector('.callbar')?.className || '';
     check(!/active/.test(earlyClass) && !wApp.window.document.querySelector('.webrtc-badge'),
       'the call bar stays out of "active" until the audio path is real');
-    check(/transport=ws/.test(wApp.window.document.querySelector('.inflight-uri')?.textContent || ''),
-      `the dial URI is a SIP-over-WebSocket route (${(wApp.window.document.querySelector('.inflight-uri')?.textContent || '').slice(0, 46)})`);
+    check(/^sip:\+\d+@sip\.telnyx\.com$/.test((wApp.window.document.querySelector('.inflight-uri')?.textContent || '').trim()),
+      `the dial URI is a canonical SIP route (${(wApp.window.document.querySelector('.inflight-uri')?.textContent || '').slice(0, 46)})`);
     check(!wApp.window.document.querySelector('.softphone-link'),
       'the "launch your softphone" affordance is gone in this mode');
 

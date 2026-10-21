@@ -184,7 +184,7 @@ export default function SettingsPage() {
   const wsGateway = f.webrtc_ws_url || 'wss://rtc.telnyx.com';
   // The two modes hand out completely different URIs, so the sample must not lie about which
   // one Pulse will actually dial.
-  const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer};transport=ws` : `${proto}:+${cc}20123456`;
+  const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer}` : `${proto}:+${cc}20123456`;
   const softphone = softphoneLabel(f.telephony_mode);
 
   const save = async () => {

@@ -32,6 +32,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
 import { createRinger } from './utils/ringer.js';
+import { attachRemoteAudio, createOutboundPeer } from './outboundPeer.mjs';
+import { isRestingState } from './outboundFailure.mjs';
 
 export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
 
@@ -123,6 +125,9 @@ export default function useWebRtc({
   const answerInboundRef = useRef(null);
   const declineInboundRef = useRef(null);
   const glareMutexRef = useRef(false); // glare window: outbound invite in-flight vs inbound INVITE
+  const cancelRef = useRef(false);        // the agent hung up before the INVITE existed
+  const cancelWaitRef = useRef(null);     // resolves a dial that is still registering
+  const rejectReasonRef = useRef('');     // what the carrier said, for the disposition toast
 
   callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
@@ -374,7 +379,7 @@ export default function useWebRtc({
   }, [micDevice, startLevelMeter]);
 
   // ---- inbound ---------------------------------------------------------------------------
-  const finishActiveCall = useCallback((dir) => {
+  const finishActiveCall = useCallback((dir, reason = '') => {
     // Declared before hangUp uses it: closes the media and reports the end exactly once.
     if (dir === 'inbound') { inboundActiveRef.current = false; answeredInboundRef.current = null; }
     try { sipRef.current?.stop?.(); } catch { /* already gone */ }
@@ -382,7 +387,7 @@ export default function useWebRtc({
     releaseMedia();
     setStateSafe('ended');
     setDirection(null);
-    callbacksRef.current.onEnded?.(dir);
+    callbacksRef.current.onEnded?.(dir, reason);
     setTimeout(() => {
       if (stateRef.current === 'ended') setStateSafe(enabledRef.current ? 'standby' : 'idle');
     }, 400);
@@ -732,6 +737,8 @@ export default function useWebRtc({
     setTimeout(() => { glareMutexRef.current = false; }, 1200);
 
     setError('');
+    rejectReasonRef.current = '';
+    cancelRef.current = false;
     setDtmfLog([]);
     setTarget(phone);
     setDirection('outbound');
@@ -793,52 +800,49 @@ export default function useWebRtc({
     // A peer connection is created and the microphone attached even before signalling
     // succeeds, so the session is ready the moment an offer comes back.
     try {
-      const PC = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
-      if (PC) {
-        // Telnyx's STUN first; a public fallback second, so a network that blocks the
-        // carrier's STUN still gathers a candidate set instead of failing to connect.
-        const pc = new PC({
-          iceServers: [
-            { urls: 'stun:stun.telnyx.com:3478' },
-            { urls: 'stun:stun.l.google.com:19302' },
-          ],
-        });
-        for (const track of stream.getTracks()) pc.addTrack(track, stream);
-        pc.ontrack = (ev) => {
-          const [remote] = ev.streams || [];
-          if (audioRef.current && remote) {
-            audioRef.current.srcObject = remote;
-            audioRef.current.play?.().catch(() => {});
-          }
-        };
-        pc.oniceconnectionstatechange = () => {
-          const s = pc.iceConnectionState;
-          if (s === 'connected' || s === 'completed') {
-            if (stateRef.current !== 'active') {
-              setStateSafe('active');
-              callbacksRef.current.onActive?.('outbound');
-              if (recordingCallIdRef.current) startRecording(recordingCallIdRef.current);
-            }
-          } else if (s === 'failed' || s === 'disconnected') {
-            setError('The audio connection dropped.');
-            setStateSafe('error');
-          }
-        };
-        pcRef.current = pc;
-      }
+      // Media policy (STUN, audio sink, ICE grace window) lives in outboundPeer.mjs.
+      const peer = createOutboundPeer({
+        RTCPeerConnection: typeof window !== 'undefined' ? window.RTCPeerConnection : null,
+        stream,
+        audioRef,
+        onLive: () => {
+          if (cancelRef.current || stateRef.current === 'active') return;
+          setStateSafe('active');
+          callbacksRef.current.onActive?.('outbound');
+          if (recordingCallIdRef.current) startRecording(recordingCallIdRef.current);
+        },
+        // Audio is gone for good: tear the call down so the agent can classify it.
+        onFatal: (msg) => { setError(msg); setStateSafe('error'); finishActiveCall('outbound', msg); },
+      });
+      if (peer) pcRef.current = peer.pc;
     } catch { /* the media element still plays the local stream back */ }
 
     // Signalling is the one piece that needs the provider's SIP-over-WebSocket gateway. It is
     // deliberately isolated behind this boundary: swap the adapter and the engine is unchanged.
+    let signalCancel;
+    const cancelled = new Promise((resolve) => { signalCancel = resolve; });
+    cancelWaitRef.current = signalCancel;
     try {
       const { startSignalling } = await import('./webrtcSignalling.js');
-      sipRef.current = await startSignalling({
+      const pending = startSignalling({
         session,
         remoteNumber: phone,
         localStream: streamRef.current,
-        onState: setStateSafe,
-        onError: (msg) => { setError(msg); setStateSafe('error'); },
+        onState: (s) => {
+          if (s === 'ended') {
+            // `Terminated` is how a rejection arrives too (486/404/503). Without this the mic
+            // stayed open and the cockpit sat forever on a call that no longer existed.
+            if (isRestingState(stateRef.current)) setStateSafe('ended');
+            else finishActiveCall('outbound', rejectReasonRef.current);
+            return;
+          }
+          if (s === 'active' && cancelRef.current) return;   // cancelled while the INVITE flew
+          setStateSafe(s);
+        },
+        // Recorded, not fatal-yet: `Terminated` follows and its teardown hands this to the UI.
+        onError: (msg) => { rejectReasonRef.current = msg; setError(msg); },
         onActive: () => {
+          if (cancelRef.current) return;
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
@@ -846,20 +850,7 @@ export default function useWebRtc({
               try { pcRef.current?.close?.(); } catch {}
               pcRef.current = sipPc;
             }
-            const playRemote = (remStream) => {
-              if (!audioRef.current || !remStream) return;
-              audioRef.current.srcObject = remStream;
-              audioRef.current.play?.().catch(() => {});
-            };
-            if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
-              playRemote(sdh.remoteMediaStream);
-            } else if (sipPc) {
-              const remStream = new MediaStream();
-              for (const r of (sipPc.getReceivers ? sipPc.getReceivers() : [])) {
-                if (r.track && r.track.kind === 'audio') remStream.addTrack(r.track);
-              }
-              if (remStream.getAudioTracks().length > 0) playRemote(remStream);
-            }
+            attachRemoteAudio({ sessionDescriptionHandler: sdh, sipPc, audioRef });
           } catch {}
           callbacksRef.current.onActive?.('outbound');
           if (recordingCallIdRef.current && !recorderRef.current) {
@@ -868,6 +859,12 @@ export default function useWebRtc({
         },
         onIncomingCall: (payload) => incomingHandlerRef.current?.(payload),
       });
+      // A hang-up during registration must not wait for a handshake that may retry forever,
+      // and the session it eventually produces must be cancelled rather than left ringing.
+      pending.then((h) => { if (cancelRef.current) { try { h?.stop?.(); } catch { /* gone */ } } }).catch(() => {});
+      const handle = await Promise.race([pending, cancelled]);
+      if (cancelRef.current) return { ok: false, reason: 'cancelled', cancelled: true };
+      sipRef.current = handle;
       return { ok: true, simulated: false };
     } catch (e) {
       releaseMedia();
@@ -876,12 +873,15 @@ export default function useWebRtc({
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
+  }, [enabled, finishActiveCall, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;
     if (current === 'idle' || current === 'standby') return;
     const wasInbound = inboundActiveRef.current;
+    // Nothing to cancel on the SIP side yet: start() stops the session when it appears.
+    if (!wasInbound && !sipRef.current && !isRestingState(current)) cancelRef.current = true;
+    cancelWaitRef.current?.();
     finishActiveCall(wasInbound ? 'inbound' : 'outbound');
   }, [finishActiveCall]);
 

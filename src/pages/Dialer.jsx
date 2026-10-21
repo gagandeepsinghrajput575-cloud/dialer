@@ -545,6 +545,8 @@ export default function Dialer() {
   const logLockRef = useRef(false);
   const setPhaseSafe = useCallback((next) => { phaseRef.current = next; setPhase(next); }, []);
   const setClassifySafe = useCallback((next) => { classifyRef.current = next; setClassifyModal(next); }, []);
+  // Every way out of a call (hang-up, far-end BYE, failed dial) resets the same three things.
+  const resetCallUi = useCallback(() => { setPhaseSafe('idle'); setLaunched(false); setDtmfOpen(false); }, [setPhaseSafe]);
   const timersRef = useRef(new Set());
   // setTimeout that is always cleaned up, so nothing fires after the dialer unmounts.
   const later = useCallback((fn, ms) => {
@@ -590,12 +592,16 @@ export default function Dialer() {
     setPhaseSafe('active');
     refreshStats();
   }, [setPhaseSafe, refreshStats]);
-  // Fires when the engine ends the session. The mic is already cold by then (the engine
-  // releases it before reporting), so classification opens on a call that is truly over.
-  const engineEnded = useCallback(() => {
+  // Fires when the engine ends the session; the mic is already cold, so classification is honest.
+  const engineEnded = useCallback((dir, reason) => {
+    const wasLive = webrtcLiveRef.current;
     webrtcLiveRef.current = false;
-    if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
-  }, []);
+    if (phaseRef.current === 'idle') return;
+    if (wasLive) return webrtcFinishRef.current?.();
+    // Never connected: no talk time, no disposition. Say why (busy, no route, wrong number).
+    resetCallUi();
+    if (reason) toast(reason, 'error');
+  }, [resetCallUi, toast]);
   const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
     // SoftphoneProvider already uploads when recCallId is attached to the engine.
     if (recCallId) return;
@@ -810,7 +816,7 @@ export default function Dialer() {
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');
-          return toast(res.reason || 'The in-browser call could not start.', 'error');
+          return res.cancelled ? toast('Call cancelled.') : toast(res.reason || 'The in-browser call could not start.', 'error');
         }
         if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
         else toast(`In-browser softphone dialing ${r.phone}…`);
@@ -856,9 +862,7 @@ export default function Dialer() {
   const openClassification = useCallback(() => {
     if (!callId || !active) return;
     const dur = secRef.current;
-    setPhaseSafe('idle');
-    setLaunched(false);
-    setDtmfOpen(false);   // the touch-tone pad must not float over the classification dialog
+    resetCallUi();   // the touch-tone pad must not float over the classification dialog
     setTargetStage(active.stage || 'contacted');
     setCustomNote(quickNoteRef.current.trim());
     setClassifySafe({
@@ -886,9 +890,7 @@ export default function Dialer() {
   useEffect(() => {
     if (!inboundEnded) return;
     setInboundEnded(null);
-    setPhaseSafe('idle');
-    setLaunched(false);
-    setDtmfOpen(false);
+    resetCallUi();
     if (!inboundEnded.callId || !inboundEnded.prospect) return;
     setTargetStage(inboundEnded.prospect.stage || 'contacted');
     setCustomNote(quickNoteRef.current.trim());
@@ -901,14 +903,12 @@ export default function Dialer() {
 
   // When clicking hang up button, open the classification modal
   const hangUp = useCallback(() => {
-    if (phaseRef.current !== 'active' || !callId || !active) return;
-    // In-browser: hanging up means releasing the microphone, and the engine reports back the
-    // moment it has done that — so classification happens with the mic already cold.
-    if (isWebrtcRef.current) {
-      webrtcRef.current?.hangUp();
-      return;
-    }
-    openClassification();
+    const p = phaseRef.current;
+    // 'dialing' is cancellable too; before this, a stuck outbound call could only be cleared by a reload.
+    if ((p !== 'active' && p !== 'dialing') || !callId || !active) return;
+    // In-browser: the engine owns the mic and the INVITE, and reports back once both are down.
+    if (isWebrtcRef.current) return void webrtcRef.current?.hangUp();
+    if (p === 'active') openClassification();
   }, [callId, active, openClassification]);
 
   // Inline edits in the hero banner. The server normalizes anyway, but a rejection that only
@@ -1107,7 +1107,7 @@ export default function Dialer() {
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');
-          return toast(res.reason || 'The in-browser call could not start.', 'error');
+          return res.cancelled ? toast('Call cancelled.') : toast(res.reason || 'The in-browser call could not start.', 'error');
         }
         if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
         else toast(`In-browser softphone dialing ${r.phone}…`);
@@ -1223,8 +1223,8 @@ export default function Dialer() {
       if (k === 'c') {
         e.preventDefault();
         if (phaseRef.current === 'idle') startCall();
-        else if (phaseRef.current === 'active') hangUp();
-      } else if (k === 'h' && phaseRef.current === 'active') {
+        else hangUp();
+      } else if (k === 'h' && (phaseRef.current === 'active' || phaseRef.current === 'dialing')) {
         e.preventDefault();
         hangUp();
       } else if (k === 'ArrowRight') {
@@ -1674,9 +1674,9 @@ export default function Dialer() {
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.94 }}
                         className={`call-btn ${phase === 'active' ? 'hangup-active' : phase}`}
-                        onClick={phase === 'active' ? hangUp : (inbound && !inbound.answered ? () => webrtc.answerInbound?.() : startCall)}
-                        disabled={(phase === 'dialing') || active.dnc || !active.phone}
-                        title={phase === 'active' ? "Hang up & Classify (H or C)" : active.phone ? "Call (C)" : "Add phone number to dial"}
+                        onClick={phase === 'active' || (isWebrtc && phase === 'dialing') ? hangUp : (inbound && !inbound.answered ? () => webrtc.answerInbound?.() : startCall)}
+                        disabled={(phase === 'dialing' && !isWebrtc) || active.dnc || !active.phone}
+                        title={phase === 'active' ? "Hang up & Classify (H or C)" : isWebrtc && phase === 'dialing' ? 'Cancel this call (H or C)' : active.phone ? "Call (C)" : "Add phone number to dial"}
                       >
                         {phase === 'dialing' ? (
                           <Loader2 size={26} className="spin" />

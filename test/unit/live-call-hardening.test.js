@@ -224,7 +224,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       'src/useWebRtc.js': 971,
       'src/pages/Settings.jsx': 852,
       'src/pages/Recents.jsx': 509,
-      'src/webrtcSignalling.js': 481,
+      'src/webrtcSignalling.js': 427,
       'server/services/emailService.js': 481,
       'server/services/telephonyService.js': 480,
       'server/services/callService.js': 424,

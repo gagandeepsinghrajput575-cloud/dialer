@@ -21,6 +21,9 @@
 // can prove the far end answers. If the stack cannot be loaded at all, this throws a message
 // the agent can act on instead of letting the cockpit pretend a call is up.
 
+import { rejectionDelegate } from './outboundFailure.mjs';
+import { extractCallerNumber } from './callerNumber.mjs';
+
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
 
 // Ask for a short registration and refresh it well before it lapses. A stale registration is
@@ -117,71 +120,6 @@ function sessionKey(session) {
 // A live registration, if this tab has one. Module scope on purpose: an inbound INVITE and an
 // outbound dial must reach the same UserAgent, or the tab rings on a session it cannot answer.
 let standby = null;
-
-export function extractCallerNumber(invitation) {
-  if (!invitation) return 'Unknown';
-
-  const parseSipUriUser = (rawVal) => {
-    if (!rawVal) return '';
-    const str = String(rawVal);
-    const m = str.match(/sip(?:s)?:([^@>;]+)/i);
-    if (m && m[1]) {
-      const u = m[1].trim();
-      if (u && !['anonymous', 'unknown'].includes(u.toLowerCase())) return u;
-    }
-    return '';
-  };
-
-  const getHdr = (name) => {
-    try {
-      if (typeof invitation.request?.getHeader === 'function') {
-        const v = invitation.request.getHeader(name);
-        if (v) return v;
-      }
-      if (typeof invitation.incomingInviteRequest?.message?.getHeader === 'function') {
-        const v = invitation.incomingInviteRequest.message.getHeader(name);
-        if (v) return v;
-      }
-    } catch { /* ignore */ }
-    return null;
-  };
-
-  // 1. Asserted Identity (P-Asserted-Identity parsed by sip.js)
-  const assertedUser = invitation.assertedIdentity?.uri?.user;
-  if (assertedUser && !['anonymous', 'unknown'].includes(String(assertedUser).toLowerCase())) {
-    return String(assertedUser).trim();
-  }
-
-  // 2. Explicit P-Asserted-Identity / Remote-Party-ID / Diversion headers
-  for (const h of ['P-Asserted-Identity', 'Remote-Party-ID', 'Diversion']) {
-    const raw = getHdr(h);
-    const parsed = parseSipUriUser(raw);
-    if (parsed) return parsed;
-  }
-
-  // 3. Remote Identity URI user (From user parsed by sip.js)
-  const remoteUser = invitation.remoteIdentity?.uri?.user;
-  if (remoteUser && !['anonymous', 'unknown'].includes(String(remoteUser).toLowerCase())) {
-    return String(remoteUser).trim();
-  }
-
-  // 4. Raw From header
-  const rawFrom = getHdr('From');
-  const fromUser = parseSipUriUser(rawFrom);
-  if (fromUser) return fromUser;
-
-  // 5. Display names if they contain digits or useful identity
-  const remoteDisplay = invitation.remoteIdentity?.displayName;
-  if (remoteDisplay && remoteDisplay.trim() && !['anonymous', 'unknown'].includes(remoteDisplay.toLowerCase())) {
-    return remoteDisplay.trim();
-  }
-  const assertedDisplay = invitation.assertedIdentity?.displayName;
-  if (assertedDisplay && assertedDisplay.trim() && !['anonymous', 'unknown'].includes(assertedDisplay.toLowerCase())) {
-    return assertedDisplay.trim();
-  }
-
-  return (remoteUser && String(remoteUser).trim()) || 'Unknown';
-}
 
 /**
  * Bind the INVITE handler. Everything the engine needs to decide about the call is distilled
@@ -395,7 +333,7 @@ export function standbySession() {
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, localStream } = {}) {
+export async function dialOutbound({ remoteNumber, onState, onActive, onError, localStream } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
@@ -409,11 +347,20 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   if (!target) throw new Error(`"${remoteNumber}" is not a usable SIP destination.`);
 
   setActiveLocalStream(localStream);
+  let stopped = false;
+  // sip.js reports a rejection only as `Terminated`, indistinguishable from our own hang-up:
+  // the status code (486 busy, 404 unknown, 503 no route) is handed to Inviter's private
+  // handler and dropped. Reading it here is the only way the agent can be told why.
+  const requestDelegate = rejectionDelegate({
+    remoteNumber,
+    onRinging: () => onState?.('ringing'),
+    onReject: (message) => onError?.(message),
+  });
   const inviter = new Inviter(self.ua, target, {
+    requestDelegate,
     sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false }, iceGatheringTimeout: 3000 },
   });
 
-  let stopped = false;
   const stop = () => {
     if (stopped) return;
     stopped = true;
@@ -426,7 +373,9 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
 
   inviter.stateChange.addListener((s) => {
     const name = String(s);
-    if (name === SessionState.Establishing || name === 'Establishing') onState?.('ringing');
+    // `Establishing` fires when the INVITE leaves the browser, before the carrier has said
+    // anything. Ringing is only claimed once a 180/183 actually arrives (see the delegate).
+    if (name === SessionState.Establishing || name === 'Establishing') onState?.('dialing');
     else if (name === SessionState.Established || name === 'Established') { onState?.('active'); onActive?.(); }
     else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) onState?.('ended');
   });
@@ -435,15 +384,10 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   try {
     await inviter.invite();
   } catch (e) {
+    // Local failures only (no SDP, no media, a dead socket): carrier rejections arrive later
+    // through the delegate above, because `invite()` resolves once the request is *sent*.
     stop();
-    // Rejections here are the useful ones: 401/403 means credentials, 404 means the number.
-    const msg = String(e?.message || e);
-    if (/491/.test(msg)) throw new Error('Glare: another call is being set up — try again in 2 seconds.');
-    throw new Error(/401|403/.test(msg)
-      ? 'The provider rejected the SIP credentials — check the username and password.'
-      : /404/.test(msg)
-        ? `The provider does not recognise ${remoteNumber}.`
-        : `The call could not be placed — ${msg}`);
+    throw new Error(`The call could not be placed — ${e?.message || e}`);
   }
 
   return { stop, inviter, userAgent: self.ua, registerer: self.registerer, reusedRegistration: true };
@@ -474,8 +418,10 @@ export async function startSignalling({ session, remoteNumber, onState, onError,
   await initStandbySession({
     session,
     onIncomingCall: onIncomingCall || (() => {}),
-    onState: (s, detail) => { if (s !== 'ready') onError?.(detail || 'The in-browser softphone lost its registration.'); },
+    // `registering` and `retrying` are the registration healing itself; surfacing them as
+    // errors painted a failure over a call that then dialled perfectly well.
+    onState: (s, detail) => { if (s === 'unavailable') onError?.(detail || 'The in-browser softphone is unavailable.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, localStream });
+  return dialOutbound({ remoteNumber, onState, onActive, onError, localStream });
 }

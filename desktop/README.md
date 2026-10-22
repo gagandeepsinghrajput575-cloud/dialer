@@ -247,7 +247,13 @@ packaging step). Nothing else in the app changes when it does.
 | Audio device will not open or start | The call is still reported `connected` — it *is* up — and the fault arrives as `{ event: "error", scope: "media" }` on screen. The device is retried on the next call rather than given up on. |
 | Call connects, no audio either way | After 12 s with zero RTP received the daemon emits `media_timeout` with the sent/received counts, and the dialer shows why. Signalling being healthy says nothing about media: this is the message that separates a NAT/routing problem from a codec one. |
 | Microphone permission refused | macOS 14 asks once per app; `AudioOutputUnitStart` fails and the error says permission is the likely cause (System Settings → Privacy → Microphone). |
-| Second inbound call while one is live | Refused with `486 Busy Here` — one audio device means one call. |
+| Second inbound call while one is live **or ringing** | Refused with `486 Busy Here` — one audio device means one call, and a ringing leg occupies it just as much as an answered one. The guard used to test only `active`, which is set at the 200 OK, so two callers could ring at once and neither was refused. |
+| Agent hangs up while the customer is ringing | `CANCEL` goes out immediately. Without it the daemon tore the call down locally and the customer's phone rang on for another 30–60 s until the carrier timed out. |
+| Agent hangs up an inbound ring | `603 Decline` goes out (`486 Busy Here` is reserved for a ring nobody answered). Previously nothing was sent at all and the caller rang into a vacuum. |
+| Inbound ring nobody answers | The missed-call timer sends `486` and reports `ended{missed}`. |
+| Carrier sends a re-INVITE (hold, resume, relay move) | Answered `200 OK` **with** our current SDP and `Content-Type: application/sdp`, and the receive path follows their new offer. An answer with no body reads as "my media is gone" and carriers drop the call. |
+| Registration keeps failing | Retries at 5 s → 10 s → 20 s → 45 s and then stays at 45 s. Pressing register by hand starts the ladder over. It used to retry every 5 s forever, which is how an account gets rate-limited. |
+| Engine switched away / daemon told to unregister | `REGISTER` with `Expires: 0` is sent and the release is reported once. A granted `Expires: 0` used to be discarded as falsy and read as a fresh 300 s registration, so the daemon quietly re-registered after letting the phone go. |
 | Two windows / two tabs | One cross-tab lock (`navigator.locks`) decides who rings; the other says "Call in progress on another tab". |
 | App quit during a call | BYE is sent, the daemon unregisters, and `scripts/release-phone.js` tells the server synchronously. |
 
@@ -261,6 +267,7 @@ packaging step). Nothing else in the app changes when it does.
 | `test/unit/native-sip.test.js` | 10 checks. The server's half: inert by default, one heartbeat switches the engine, the secret only leaves behind a token, the dial URI becomes UDP SIP, a stale beat hands the phone back, readiness names exactly what is missing. |
 | `test/unit/desktop-supervisor.test.js` | 7 checks. `desktop/main.js` with Electron absent: spawns the daemon, matches answers to command ids, beats the heartbeat, releases the phone on quit, restarts cleanly, and adopts a running API server instead of starting a second one. |
 | `test/unit/sip-daemon.test.js` in CI | Runs with `--audio=null`, so no sound card is needed anywhere. |
+| `test/unit/call-path.test.js` | 13 checks over the whole call path, each one a confirmed defect: `unregister` releases instead of re-registering, a granted `Expires` is honoured, the failure backoff escalates 5/10/20/45 and a manual register resets it, hang-up while ringing sends `CANCEL` (and a confirmed call still sends `BYE`, never `CANCEL`), hang-up on an inbound ring sends `603`, a decline still sends `486`, a second INVITE while one is ringing is refused and the line frees up afterwards, an outbound dial on top of a ringing inbound is refused, a re-INVITE is answered with SDP, and `end()` can put a refusal on the wire at all. Against the unfixed modules 9 of the 13 fail and the 4 that pass are the 4 negative controls. |
 | `test/unit/native-audio.test.js` | 13 checks, and the reason `--audio=null` is not enough. Drives the **real** `UserAgent` and `media.js` against a backend with the CoreAudio addon's contract (`start()` throws unless `open()` ran first): the pump opens the device, a dead device still reports `connected`, the fault is retried next call, the 12 s media watchdog fires on silence and stays quiet on a working call or a short one, and the renderer's badge says "no audio device" before the first dial. Against the unfixed daemon checks 1–7 fail with `coreaudio: open() first` while the `null`-backend check passes — which is exactly why the older suites never saw it. |
 | `test/unit/telephony-chaos-stress.test.js` | 60 checks, numbered 1–60 across `telephony-chaos-part1` (1–28) and `telephony-chaos-part2` (29–60). Adversarial input only: truncated and folded SIP, junk CSeq, comma-separated Contact lists, `; tag = x` with whitespace, a `407`, a 200 OK whose ACK must match verbatim, duplicate final responses, garbage down the IPC channel, `audio_level` out of range. Exits 0 with `ALL 60/60 TELEPHONY STRESS CHECKS PASSED (0 FAILURES)`. |
 
@@ -268,6 +275,7 @@ packaging step). Nothing else in the app changes when it does.
 npm run test:unit          # every suite, including the three above and the 60 chaos checks
 npm run test:telephony     # the chaos suite on its own (~0.5 s, no sockets, no DB)
 npm run test:audio         # the 13 audio-path checks (~1 s, one spawned daemon)
+npm run test:callpath      # the 13 call-path checks (~0.3 s, no sockets opened)
 node test/all-tests.js     # the 38 integration groups — unchanged by this feature
 ```
 

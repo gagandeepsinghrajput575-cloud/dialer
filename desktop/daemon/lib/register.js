@@ -64,7 +64,22 @@ function attach(ua) {
 
   ua.onRegisterResponse = function onRegisterResponse(res, { uri, expires, triedAuth = false }) {
     if (res.status >= 200 && res.status < 300) {
-      const granted = parseInt(res.first('expires') || '', 10) || expires || REGISTER_EXPIRES;
+      // `Expires: 0` is the answer to a de-registration, and 0 is falsy — the old
+      // `parseInt(...) || expires || REGISTER_EXPIRES` chain discarded it, fell through the
+      // requested 0 and landed on 300, so releasing the phone reported a fresh registration and
+      // armed a timer to take it back. Number.isFinite decides; 0 is a value, not an absence.
+      const parsed = parseInt(res.first('expires') || '', 10);
+      const requested = Number.isFinite(expires) ? expires : REGISTER_EXPIRES;
+      const granted = Number.isFinite(parsed) ? parsed : requested;
+      if (granted === 0 || requested === 0) {
+        ua.stopRegistrationTimer();
+        const was = ua.registration.state;
+        ua.registration.state = 'unregistered';
+        ua.registration.expires = 0;
+        // unregister() already reported this synchronously; do not report one release twice.
+        if (was !== 'unregistered') ua.emit('unregistered', { account: ua.registration.account });
+        return;
+      }
       ua.registration.state = 'registered';
       ua.registration.attempt = 0;
       ua.registration.expires = granted;
@@ -95,7 +110,10 @@ function attach(ua) {
     ua.emit('registration_failed', { reason, retryInMs: delay });
     ua.stopRegistrationTimer();
     ua.registration.timer = setTimeout(() => {
-      if (ua.registration.state === 'failed') ua.register({ expires: ua.registration.expires });
+      // resetBackoff:false — this IS the backoff. Resetting the counter here made every retry
+      // index RETRY_MS[0], so the documented 5/10/20/45 s ladder was dead code and a daemon with
+      // bad credentials re-REGISTERed every five seconds until the carrier blocked the account.
+      if (ua.registration.state === 'failed') ua.register({ expires: ua.registration.expires, resetBackoff: false });
     }, delay);
   };
 
@@ -111,7 +129,7 @@ function attach(ua) {
     if (ua.registration.timer) { clearTimeout(ua.registration.timer); ua.registration.timer = null; }
   };
 
-  ua.register = function register({ expires = ua.account.expires || REGISTER_EXPIRES } = {}) {
+  ua.register = function register({ expires = ua.account.expires || REGISTER_EXPIRES, resetBackoff = true } = {}) {
     const missing = ua.validateAccount();
     if (missing.length) {
       const reason = `missing ${missing.join(', ')}`;
@@ -119,7 +137,9 @@ function attach(ua) {
       return { ok: false, reason };
     }
     ua.registration.expires = expires;
-    ua.registration.attempt = 0;
+    // A human pressing "register" starts fresh; an automatic retry keeps climbing the ladder.
+    // Success is the only other place attempt is zeroed (onRegisterResponse).
+    if (resetBackoff) ua.registration.attempt = 0;
     ua.sendRegister(expires, null);
     return { ok: true, account: ua.registration.account };
   };

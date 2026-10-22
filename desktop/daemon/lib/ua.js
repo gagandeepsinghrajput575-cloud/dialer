@@ -15,6 +15,7 @@ const { buildUri, serialize, identityOf } = require('./sipMessage');
 const { Dialog } = require('./dialog');
 const registration = require('./register');
 const mediaLayer = require('./media');
+const sdp = require('./sdp');
 
 class UserAgent extends EventEmitter {
   constructor({ transport, audio, account, userAgent = 'PulseSIP/1.0', publicIp = '', log = () => {} }) {
@@ -59,7 +60,7 @@ class UserAgent extends EventEmitter {
 
   // ---- calls ---------------------------------------------------------------------------
   async dial(number, { callId: externalId = null } = {}) {
-    if (this.active) return { ok: false, reason: 'busy', error: 'A call is already in progress.' };
+    if (this.standingCall()) return { ok: false, reason: 'busy', error: 'A call is already in progress.' };
     const clean = String(number || '').trim();
     if (!clean) return { ok: false, reason: 'invalid', error: 'No number to dial.' };
     const dialog = new Dialog({ ua: this, direction: 'outbound', number: clean });
@@ -94,9 +95,31 @@ class UserAgent extends EventEmitter {
     const dialog = callId === undefined || callId === null ? this.active : this.find(callId);
     if (!dialog) return { ok: false, error: 'No call in progress.' };
     const wasLive = dialog.state === 'confirmed';
-    if (wasLive) await dialog.bye();
-    dialog.end(wasLive ? 'normal' : 'canceled');
+    if (wasLive) {
+      await dialog.bye();
+      dialog.end('normal');
+    } else if (dialog.direction === 'inbound') {
+      // A caller who is still ringing has to be told no. end() only refuses when asked to, and
+      // ring()'s missed-call timer is guarded by `!ended`, so hanging up used to leave them
+      // ringing into a vacuum until the carrier gave up. 603 is "a human declined"; the missed
+      // timer keeps 486 for a ring nobody answered.
+      dialog.end('rejected', { sendReject: 603 });
+    } else {
+      // Outbound and not yet answered: without CANCEL the customer's phone rings on for another
+      // 30-60 s after the agent hung up, and someone answers a call that no longer exists.
+      dialog.end('canceled', { sendCancel: true });
+    }
     return { ok: true, callId: dialog.id };
+  }
+
+  /**
+   * The call occupying the audio device, if any. A ringing leg occupies it exactly as much as a
+   * live one — `active` is only set on the 200 OK, so testing that alone let a second INVITE ring
+   * a second time and left the operator with two incoming calls and one microphone.
+   */
+  standingCall() {
+    if (this.active) return this.active;
+    return [...this.dialogs.values()].find((d) => !d.ended && d.state !== 'terminated') || null;
   }
 
   find(callId) {
@@ -151,15 +174,28 @@ class UserAgent extends EventEmitter {
       return;
     }
     const caller = identityOf(msg.first('from'));
-    if (this.active) {
-      ctx.reply(serialize({ startLine: 'SIP/2.0 486 Busy Here', headers: this.minimalReply(msg) }));
-      return this.emit('rejected_incoming', { reason: 'busy', callerPhone: caller.user });
-    }
-    // A re-INVITE inside a dialog we already hold is a media update, not a second caller.
+    // Order matters: a re-INVITE on a dialog we already hold is a media update from the *same*
+    // caller, not a second caller. Tested after the busy guard, an answered call answered its own
+    // re-INVITE with 486 — which is how hold/resume and a carrier's media-relay move dropped calls.
     const existing = this.dialogByCallId(msg.first('call-id'));
     if (existing) {
-      ctx.reply(serialize({ startLine: 'SIP/2.0 200 OK', headers: existing.responseHeaders() }));
+      // RFC 3261 §14: a 200 OK to a re-INVITE carries an answer. The old one carried no body and
+      // no Content-Type, which reads as "my media is gone" — carriers answer that with a BYE, so
+      // putting a customer on hold dropped the call. Renegotiate instead: take their offer, point
+      // the receive path at it, and answer with the media we actually have.
+      if (msg.body) existing.remoteSdp = sdp.parse(msg.body);
+      const body = existing.media
+        ? sdp.build({ ip: this.publicIp || this.transport.host, port: existing.media.port })
+        : '';
+      const headers = existing.responseHeaders();
+      if (body) headers['Content-Type'] = 'application/sdp';
+      this.applyRemoteSdp(existing);
+      ctx.reply(serialize({ startLine: 'SIP/2.0 200 OK', headers, body }));
       return;
+    }
+    if (this.standingCall()) {
+      ctx.reply(serialize({ startLine: 'SIP/2.0 486 Busy Here', headers: this.minimalReply(msg) }));
+      return this.emit('rejected_incoming', { reason: 'busy', callerPhone: caller.user });
     }
     const dialog = new Dialog({ ua: this, direction: 'inbound', request: msg });
     this.dialogs.set(dialog.id, dialog);

@@ -1,9 +1,7 @@
 // One call leg: the SIP INVITE dialog in both directions.
 //
-// A bug here costs money and trust — a dialog that never tears down rings a customer back, and a
-// missed ACK leaves the carrier retransmitting 200 OK forever. So the state machine is explicit and
-// teardown is idempotent: BYE, CANCEL, a 4xx, a transport failure and a local hang-up all land in
-// the same `end()`, which emits exactly once.
+// A bug here costs money: a dialog that never tears down rings a customer back, and a missed ACK
+// leaves the carrier retransmitting 200 OK forever. Every way out lands in one idempotent `end()`.
 'use strict';
 
 const crypto = require('crypto');
@@ -260,8 +258,8 @@ class Dialog {
     return true;
   }
 
-  async reject(code = 486) {
-    if (this.ended) return false;
+  async reject(code = 486, { fromEnd = false } = {}) {
+    if (this.ended && !fromEnd) return false;
     const reason = code === 603 ? 'Decline' : code === 480 ? 'Temporarily Unavailable' : 'Busy Here';
     const msg = serialize({ startLine: `SIP/2.0 ${code} ${reason}`, headers: this.responseHeaders() });
     try { await this.ua.transport.replyTo(this.request, msg, this.remoteAddress, ackKey(this.request)); } catch {}
@@ -288,8 +286,8 @@ class Dialog {
     try { await this.ua.transport.send(msg, target); this.ua.log('sip', `>> BYE (${target.host})`); } catch { /* gone */ }
   }
 
-  async cancel() {
-    if (this.ended || this.state === 'confirmed') return;
+  async cancel({ fromEnd = false } = {}) {
+    if ((this.ended && !fromEnd) || this.state === 'confirmed') return;
     const { uri, headers } = this.inDialogRequest('CANCEL');
     headers.CSeq = `${this.cseq} CANCEL`;   // CANCEL shares the INVITE's CSeq number (RFC 3261 §9.1)
     const msg = serialize({ startLine: `CANCEL ${uri} SIP/2.0`, headers });
@@ -305,8 +303,10 @@ class Dialog {
     this.endReason = reason;
     for (const id of this.timers) clearTimeout(id);
     this.timers.clear();
-    if (sendCancel) this.cancel().catch(() => {});
-    if (sendReject && this.request) this.reject(sendReject).catch(() => {});
+    // fromEnd is the one bypass of the `ended` guard. Without it these two send nothing at all —
+    // which is why hanging up on a ringing call never sent the CANCEL and the customer rang on.
+    if (sendCancel) this.cancel({ fromEnd: true }).catch(() => {});
+    if (sendReject && this.request) this.reject(sendReject, { fromEnd: true }).catch(() => {});
     // Not transition(): it refuses to move an ended dialog, and `ended` is already set above.
     if (this.state !== 'terminated') {
       this.state = 'terminated';

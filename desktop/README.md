@@ -60,6 +60,7 @@ Everything except the window works, and is tested:
 node test/unit/sip-daemon.test.js            # the daemon against a mock carrier on real UDP
 node test/unit/native-sip.test.js            # the server's half of the contract
 node test/unit/desktop-supervisor.test.js    # the supervisor, with Electron stubbed out
+npm run test:telephony                       # 60 chaos checks: parsing, dialog state, IPC
 ./desktop/bin/pulse-sip-daemon --help
 ./desktop/bin/pulse-sip-daemon --api-base http://127.0.0.1:3001 --audio coreaudio
 ```
@@ -251,11 +252,28 @@ packaging step). Nothing else in the app changes when it does.
 | `test/unit/native-sip.test.js` | 10 checks. The server's half: inert by default, one heartbeat switches the engine, the secret only leaves behind a token, the dial URI becomes UDP SIP, a stale beat hands the phone back, readiness names exactly what is missing. |
 | `test/unit/desktop-supervisor.test.js` | 7 checks. `desktop/main.js` with Electron absent: spawns the daemon, matches answers to command ids, beats the heartbeat, releases the phone on quit, restarts cleanly, and adopts a running API server instead of starting a second one. |
 | `test/unit/sip-daemon.test.js` in CI | Runs with `--audio=null`, so no sound card is needed anywhere. |
+| `test/unit/telephony-chaos-stress.test.js` | 60 checks, numbered 1–60 across `telephony-chaos-part1` (1–28) and `telephony-chaos-part2` (29–60). Adversarial input only: truncated and folded SIP, junk CSeq, comma-separated Contact lists, `; tag = x` with whitespace, a `407`, a 200 OK whose ACK must match verbatim, duplicate final responses, garbage down the IPC channel, `audio_level` out of range. Exits 0 with `ALL 60/60 TELEPHONY STRESS CHECKS PASSED (0 FAILURES)`. |
 
 ```bash
-npm run test:unit          # every suite, including the three above
+npm run test:unit          # every suite, including the three above and the 60 chaos checks
+npm run test:telephony     # the chaos suite on its own (~0.5 s, no sockets, no DB)
 node test/all-tests.js     # the 38 integration groups — unchanged by this feature
 ```
+
+### What the chaos suite caught
+
+Three bugs that no happy-path test could reach, all in `desktop/daemon/lib/dialog.js`:
+
+- a **`407 Proxy-Authentication-Required`** was answered with an `Authorization` header, so a
+  carrier proxy kept re-challenging until the INVITE branch ran out of retries;
+- **`ACK` and `BYE` built their `To:` from the remote Contact URI** instead of the remote tag from
+  the 2xx. RFC 3261 §12.2.1.1 requires the tag; FreeSWITCH answers the call, hears nothing valid
+  and severs it with a BYE at 4 s (Timer H) — the exact "call drops after four seconds" symptom;
+- **`end()` never reached the `terminated` state**, because it routed through `transition()`, which
+  early-returns once the dialog is ended.
+
+`src/utils/plain.js` exists so that checks 53–60 can `import()` the daemon controller under plain
+Node: `src/utils.js` keeps its exact export list and re-exports the React-free helpers from there.
 
 The native engine is **inert by default**: with no daemon beating, every existing assertion about
 the browser engine, the Telnyx settings and `test-softphone` passes byte-for-byte as before.

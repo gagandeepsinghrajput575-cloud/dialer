@@ -183,6 +183,15 @@ Settings screen makes — *your credential stays in this computer's local databa
 mode too, and the `webrtc_credential_handoff` switch is simply not needed: a daemon can register
 without handing anything to a browser.
 
+**The renderer's `register` command therefore carries no password, and must not be able to erase
+the one the daemon already has.** `ua.setAccount` used to spread the incoming payload over the
+stored account, so `{password: undefined}` overwrote the real secret. The live registration
+survived — wiping a field does not disarm an armed timer — so calls kept working, the badge flipped
+to *unavailable / missing password*, and then the refresh at 80 % of the expiry could no longer
+authenticate. The carrier's binding lapsed and **inbound calls simply stopped arriving a few
+minutes in**, with no error at the moment it broke. Absent keys are now treated as "not supplied",
+never as "erase it" (`.agents/rfcs/end-to-end-verification-sweep.md` §1).
+
 The account the daemon gets is chosen in `server/services/carrierAccount.js`: FlyNumber whenever its
 SIP user and password are saved, otherwise the dormant legacy Telnyx SIP settings. Telnyx is never
 deleted — an install that only has Telnyx gets a native phone too.
@@ -254,6 +263,8 @@ packaging step). Nothing else in the app changes when it does.
 | Carrier sends a re-INVITE (hold, resume, relay move) | Answered `200 OK` **with** our current SDP and `Content-Type: application/sdp`, and the receive path follows their new offer. An answer with no body reads as "my media is gone" and carriers drop the call. |
 | Registration keeps failing | Retries at 5 s → 10 s → 20 s → 45 s and then stays at 45 s. Pressing register by hand starts the ladder over. It used to retry every 5 s forever, which is how an account gets rate-limited. |
 | Engine switched away / daemon told to unregister | `REGISTER` with `Expires: 0` is sent and the release is reported once. A granted `Expires: 0` used to be discarded as falsy and read as a fresh 300 s registration, so the daemon quietly re-registered after letting the phone go. |
+| Level meter stuck at zero during a native call | Fixed: the daemon emits `audio_level {input, output}` and the renderer read `msg.level`, so the one visual proof that media was moving never appeared. Either direction above zero now moves it. |
+| Phone works for four minutes then goes deaf | Fixed: see the credential rule above. `setAccount` no longer lets a payload with no password wipe the stored one. |
 | Two windows / two tabs | One cross-tab lock (`navigator.locks`) decides who rings; the other says "Call in progress on another tab". |
 | App quit during a call | BYE is sent, the daemon unregisters, and `scripts/release-phone.js` tells the server synchronously. |
 
@@ -276,6 +287,8 @@ npm run test:unit          # every suite, including the three above and the 60 c
 npm run test:telephony     # the chaos suite on its own (~0.5 s, no sockets, no DB)
 npm run test:audio         # the 13 audio-path checks (~1 s, one spawned daemon)
 npm run test:callpath      # the 13 call-path checks (~0.3 s, no sockets opened)
+npm run test:e2e           # the 12 end-to-end checks (~5 s): real daemon process, real UDP carrier,
+                           # and the daemon's own events replayed into the real renderer engine
 node test/all-tests.js     # the 38 integration groups — unchanged by this feature
 ```
 

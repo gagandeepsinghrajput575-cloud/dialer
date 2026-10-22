@@ -42,7 +42,15 @@ class UserAgent extends EventEmitter {
   }
 
   setAccount(account) {
-    const next = { ...this.account, ...account };
+    // An absent or undefined key means "not supplied", never "erase it". The renderer is
+    // deliberately never given the SIP password, so its register command carries domain, port,
+    // user and callerId only — and spreading that over the account wiped the password the daemon
+    // had loaded from the API. The call still worked, because the live registration survived, but
+    // the refresh at 80% of the expiry could no longer authenticate: the phone went deaf to
+    // inbound calls a few minutes into a shift, which reads as "the app stops working randomly".
+    const patch = {};
+    for (const [k, v] of Object.entries(account || {})) if (v !== undefined) patch[k] = v;
+    const next = { ...this.account, ...patch };
     const changed = ['domain', 'user', 'password', 'port', 'callerId']
       .some((k) => String(this.account?.[k] ?? '') !== String(next[k] ?? ''));
     this.account = next;

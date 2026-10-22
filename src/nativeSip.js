@@ -273,8 +273,8 @@ export function createNativeEngine(opts) {
         mutedNow = !!msg.enabled;
         setMuted(mutedNow);
         break;
-      case 'audio_level':
-        if (typeof msg.level === 'number') setLevel(Math.max(0, Math.min(1, msg.level)));
+      case 'audio_level':   // the daemon sends {input, output}; `level` is the browser engine's shape
+        setLevel(Math.max(0, Math.min(1, typeof msg.level === 'number' ? msg.level : Math.max(msg.input || 0, msg.output || 0))));
         break;
       case 'ended': {
         const direction = live?.direction || (entry ? 'inbound' : 'outbound');

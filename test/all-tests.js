@@ -192,7 +192,7 @@ async function run() {
     'followup_email_template', 'has_ai_key', 'has_api_key', 'has_flynumber_password', 'has_password', 'has_smtp_pass',
     'inbound_routing_mode', 'meet_link',
     'queue_smart_sort', 'sales_script', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
-    'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
+    'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode', 'telephony_provider',
     'telnyx_api_key', 'telnyx_caller_id_verified', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
     'vm_auto_advance', 'vm_greeting',
     'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
@@ -201,7 +201,8 @@ async function run() {
   assert.strictEqual(s.business_tz, 'Europe/Copenhagen');
   assert.strictEqual(s.business_hours_start, '08:30');
   assert.strictEqual(s.business_hours_end, '16:30');
-  ok(`legacy VOIP.SO settings migrated to Telnyx, old keys purged, secrets masked (country code +${s.default_country_code})`);
+  assert.strictEqual(s.telephony_provider, 'flynumber', 'FlyNumber is the default carrier');
+  ok(`legacy VOIP.SO settings migrated to Telnyx, old keys purged, secrets masked (country code +${s.default_country_code}, provider ${s.telephony_provider})`);
 
   // ---------------------------------------------------------------- settings write
   step(2, TOTAL, 'PUT /api/settings — telephony config round-trips, blank secret keeps the old one');
@@ -227,6 +228,10 @@ async function run() {
   await req('PUT', '/api/settings', { telnyx_sip_password: '' }); // blank = keep
   const s3 = (await req('GET', '/api/settings')).json;
   assert.strictEqual(s3.has_password, true, 'blank password must not wipe the stored secret');
+  // FlyNumber is the default carrier, so it needs its own account. The Telnyx keys above stay
+  // stored and dormant; they are only used when telephony_provider is set back to 'telnyx'.
+  await req('PUT', '/api/settings', { flynumber_sip_user: '2001', flynumber_sip_password: 'fly-secret' });
+  assert.strictEqual((await req('GET', '/api/settings')).json.has_flynumber_password, true);
 
   // The settings schema is a whitelist and strips unknown keys, so a setting that exists in
   // DEFAULTS but not in the schema is silently un-settable — the PUT returns 200 and the value
@@ -324,7 +329,7 @@ async function run() {
   assert.strictEqual(callRes.json.dryRun, true);
   assert.strictEqual(callRes.json.protocol, 'sip');
   assert.strictEqual(callRes.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.telnyx.com`);
+  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.flynumber.com`, 'the default carrier addresses FlyNumber');
   assert.strictEqual(callRes.json.telephonyMode, 'softphone');
   const testCallId = callRes.json.callId;
   const afterCall = await req('GET', `/api/prospects/${testId}`);
@@ -353,7 +358,7 @@ async function run() {
   assert.strictEqual(t.json.configured, true);
   assert.strictEqual(t.json.sampleNumber, E164);
   assert.strictEqual(t.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(t.json.sipServer, 'sip.telnyx.com');
+  assert.strictEqual(t.json.sipServer, 'sip.flynumber.com');
   assert.strictEqual(t.json.inBrowser, false, 'a softphone launch is not an in-browser session');
 
   // ------------------------------------------------- in-browser WebRTC session descriptor
@@ -362,6 +367,17 @@ async function run() {
   assert.strictEqual((await req('GET', '/api/telephony/webrtc-session')).status, 401,
     'the WebRTC session endpoint refuses a caller with no token');
 
+  // FlyNumber has no browser gateway of its own. With none configured, the session must report
+  // the gateway as missing — never quietly fall back to Telnyx's rtc.telnyx.com.
+  const flyWeb = await tokened('GET', '/api/telephony/webrtc-session');
+  assert.strictEqual(flyWeb.json.provider, 'flynumber');
+  assert.strictEqual(flyWeb.json.wsUrl, '', 'no FlyNumber gateway is invented');
+  assert.ok(flyWeb.json.missing.includes('wsUrl'), 'the missing gateway is reported');
+  assert.strictEqual(flyWeb.json.configured, false);
+  ok('FlyNumber webrtc session reports a missing gateway and never falls back to Telnyx');
+
+  // The rest of this group exercises the Telnyx path explicitly; the default is restored after.
+  await req('PUT', '/api/settings', { telephony_provider: 'telnyx' });
   const sess = await tokened('GET', '/api/telephony/webrtc-session');
   assert.strictEqual(sess.status, 200);
   assert.strictEqual(sess.json.mode, 'webrtc');
@@ -422,7 +438,7 @@ async function run() {
   assert.strictEqual(wt.json.configured, false, 'webrtc readiness is not claimed while the handoff is off');
   assert.match(wt.json.message, /handoff|Settings/i);
 
-  await req('PUT', '/api/settings', { telephony_mode: 'softphone', dry_run: '1' });
+  await req('PUT', '/api/settings', { telephony_mode: 'softphone', dry_run: '1', telephony_provider: 'flynumber' });
   ok(`test launch dispatches ${t.json.dialUri} (configured=${t.json.configured}); the WebRTC descriptor is token-gated and its secret is opt-in`);
 
   // ---------------------------------------------------------------- outcome logging
@@ -683,7 +699,7 @@ async function run() {
   assert.ok(jsonRes.headers.get('content-type').includes('application/json'));
   const payload = JSON.parse(jsonRes.text);
   assert.ok(payload.exported_at);
-  assert.strictEqual(payload.telephony.sip_server, 'sip.telnyx.com');
+  assert.strictEqual(payload.telephony.sip_server, 'sip.flynumber.com', 'export names the active carrier');
   assert.strictEqual(payload.telephony.protocol, 'sip');
   const exported = payload.prospects.find((p) => p.id === testId);
   assert.ok(exported.calls.length >= 3, `call history included (${exported.calls.length} calls)`);
@@ -899,7 +915,7 @@ async function run() {
   ok(/skipped/.test(ui.stdout) ? 'UI race suite skipped (no dist/ or jsdom)' : 'keyboard race conditions, focus traps and console hygiene verified');
 
   // ---------------------------------------------------------------- repo hygiene
-  step(31, TOTAL, 'Repository hygiene — retired providers purged, Telnyx the only carrier');
+  step(31, TOTAL, 'Repository hygiene — retired providers purged, Telnyx kept as dormant legacy');
   const skip = new Set(['node_modules', '.git', 'dist', 'data', '.cache', 'package-lock.json']);
   const scannable = (name) => /\.(js|jsx|mjs|json|md|css|html|txt|example)$/i.test(name) || name.startsWith('.env');
   const scan = (needle) => {

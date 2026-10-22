@@ -243,13 +243,16 @@ async function run() {
   }
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'sip'), 'sip:+4520123456');
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'tel'), 'tel:+4520123456');
-  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.telnyx.com');
-  assert.strictEqual(telephony.sipServer(), 'sip.telnyx.com', 'the Telnyx FQDN is the default floor');
+  assert.strictEqual(telephony.provider(), 'flynumber', 'FlyNumber is the default carrier');
+  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.flynumber.com');
+  assert.strictEqual(telephony.sipServer(), 'sip.flynumber.com', 'the FlyNumber FQDN is the default floor');
   ok('normalization table (9 cases) + dial URI builders');
 
   // ---- in-browser softphone session (WebRTC) ----
   // The browser leg is addressed over the provider's WebSocket gateway, and the SIP secret
   // only leaves the server when the operator explicitly turned the handoff on.
+  // This section exercises the dormant Telnyx path, so it selects that provider explicitly.
+  settings.set('telephony_provider', 'telnyx');
   settings.set('telnyx_sip_server', 'sip.telnyx.com');
   settings.set('telnyx_sip_user', '1001');
   settings.set('telnyx_sip_password', 'super-secret');
@@ -278,6 +281,26 @@ async function run() {
   assert.deepStrictEqual(unconfigured.missing, ['password']);
   assert.strictEqual(unconfigured.configured, false);
   ok('webrtc session: Telnyx gateway default, credential handoff gate, readiness reasons');
+  settings.set('telephony_provider', 'flynumber');
+
+  // FlyNumber as the carrier: its own host and account, no invented browser gateway, and a blank
+  // caller ID means the Copenhagen DID it hosts (never a number some other carrier owns).
+  settings.set('flynumber_sip_user', '2001');
+  settings.set('flynumber_sip_password', 'fly-secret');
+  settings.set('caller_id', '+4532331610');
+  settings.set('caller_id_pool', '');
+  assert.strictEqual(telephony.carrier().provider, 'flynumber');
+  assert.strictEqual(telephony.sipServer(), 'sip.flynumber.com');
+  assert.strictEqual(telephony.sipConfigured(), true, 'the FlyNumber account is what counts as configured');
+  assert.strictEqual(telephony.webrtcWsUrl(), '', 'no Telnyx gateway is substituted for FlyNumber');
+  assert.deepStrictEqual(telephony.callerIdPool(), ['+4532331610'], 'the FlyNumber DID is the caller ID');
+  assert.strictEqual(telephony.nextCallerId().callerId, '+4532331610');
+  settings.set('telephony_provider', 'telnyx');
+  assert.strictEqual(telephony.sipServer(), 'sip.telnyx.com', 'the dormant Telnyx account is still reachable by choice');
+  settings.set('telephony_provider', 'bogus');
+  assert.strictEqual(telephony.provider(), 'flynumber', 'an unknown provider falls back to FlyNumber');
+  settings.set('telephony_provider', 'flynumber');
+  ok('FlyNumber carrier: own host and account, no Telnyx gateway, DID as caller ID');
 
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('caller_id_pool', '+4520987654, 31 45 67 89');

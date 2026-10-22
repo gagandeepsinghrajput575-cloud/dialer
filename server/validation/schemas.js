@@ -1,7 +1,7 @@
 // Zod schemas for every write endpoint. Controllers validate with `validate()` from the
 // middleware, so bad payloads get a 400 with per-field details instead of a crash.
 const { z } = require('zod');
-const { STAGES, OUTCOMES, SOFTPHONE_PROTOCOLS, TELEPHONY_MODES } = require('../config/defaults');
+const { STAGES, OUTCOMES, SOFTPHONE_PROTOCOLS, TELEPHONY_MODES, TELEPHONY_PROVIDERS } = require('../config/defaults');
 
 const AI_PROVIDERS = ['local', 'openai', 'gemini', 'openrouter'];
 // A null from a CSV cell or a JSON client means "empty", not "invalid" — accept it and
@@ -110,6 +110,7 @@ const noteCreate = z.object({ body: z.string().trim().min(1, 'Write something fi
 const notePatch = z.object({ body: z.string().max(20000) });
 
 const settingsUpdate = z.object({
+  telephony_provider: z.enum(TELEPHONY_PROVIDERS).optional(),
   telephony_mode: z.enum(TELEPHONY_MODES).optional(),
   softphone_protocol: z.enum(SOFTPHONE_PROTOCOLS).optional(),
   // ---- Telnyx SIP connection ----

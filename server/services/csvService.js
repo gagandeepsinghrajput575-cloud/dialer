@@ -4,6 +4,7 @@ const notes = require('../repositories/noteRepo');
 const calls = require('../repositories/callRepo');
 const settings = require('../repositories/settingsRepo');
 const statsService = require('./statsService');
+const telephony = require('./telephonyService');
 
 // A cell that starts with = + - @ (or a tab/CR) is executed as a formula by Excel and
 // Google Sheets, so prospect data like "=HYPERLINK(\"http://evil\")" would run on the
@@ -88,7 +89,8 @@ function toJson() {
     telephony: {
       mode: settings.get('telephony_mode'),
       protocol: settings.get('softphone_protocol'),
-      sip_server: settings.get('telnyx_sip_server'),
+      provider: telephony.provider(),
+      sip_server: telephony.sipServer(),
       caller_id: settings.get('caller_id'),
       caller_id_pool: settings.get('caller_id_pool'),
       default_country_code: settings.get('default_country_code'),

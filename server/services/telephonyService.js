@@ -5,6 +5,8 @@ const path = require('path');
 const settings = require('../repositories/settingsRepo');
 const { audioDir } = require('../config/env');
 const { NATIONAL_LENGTH, SOFTPHONE_PROTOCOLS, TELEPHONY_MODES } = require('../config/defaults');
+const carrierAccount = require('./carrierAccount');
+const { provider, carrier, text, FLYNUMBER_SIP_DEFAULT, COPENHAGEN_DEFAULT_DID, TELNYX_SIP_DOMAIN, TELNYX_WEBRTC_WS } = carrierAccount;
 
 function cleanStr(val) {
   if (val === null || val === undefined) return '';
@@ -74,15 +76,13 @@ const mode = () => {
 const buildDialUri = (phone, proto = protocol()) => `${proto}:${phone}`;
 
 // ---- Telnyx ----
-// The carrier is Telnyx (Mission Control Portal): a Credential-Auth SIP Connection dialled
-// either from a desktop softphone (Zoiper/Linphone) over the SIP FQDN, or straight from this
-// browser over Telnyx's WebRTC signalling gateway. Both modes read the same account.
-const TELNYX_SIP_DOMAIN = 'sip.telnyx.com';
-const TELNYX_WEBRTC_WS = 'wss://rtc.telnyx.com';
+// The SIP account comes from carrier() (carrierAccount.js): FlyNumber by default, or the dormant
+// Telnyx account when telephony_provider is 'telnyx'. Both a desktop softphone (Zoiper/Linphone)
+// and the in-browser softphone read that one account.
 
 // The SIP FQDN every URI is addressed to. A saved value wins, so pointing Pulse at your own
 // PBX or a Telnyx regional edge still works; the Telnyx domain is the floor, not a guess.
-const sipServer = () => String(settings.get('telnyx_sip_server') || '').trim() || TELNYX_SIP_DOMAIN;
+const sipServer = () => carrier().server;
 
 // Same number addressed straight at the SIP domain — handy as a manual fallback.
 function buildDialUriFull(phone) {
@@ -91,7 +91,7 @@ function buildDialUriFull(phone) {
   return `sip:${phone}@${server}`;
 }
 
-const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim();
+const sipConfigured = () => !!carrier().user;
 
 // ---------------------------------------------------------------- in-browser WebRTC softphone
 // Telnyx's WebRTC endpoint is a single fixed gateway (wss://rtc.telnyx.com) rather than a
@@ -102,8 +102,7 @@ const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim
 const webrtcServer = () => sipServer();
 
 function webrtcWsUrl() {
-  const explicit = String(settings.get('webrtc_ws_url') || '').trim();
-  return explicit || TELNYX_WEBRTC_WS;
+  return carrier().wsUrl;
 }
 
 // What the browser addresses the call to. transport=ws tells the far end this leg arrives
@@ -116,10 +115,9 @@ function buildWebRtcUri(phone) {
 
 // Is the browser softphone in a state where pressing C could actually connect?
 function webrtcReadiness() {
-  const wsUrl = webrtcWsUrl();
-  const server = webrtcServer();
-  const user = String(settings.get('telnyx_sip_user') || '').trim();
-  const hasPassword = !!String(settings.get('telnyx_sip_password') || '').trim();
+  const c = carrier();
+  const { wsUrl, server, user } = c;
+  const hasPassword = !!c.password.trim();
   const missing = [];
   if (!server) missing.push('server');
   if (!user) missing.push('user');
@@ -134,14 +132,14 @@ function webrtcReadiness() {
 function webrtcSession() {
   const r = webrtcReadiness();
   const handoff = settings.getBool('webrtc_credential_handoff');
-  const password = String(settings.get('telnyx_sip_password') || '');
+  const { password, provider: carrierName, wsUrlSource } = carrier();
   return {
     mode: 'webrtc',
-    provider: 'telnyx',
+    provider: carrierName,
     configured: r.configured,
     missing: r.missing,
     wsUrl: r.wsUrl,
-    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : 'telnyx_default',
+    wsUrlSource,
     server: r.server,
     username: r.user,
     // Normalized like every other caller ID the app shows or sends: the browser puts this
@@ -165,7 +163,7 @@ const MAX_POOL = 20;
 
 function callerIdPool() {
   const raw = String(settings.get('caller_id_pool') || '');
-  const primary = String(settings.get('caller_id') || '').trim();
+  const primary = text('caller_id');
   // Split, drop empty tokens, normalize (which drops junk like "+4511"), de-duplicate.
   const parts = raw.split(/[,\n;]+/).map((x) => x.trim()).filter(Boolean);
   const all = [...new Set([primary, ...parts].filter(Boolean).map((x) => normalizePhone(x)).filter(Boolean))];
@@ -355,9 +353,6 @@ function numberKind(phone) {
 // ---- FlyNumber Hybrid VoIP Architecture ----
 // FlyNumber handles inbound callbacks at $0/min via native SIP (sip.flynumber.com)
 // while Telnyx handles outbound dialing stamped with the verified Copenhagen DID.
-const FLYNUMBER_SIP_DEFAULT = 'sip.flynumber.com';
-const COPENHAGEN_DEFAULT_DID = '+4532331610';
-
 function flynumberConfig() {
   const did = normalizePhone(settings.get('flynumber_did') || COPENHAGEN_DEFAULT_DID) || COPENHAGEN_DEFAULT_DID;
   const status = String(settings.get('flynumber_status') || 'pending').toLowerCase();
@@ -370,7 +365,7 @@ function flynumberConfig() {
   const isWebRtcMode = inboundMode === 'webrtc' || String(settings.get('telephony_mode') || '').toLowerCase() === 'webrtc';
 
   const telnyxUser = String(settings.get('telnyx_sip_user') || '').trim();
-  const telnyxHost = sipServer();
+  const telnyxHost = text('telnyx_sip_server') || TELNYX_SIP_DOMAIN; // legacy forwarding target, always Telnyx
   const webrtcForwardingUri = telnyxUser ? `sip:${telnyxUser}@${telnyxHost}` : '';
   const linphoneSipAddress = sipUser ? `sip:${sipUser}@${sipHost}` : '';
 
@@ -464,7 +459,8 @@ function flynumberConfig() {
     allCompleted: completedCount === bridgeSteps.length,
     monthlyCost: '$2.95',
     inboundCost: '$0.00 / min (Free Unlimited Inbound SIP)',
-    carrier: 'FlyNumber (Inbound) + Telnyx (Outbound)',
+    carrier: provider() === 'telnyx' ? 'Telnyx (legacy) — FlyNumber DID kept for inbound' : 'FlyNumber (default carrier, inbound + outbound)',
+    provider: provider(),
     reputation: '180.dk Clean · Zero Spam Reports',
   };
 }
@@ -477,4 +473,5 @@ module.exports = {
   webrtcWsUrl, webrtcServer, buildWebRtcUri, webrtcReadiness, webrtcSession,
   sipServer, TELNYX_SIP_DOMAIN, TELNYX_WEBRTC_WS,
   flynumberConfig, FLYNUMBER_SIP_DEFAULT, COPENHAGEN_DEFAULT_DID,
+  provider, carrier,
 };

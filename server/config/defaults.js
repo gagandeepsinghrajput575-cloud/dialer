@@ -38,7 +38,11 @@ const DEFAULT_SALES_SCRIPT = [
 ].join('\n');
 
 const DEFAULTS = {
-  // ---- telephony: Telnyx + desktop softphone (Denmark) ----
+  // ---- telephony: FlyNumber (default carrier) + desktop softphone (Denmark) ----
+  // Which carrier account the app dials, registers and stamps. 'flynumber' is the default:
+  // the Danish DID +45 32 33 16 10 is hosted there. 'telnyx' is dormant legacy — its keys below
+  // stay readable and are never deleted, so existing databases load unchanged.
+  telephony_provider: 'flynumber',
   telephony_mode: 'softphone', // 'softphone' (Zoiper/Linphone) or 'webrtc'
   softphone_protocol: 'sip', // 'sip' (sip:...) or 'tel' (tel:...)
   telnyx_sip_server: 'sip.telnyx.com', // Telnyx SIP connection domain (FQDN)
@@ -46,7 +50,7 @@ const DEFAULTS = {
   telnyx_sip_password: '', // secret — local DB only, never sent to the browser
   telnyx_api_key: '', // secret — Telnyx v2 API key (KEY...) for carrier management
   telnyx_connection_id: '', // optional Telnyx SIP Connection ID
-  caller_id: '', // primary Danish (+45) virtual number
+  caller_id: '+4532331610', // primary Danish (+45) virtual number (FlyNumber DID; blank = same)
   caller_id_pool: '', // comma separated DIDs, rotated round-robin per dial
   caller_id_cursor: '0', // index of the next DID to use (survives restarts)
   default_country_code: '45', // Denmark (+45)
@@ -126,6 +130,7 @@ const FIELDS = ['name', 'phone', 'email', 'company', 'title', 'location', 'websi
 
 const SOFTPHONE_PROTOCOLS = ['sip', 'tel'];
 const TELEPHONY_MODES = ['softphone', 'webrtc'];
+const TELEPHONY_PROVIDERS = ['flynumber', 'telnyx'];
 // National subscriber length (digits after the country code, no trunk prefix).
 const NATIONAL_LENGTH = { 45: 8 };
 
@@ -162,6 +167,6 @@ const ENV_SEEDS = {
 module.exports = {
   DEFAULTS, SETTING_KEYS, SECRET_KEYS, ENV_SEEDS,
   STAGES, OUTCOMES, PICKUP, CONVO, FIELDS,
-  SOFTPHONE_PROTOCOLS, TELEPHONY_MODES, NATIONAL_LENGTH,
+  SOFTPHONE_PROTOCOLS, TELEPHONY_MODES, TELEPHONY_PROVIDERS, NATIONAL_LENGTH,
   DEFAULT_FOLLOWUP_EMAIL,
 };

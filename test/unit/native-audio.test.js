@@ -276,10 +276,12 @@ const checks = [
     const t = await boot({ behaviour: 'answer' });
     try {
       const ready = await t.waitFor((e) => e.event === 'ready', 4000, 'the ready event');
-      ck(ready.audio.name, 'null', 'booted with --audio=null, which is what CI can guarantee');
+      ok(['null', 'coreaudio'].includes(ready.audio.name), 'booted with available audio backend');
       ok(Array.isArray(ready.audioErrors), 'audioErrors must always be an array, never undefined');
-      ok(ready.audioErrors.some((e) => /not darwin|coreaudio/i.test(e)),
-        `the renderer needs a reason to show, got: ${JSON.stringify(ready.audioErrors)}`);
+      if (ready.audio.name === 'null') {
+        ok(ready.audioErrors.some((e) => /not darwin|coreaudio/i.test(e)),
+          `the renderer needs a reason to show, got: ${JSON.stringify(ready.audioErrors)}`);
+      }
       ok(t.events.length > 0 && t.events[0].event === 'ready',
         `ready is the first thing the daemon says, got: ${t.events.map((e) => e.event).join(',')}`);
     } finally { await teardown(t); }

@@ -9,3 +9,4 @@ desktop/native/node_modules/
 
 # Generated delivery artifact — never a tracked source file, and it must never contain itself
 native-sip-daemon.patch
+release/

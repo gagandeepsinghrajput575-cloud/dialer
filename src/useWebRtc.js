@@ -30,7 +30,7 @@
 //                 └──▶ registering ──▶ dialing ──▶ ringing ──▶ active   (outbound)
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
-import { formatCallerNumber, holdCrossTabLock } from './utils.js';
+import { formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
 import { createRinger } from './utils/ringer.js';
 // Capability probes, the keypad tones and the local tone player. Shared with the native SIP
 // engine (nativeSip.js), which has no peer connection but gives the same audible feedback.

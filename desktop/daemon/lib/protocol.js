@@ -16,7 +16,7 @@ const MAX_LINE = 256 * 1024;
 // The commands the daemon accepts. Anything else is refused rather than ignored, because an
 // unimplemented action that silently does nothing is how a UI ends up waiting forever.
 const ACTIONS = new Set([
-  'hello', 'register', 'unregister', 'dial', 'answer', 'reject', 'hangup',
+  'hello', 'ping', 'register', 'unregister', 'dial', 'answer', 'reject', 'hangup',
   'mute', 'dtmf', 'status', 'devices', 'audio', 'log-level', 'shutdown',
 ]);
 
@@ -39,6 +39,32 @@ class Protocol {
     this.received = 0;
     this.parseErrors = 0;
     this.rl = null;
+    this.buffer = '';      // partial line, for feed()
+    this.onOutput = null;  // optional sink: a controller can capture the channel instead of stdout
+  }
+
+  /**
+   * Accept a raw chunk of the channel instead of a whole line.
+   *
+   * `start()` reads stdin through `readline`, which already reassembles chunks. This is the same
+   * job for a controller that owns the pipe itself — a loopback socket, a test, or a supervisor
+   * that gets `data` events rather than lines. A datagram or a read() can end anywhere, including
+   * mid-token, so nothing is dispatched until a newline arrives; the tail is kept.
+   *
+   * A line that cannot be parsed is answered with a reason and dropped (see `handleLine`), and a
+   * buffer that never terminates is discarded at MAX_LINE rather than grown without bound.
+   */
+  feed(chunk) {
+    this.buffer += String(chunk ?? '');
+    if (this.buffer.length > MAX_LINE) {
+      this.parseErrors += 1;
+      this.buffer = '';
+      return this.send({ ok: false, error: `A control-channel line exceeded ${MAX_LINE} bytes and was discarded.` });
+    }
+    const lines = this.buffer.split('\n');
+    this.buffer = lines.pop() || '';
+    for (const line of lines) this.handleLine(line);
+    return undefined;
   }
 
   start() {
@@ -86,6 +112,9 @@ class Protocol {
   }
 
   send(payload) {
+    // A controller that captures the channel (tests, a second supervisor on the loopback socket)
+    // gets the same line stdout would have, and stdout stays clean.
+    const sink = this.onOutput || ((text) => this.output.write(text));
     let line;
     try {
       line = JSON.stringify(payload);
@@ -94,17 +123,17 @@ class Protocol {
       // still produce an answer on the channel — otherwise the controller waits forever for a
       // reply that was silently dropped. Say what happened, without the offending value.
       try {
-        this.output.write(`${JSON.stringify({
+        sink(`${JSON.stringify({
           id: payload?.id ?? null,
           event: payload?.event,
           ok: false,
           error: `Could not serialize this reply: ${e.message}`,
         })}\n`);
-      } catch { /* stdout is gone; nothing left to do */ }
+      } catch { /* the channel is gone; nothing left to do */ }
       return null;
     }
     try {
-      this.output.write(`${line}\n`);
+      sink(`${line}\n`);
     } catch { /* a closed stdout must not take the daemon down */ }
     return payload;
   }

@@ -143,7 +143,7 @@ function parseVia(via) {
 }
 
 function parseCSeq(msg) {
-  const m = /^(\d+)\s+([A-Z]+)/i.exec(String(msg.first('cseq') || ''));
+  const m = /^(\d+)\s+([A-Z]+)/i.exec(String(msg?.first?.('cseq') || ''));
   return { seq: Number(m?.[1] || 0), method: (m?.[2] || '').toUpperCase() };
 }
 

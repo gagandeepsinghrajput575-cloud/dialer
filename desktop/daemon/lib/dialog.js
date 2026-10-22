@@ -1,9 +1,9 @@
 // One call leg: the SIP INVITE dialog in both directions.
 //
-// A bug here costs money and trust — a dialog that never tears down rings a customer back, and
-// a missed ACK leaves the carrier retransmitting 200 OK forever. So the state machine is
-// explicit and teardown is idempotent: BYE, CANCEL, a 4xx, a transport failure and a local
-// hang-up all land in the same `end()`, which emits exactly once.
+// A bug here costs money and trust — a dialog that never tears down rings a customer back, and a
+// missed ACK leaves the carrier retransmitting 200 OK forever. So the state machine is explicit and
+// teardown is idempotent: BYE, CANCEL, a 4xx, a transport failure and a local hang-up all land in
+// the same `end()`, which emits exactly once.
 'use strict';
 
 const crypto = require('crypto');
@@ -19,8 +19,7 @@ const callId = (host) => `${crypto.randomBytes(8).toString('hex')}@${host}`;
 const branch = () => `z9hG4bK${crypto.randomBytes(8).toString('hex')}`;
 
 class Dialog {
-  // `ua` is the owning user agent (transport, account, emitter); `direction` is 'outbound' or
-  // 'inbound'; `request` is the inbound INVITE (inbound only) and `number` the callee (outbound).
+  // `ua` owns transport/account/emitter; `request` is the inbound INVITE, `number` the callee.
   constructor({ ua, direction, request = null, number = '' }) {
     this.ua = ua;
     this.direction = direction;
@@ -34,6 +33,7 @@ class Dialog {
     this.cseq = request ? parseCSeq(request).seq : Math.floor(Math.random() * 1000) + 1;
     this.remoteTarget = '';
     this.requestUri = '';
+    this.dialogTo = request ? toUriOf(request.first('to')) : '';
     this.routeSet = [];
     this.localSdp = null;
     this.remoteSdp = null;
@@ -54,18 +54,11 @@ class Dialog {
     }
   }
 
-  static nextId() {
-    Dialog._seq = (Dialog._seq || 0) + 1;
-    return Dialog._seq;
-  }
+  static nextId() { Dialog._seq = (Dialog._seq || 0) + 1; return Dialog._seq; }
 
-  get callerPhone() {
-    if (this.direction === 'inbound') return this.remoteIdentity?.user || '';
-    return this.number;
-  }
+  get callerPhone() { return this.direction === 'inbound' ? this.remoteIdentity?.user || '' : this.number; }
 
   get displayName() { return this.remoteIdentity?.displayName || ''; }
-
   get durationSec() {
     return this.answeredAt ? Math.max(0, Math.round((Date.now() - this.answeredAt) / 1000)) : 0;
   }
@@ -79,16 +72,11 @@ class Dialog {
   transition(next) {
     if (this.state === next || this.ended) return;
     this.state = next;
-    this.ua.emit('state', { callId: this.id, state: next, direction: this.direction });
+    this.ua.emit('state', { callId: this.id, state: next, direction: this.direction });  // never poll
   }
 
   // ---- common header plumbing ----------------------------------------------------------
-  /**
-   * @param {object} o
-   * @param {string} o.toHeader the complete To value (with or without a tag) — callers pass a
-   *   finished header rather than a bare URI, because an inbound response must echo the
-   *   request's To verbatim and only append our tag.
-   */
+  // `toHeader` is a whole To value, not a bare URI: an inbound response echoes the request's To.
   baseHeaders({ method, toHeader, toUri, toTag, extra = {}, via } = {}) {
     const ua = this.ua;
     const account = ua.account;
@@ -102,11 +90,9 @@ class Dialog {
       'Call-ID': this.callId,
       CSeq: `${this.cseq} ${method}`,
       Contact: `<${buildUri({ user: account.user, host: ua.transport.host, port: ua.transport.port })}>`,
-      'User-Agent': ua.userAgent,
-      Allow: 'INVITE, ACK, CANCEL, BYE, OPTIONS, INFO',
+      'User-Agent': ua.userAgent, Allow: 'INVITE, ACK, CANCEL, BYE, OPTIONS, INFO',
     };
-    // `extra` wins: an in-dialog or inbound response must carry the peer's Via/From verbatim.
-    return Object.assign(headers, extra);
+    return Object.assign(headers, extra);   // `extra` wins: the peer's Via/From go out verbatim
   }
 
   // Headers of a response to the INVITE we were handed: the request's Via/From/Call-ID/CSeq,
@@ -125,6 +111,18 @@ class Dialog {
     });
   }
 
+  // The request-URI is the peer's Contact (§12.2.1.1); the To stays the dialog's own To plus the
+  // peer's tag. A To built from the Contact does not identify this dialog, and FreeSWITCH severs
+  // such a call with BYE four seconds after answer (Timer H). `Allow` goes: it starts dialogs.
+  inDialogRequest(method) {
+    const uri = this.remoteTarget || this.requestUri
+      || buildUri({ user: this.number, host: this.ua.account.domain, params: { user: 'phone' } });
+    const toTag = method === 'CANCEL' ? '' : this.remoteTag;   // CANCEL predates the dialog (§9.1)
+    const headers = this.baseHeaders({ method, toHeader: `<${this.dialogTo || uri}>${toTag ? `;tag=${toTag}` : ''}` });
+    delete headers.Allow;
+    return { uri, headers };
+  }
+
   remoteAddressFor() {
     const hint = this.ua.transport.peerFor(this.callId, null);
     return this.remoteAddress || hint || { host: this.ua.account.domain, port: this.ua.account.port };
@@ -135,12 +133,13 @@ class Dialog {
     const account = this.ua.account;
     const toUri = buildUri({ user: this.number, host: account.domain, params: { user: 'phone' } });
     this.transition('calling');
-    await this.sendInvite({ toUri, toTag: '', authHeader: null });
+    await this.sendInvite({ toUri, toTag: '' });
     // No answer at all is still an answer the operator needs: 32 s and the leg is over.
     this.later(() => { if (!this.ended && this.state !== 'confirmed') this.end('timeout', { sendCancel: true }); }, ACK_TIMEOUT_MS);
   }
 
-  async sendInvite({ toUri, toTag = '', authHeader = null }) {
+  // `auth` is { name, value }: a 407 is answered with Proxy-Authorization, a 401 with Authorization.
+  async sendInvite({ toUri, toTag = '', auth = null }) {
     const media = await this.ua.openMediaSocket();
     this.media = this.media || media;
     const body = sdp.build({
@@ -152,18 +151,14 @@ class Dialog {
     const headers = this.baseHeaders({
       method: 'INVITE', toUri, toTag,
       via: `SIP/2.0/UDP ${this.ua.transport.host}:${this.ua.transport.port};rport;branch=${viaBranch}`,
-      extra: { 'Content-Type': 'application/sdp', ...(authHeader ? { Authorization: authHeader } : {}) },
+      extra: { 'Content-Type': 'application/sdp', ...(auth ? { [auth.name]: auth.value } : {}) },
     });
     const msg = serialize({ startLine: `INVITE ${toUri} SIP/2.0`, headers, body });
     const target = this.remoteAddressFor();
     this.ua.log('sip', `>> INVITE ${this.number} (${target.host}:${target.port})`);
 
     this.ua.transport.request({
-      msg,
-      branch: viaBranch,
-      method: 'INVITE',
-      target,
-      invite: true,
+      msg, branch: viaBranch, method: 'INVITE', target, invite: true,
       onProvisional: (res) => this.onProvisional(res),
       onFinal: (res) => this.onFinalResponse(res, { toUri, target }),
       onTimeout: () => this.end('timeout'),
@@ -179,7 +174,7 @@ class Dialog {
       this.transition('early');
       this.ua.startEarlyMedia?.(this);
     }
-    this.transition(this.state === 'early' ? 'early' : 'proceeding');
+    if (this.state !== 'early') this.transition('proceeding');
     this.ua.emit('provisional', { callId: this.id, status: res.status, reason: res.reason });
   }
 
@@ -190,20 +185,21 @@ class Dialog {
     // Digest challenge: answer it once, with the same Call-ID and a fresh CSeq/branch.
     if ((res.status === 401 || res.status === 407) && !this.triedAuth) {
       this.triedAuth = true;
-      const headerName = res.status === 407 ? 'proxy-authenticate' : 'www-authenticate';
-      const challenge = digest.pick(digest.parseChallenges(res.first(headerName)));
+      const proxy = res.status === 407;
+      const challenge = digest.pick(digest.parseChallenges(res.first(proxy ? 'proxy-authenticate' : 'www-authenticate')));
       if (challenge) {
         this.cseq += 1;
-        const authHeader = digest.respond({
-          method: 'INVITE', uri: toUri, username: this.ua.account.user,
-          password: this.ua.account.password, challenge, nc: 1,
+        const value = digest.respond({
+          method: 'INVITE', uri: toUri, username: this.ua.account.user, nc: 1, challenge,
+          password: this.ua.account.password,
         });
-        return this.sendInvite({ toUri, authHeader });
+        return this.sendInvite({ toUri, auth: { name: proxy ? 'Proxy-Authorization' : 'Authorization', value } });
       }
     }
 
     if (res.status >= 200 && res.status < 300) {
       this.remoteTag = parseTag(res.first('to')) || this.remoteTag;
+      this.dialogTo = toUriOf(res.first('to')) || this.dialogTo;
       this.remoteTarget = parseUri(contactUri(res.first('contact'))).raw || this.requestUri || toUri;
       if (res.body) this.remoteSdp = sdp.parse(res.body);
       await this.sendAck(res);
@@ -215,13 +211,10 @@ class Dialog {
   }
 
   async sendAck(response) {
-    // The ACK for a non-2xx is a hop-by-hop transaction answer; for a 2xx it is dialog-forming
-    // and carries our tag. Either way it goes where the response actually came from, which a
-    // carrier behind a proxy makes different from where the INVITE was sent.
-    const uri = this.remoteTarget || this.requestUri
-      || buildUri({ user: this.number, host: this.ua.account.domain, params: { user: 'phone' } });
-    const headers = this.baseHeaders({ method: 'ACK', toUri: uri, toTag: this.remoteTag });
-    delete headers.Allow;
+    // Non-2xx: a hop-by-hop transaction answer. 2xx: dialog-forming, and it carries our tag. Either
+    // way it goes where the response came from — behind a carrier proxy that is *not* where the
+    // INVITE went (§12.2.1.1), so an ACK sent to the INVITE target is a BYE four seconds later.
+    const { uri, headers } = this.inDialogRequest('ACK');
     const msg = serialize({ startLine: `ACK ${uri} SIP/2.0`, headers });
     const target = this.ua.transport.peerFor(this.callId, this.remoteAddressFor());
     try {
@@ -239,7 +232,7 @@ class Dialog {
   // ---- inbound -------------------------------------------------------------------------
   async ring() {
     const headers = this.responseHeaders();
-    delete headers['Content-Type'];
+    delete headers['Content-Type'];   // a 180 carries no body
     const msg = serialize({ startLine: 'SIP/2.0 180 Ringing', headers });
     this.reply = { key: ackKey(this.request), status: 180, callId: this.callId };
     this.transition('proceeding');
@@ -271,9 +264,7 @@ class Dialog {
     if (this.ended) return false;
     const reason = code === 603 ? 'Decline' : code === 480 ? 'Temporarily Unavailable' : 'Busy Here';
     const msg = serialize({ startLine: `SIP/2.0 ${code} ${reason}`, headers: this.responseHeaders() });
-    try {
-      await this.ua.transport.replyTo(this.request, msg, this.remoteAddress, ackKey(this.request));
-    } catch { /* the caller's own retransmit timer handles a lost reply */ }
+    try { await this.ua.transport.replyTo(this.request, msg, this.remoteAddress, ackKey(this.request)); } catch {}
     this.ua.log('sip', `<< ${code} ${reason} (${this.callerPhone})`);
     this.end(code === 603 ? 'rejected' : 'busy');
     return true;
@@ -281,8 +272,8 @@ class Dialog {
 
   noteAck() {
     this.ackSeen = true;
-    // Keyed on Call-ID, not on the branch: a 2xx ACK carries its own branch, and the 200 OK we
-    // retransmit for an outbound answer has to stop the moment that ACK lands.
+    // Keyed on Call-ID, not branch: a 2xx ACK brings its own branch, and our retransmitted 200 OK
+    // has to stop the moment it lands.
     this.ua.transport.noteAck(this.callId);
   }
 
@@ -290,32 +281,24 @@ class Dialog {
   async bye() {
     if (this.ended || this.state !== 'confirmed') return;
     this.transition('terminating');
-    const uri = this.remoteTarget || this.requestUri
-      || buildUri({ user: this.number, host: this.ua.account.domain });
     this.cseq += 1;
-    const headers = this.baseHeaders({ method: 'BYE', toUri: uri, toTag: this.remoteTag });
-    delete headers.Allow;
-    const msg = serialize({ startLine: `BYE ${uri} SIP/2.0`, headers });
+    const { uri, headers } = this.inDialogRequest('BYE');
+    const msg = serialize({ startLine: `BYE ${uri} SIP/2.0`, headers });  // fire and forget
     const target = this.ua.transport.peerFor(this.callId, this.remoteAddressFor());
-    // Fire and forget: the call is over locally either way, and a lost BYE is the carrier's
-    // session timer to clean up.
     try { await this.ua.transport.send(msg, target); this.ua.log('sip', `>> BYE (${target.host})`); } catch { /* gone */ }
   }
 
   async cancel() {
     if (this.ended || this.state === 'confirmed') return;
-    const uri = this.requestUri || buildUri({ user: this.number, host: this.ua.account.domain });
-    const headers = this.baseHeaders({ method: 'CANCEL', toUri: uri, toTag: '' });
-    headers.CSeq = `${this.cseq} CANCEL`;
+    const { uri, headers } = this.inDialogRequest('CANCEL');
+    headers.CSeq = `${this.cseq} CANCEL`;   // CANCEL shares the INVITE's CSeq number (RFC 3261 §9.1)
     const msg = serialize({ startLine: `CANCEL ${uri} SIP/2.0`, headers });
     const target = this.ua.transport.peerFor(this.callId, this.remoteAddressFor());
     try { await this.ua.transport.send(msg, target); this.ua.log('sip', '>> CANCEL'); } catch { /* best effort */ }
   }
 
-  /**
-   * The single way out. Idempotent on purpose: a BYE crossing a local hang-up fires twice and
-   * must produce exactly one `ended` event, or the UI logs the same call twice.
-   */
+  // The single way out, idempotent on purpose: a BYE crossing a local hang-up fires twice and must
+  // still produce exactly one `ended` event, or the UI logs the same call twice.
   end(reason = 'normal', { sendCancel = false, sendReject = 0, status = 0, detail = '' } = {}) {
     if (this.ended) return;
     this.ended = true;
@@ -324,15 +307,33 @@ class Dialog {
     this.timers.clear();
     if (sendCancel) this.cancel().catch(() => {});
     if (sendReject && this.request) this.reject(sendReject).catch(() => {});
-    this.transition('terminated');
+    // Not transition(): it refuses to move an ended dialog, and `ended` is already set above.
+    if (this.state !== 'terminated') {
+      this.state = 'terminated';
+      this.ua.emit('state', { callId: this.id, state: 'terminated', direction: this.direction });
+    }
     this.ua.onDialogEnded(this, { reason, status, detail });
   }
 }
 
-// ---- small helpers ---------------------------------------------------------------------
-const parseTag = (v) => /;\s*tag=([^;>]+)/i.exec(String(v || ''))?.[1] || '';
-// `<sip:x@y>;param` -> `sip:x@y`; a Contact with no angle brackets is the whole value.
-const contactUri = (v) => /<([^>]*)>/.exec(String(v || ''))?.[1] || String(v || '').split(',')[0].trim();
+// `;tag=abc`, and what a trunk sends: `; tag = abc`, `;tag=abc ;user=phone`
+const parseTag = (v) => /;\s*tag\s*=\s*([^;>\s]+)/i.exec(String(v || ''))?.[1]?.trim() || '';
+// The *first* Contact URI, the one §12.2.1.1 binds a dialog to. Split the comma *before* seeking
+// angle brackets: over `sip:a@h, <sip:b@h2>` a whole-value regex returns the second.
+const contactUri = (value) => {
+  const raw = String(value || '');
+  let i = 0;
+  for (let quoted = false; i < raw.length; i += 1) {
+    if (raw[i] === '"') quoted = !quoted;
+    else if (raw[i] === ',' && !quoted) break;
+  }
+  const head = raw.slice(0, i).trim();       // `"Doe, John" <sip:j@h>, <sip:k@h2>` -> the first one
+  const uri = (/<([^>]*)>/.exec(head) || [])[1] ?? head;
+  return /^(sips?|tel):/i.test(uri.trim()) ? uri.trim() : '';
+};
+// A To value down to its bare URI: the last <…> wins, so a display name may hold one.
+const toUriOf = (v) => (/.*<([^<>]*)>/.exec(String(v || ''))?.[1] || String(v || '').replace(/\s*;[^<>]*/g, '')).trim();
+
 // The key a retransmitted request answers to: branch + method (RFC 3261 §17.2.3).
 const ackKey = (r) => `${/branch=([^;]+)/.exec(String(r.first('via') || ''))?.[1] || ''}|${r.method}`;
 
@@ -340,11 +341,10 @@ function reasonForStatus(status) {
   if (status === 486 || status === 600) return 'busy';
   if (status === 487) return 'canceled';
   if (status === 603 || status === 403) return 'rejected';
-  if (status === 408 || status === 480) return 'timeout';
+  if (status === 408 || status === 480) return 'timeout';   // Timer B/F, or the far end gave up
   if (status === 404 || status === 410) return 'notfound';
-  if (status === 401 || status === 407) return 'auth';
-  if (status >= 400) return 'failed';
-  return 'normal';
+  if (status === 401 || status === 407) return 'auth';   // a challenge we could not answer
+  return status >= 400 ? 'failed' : 'normal';
 }
 
 module.exports = { Dialog, STATES, reasonForStatus, parseTag, contactUri, ackKey, branch, tag, callId };

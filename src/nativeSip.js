@@ -16,7 +16,7 @@
 //     `recording` reports that honestly instead of silently producing nothing;
 //   * registration lives in a process that outlives the tab, so a reload keeps the phone
 //     registered and an inbound call still rings.
-import { formatCallerNumber, holdCrossTabLock } from './utils.js';
+import { formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
 import { createRinger } from './utils/ringer.js';
 import { createTonePlayer, DTMF_TONES, BUSY_TONE, RINGBACK_TONE } from './utils/tones.js';
 

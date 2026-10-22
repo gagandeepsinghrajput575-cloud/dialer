@@ -11,18 +11,28 @@ const HEADER_LEN = 12;
 const SAMPLES_PER_PACKET = 160;   // 20 ms at 8 kHz
 const PT_DTMF = 101;
 
-function createSession({ payloadType = 0, ssrc = crypto.randomBytes(4).readUInt32BE(0) } = {}) {
+function createSession({
+  payloadType = 0,
+  ssrc = crypto.randomBytes(4).readUInt32BE(0),
+  seq = null,
+  timestamp = null,
+} = {}) {
   // Both counters are private and mutable; the getters below expose them for tests and logs.
   // A DTMF burst shares one timestamp but still consumes sequence numbers, which is why the
   // two are advanced separately rather than derived from one another.
-  let seq = crypto.randomBytes(2).readUInt16BE(0);
-  let stamp = crypto.randomBytes(4).readUInt32BE(0);
+  //
+  // The RFC leaves the starting values free, and random ones are the right default (RFC 3550
+  // §5.1: a predictable initial sequence number lets an attacker pre-spoof packets). They are
+  // seedable so a wrap-around at 65535 -> 0 and the 160-samples-per-frame advance can be pinned
+  // by a test instead of being sampled once in every 65 thousand runs.
+  let seqCounter = (seq === null || seq === undefined ? crypto.randomBytes(2).readUInt16BE(0) : Number(seq) || 0) & 0xffff;
+  let stamp = (timestamp === null || timestamp === undefined ? crypto.randomBytes(4).readUInt32BE(0) : Number(timestamp) || 0) >>> 0;
   return {
     ssrc,
     payloadType,
-    get seq() { return seq; },
+    get seq() { return seqCounter; },
     get timestamp() { return stamp; },
-    nextSeq() { const value = seq; seq = (seq + 1) & 0xffff; return value; },
+    nextSeq() { const value = seqCounter; seqCounter = (seqCounter + 1) & 0xffff; return value; },
     advance(_from, samples) { stamp = (stamp + samples) >>> 0; },
     /**
      * @param {Buffer} payload G.711 bytes
@@ -32,11 +42,11 @@ function createSession({ payloadType = 0, ssrc = crypto.randomBytes(4).readUInt3
       const buf = Buffer.allocUnsafe(HEADER_LEN + payload.length);
       buf[0] = 0x80;                                  // V=2, P=0, X=0, CC=0
       buf[1] = (marker ? 0x80 : 0) | (payloadType & 0x7f);
-      buf.writeUInt16BE(seq & 0xffff, 2);
+      buf.writeUInt16BE(seqCounter & 0xffff, 2);
       buf.writeUInt32BE(stamp >>> 0, 4);
       buf.writeUInt32BE(ssrc >>> 0, 8);
       payload.copy(buf, HEADER_LEN);
-      seq = (seq + 1) & 0xffff;
+      seqCounter = (seqCounter + 1) & 0xffff;
       stamp = (stamp + payload.length) >>> 0;
       return buf;
     },

@@ -104,7 +104,7 @@ export function SoftphoneProvider({ children }) {
     handlersRef.current.onActive?.(direction);
   }, [inboundRef, refreshStats, setActiveId, setInbound, setView]);
 
-  const onEnded = useCallback((direction) => {
+  const onEnded = useCallback((direction, reason) => {
     if (direction === 'inbound') {
       const rec = inboundRef.current;
       // Hand the finished call to the dialer, which owns the 1-8 disposition modal. The call
@@ -114,7 +114,7 @@ export function SoftphoneProvider({ children }) {
       setInbound(null);
       refreshStats();
     }
-    handlersRef.current.onEnded?.(direction);
+    handlersRef.current.onEnded?.(direction, reason);
   }, [inboundRef, refreshStats, setInbound, setInboundEnded]);
 
   const onRecordingReady = useCallback(async ({ blob, durationSec, callId }) => {

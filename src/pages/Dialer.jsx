@@ -592,10 +592,10 @@ export default function Dialer() {
   }, [setPhaseSafe, refreshStats]);
   // Fires when the engine ends the session. The mic is already cold by then (the engine
   // releases it before reporting), so classification opens on a call that is truly over.
-  const engineEnded = useCallback(() => {
-    webrtcLiveRef.current = false;
+  const engineEnded = useCallback((_dir, reason) => {
+    webrtcLiveRef.current = false; if (reason) toast(reason, 'error');
     if (phaseRef.current !== 'idle') webrtcFinishRef.current?.();
-  }, []);
+  }, [toast]);
   const handleRecordingReady = useCallback(async ({ blob, durationSec, callId: recCallId }) => {
     // SoftphoneProvider already uploads when recCallId is attached to the engine.
     if (recCallId) return;

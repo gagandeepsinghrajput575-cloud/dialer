@@ -21,6 +21,8 @@
 // can prove the far end answers. If the stack cannot be loaded at all, this throws a message
 // the agent can act on instead of letting the cockpit pretend a call is up.
 
+import { describeReject, NO_ANSWER } from './sipReject.mjs';
+
 const INSTALL_HINT = 'The in-browser softphone needs its SIP stack. Run: npm install sip.js';
 
 // Ask for a short registration and refresh it well before it lapses. A stale registration is
@@ -401,6 +403,20 @@ export function standbySession() {
   return standby;
 }
 
+// Tear a sip.js session down in the only state where its method is legal. cancel() and bye()
+// REJECT with "Invalid session state <state>" anywhere else (sip.js inviter.js / session.js), and
+// the old unguarded call left that rejection with nobody listening: the uncaught error that
+// crashed call teardown when the carrier had already ended the call. Dispose is the catch-all.
+export function endSession(inviter) {
+  const settle = (p) => { if (p && typeof p.catch === 'function') p.catch(() => {}); };
+  try {
+    const st = String(inviter?.state);
+    if (st === 'Established' && typeof inviter.bye === 'function') settle(inviter.bye());
+    else if ((st === 'Initial' || st === 'Establishing') && typeof inviter.cancel === 'function') settle(inviter.cancel());
+    else settle(inviter?.dispose?.());
+  } catch { /* already gone */ }
+}
+
 /**
  * Place an outbound call on the tab's existing registration.
  *
@@ -411,7 +427,7 @@ export function standbySession() {
  * @param {MediaStream} [opts.localStream] microphone the engine already opened
  * @returns {Promise<{stop: function, inviter: object, userAgent: object}>}
  */
-export async function dialOutbound({ remoteNumber, onState, onActive, localStream } = {}) {
+export async function dialOutbound({ remoteNumber, onState, onActive, onEnded, localStream } = {}) {
   const self = standby;
   if (!self?.ua) throw new Error('The in-browser softphone is not registered yet.');
   // Glare guard: if an inbound INVITE arrived <1 s ago, do not start outbound
@@ -430,26 +446,38 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
   });
 
   let stopped = false;
+  let answered = false;
+  let reported = false;
+  let rejectMsg = '';
   const stop = () => {
     if (stopped) return;
     stopped = true;
-    try {
-      if (inviter.state === SessionState.Established && typeof inviter.bye === 'function') inviter.bye();
-      else if (typeof inviter.cancel === 'function') inviter.cancel();
-      else inviter.dispose?.();
-    } catch { /* already gone */ }
+    endSession(inviter);
   };
 
   inviter.stateChange.addListener((s) => {
     const name = String(s);
     if (name === SessionState.Establishing || name === 'Establishing') onState?.('ringing');
-    else if (name === SessionState.Established || name === 'Established') { onState?.('active'); onActive?.(); }
-    else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) onState?.('ended');
+    else if (name === SessionState.Established || name === 'Established') { answered = true; onState?.('active'); onActive?.(); }
+    else if ((name === SessionState.Terminated || name === 'Terminated') && !stopped) {
+      // sip.js fires this BEFORE the request delegate hears the final response, so the carrier's
+      // reason is not known yet. A microtask lets the delegate run first.
+      queueMicrotask(() => {
+        if (stopped || reported) return;
+        reported = true;
+        stopped = true;
+        onEnded?.({ answered, reason: answered ? '' : (rejectMsg || NO_ANSWER) });
+      });
+    }
   });
 
   onState?.('dialing');
   try {
-    await inviter.invite();
+    await inviter.invite({
+      requestDelegate: {
+        onReject: (res) => { rejectMsg = describeReject(res?.message?.statusCode, res?.message?.reasonPhrase); },
+      },
+    });
   } catch (e) {
     stop();
     // Rejections here are the useful ones: 401/403 means credentials, 404 means the number.
@@ -482,7 +510,7 @@ export async function dialOutbound({ remoteNumber, onState, onActive, localStrea
  * @param {function} [opts.onIncomingCall] INVITE handler, when the engine wants standby calls
  * @returns {Promise<{stop: function}>}
  */
-export async function startSignalling({ session, remoteNumber, onState, onError, onActive, localStream, onIncomingCall } = {}) {
+export async function startSignalling({ session, remoteNumber, onState, onError, onActive, onEnded, localStream, onIncomingCall } = {}) {
   const sip = await loadSipStack();
   if (!sip) throw new Error(INSTALL_HINT);
   if (!session?.server) throw new Error('No SIP server is configured (Settings → Telephony).');
@@ -493,5 +521,5 @@ export async function startSignalling({ session, remoteNumber, onState, onError,
     onState: (s, detail) => { if (s !== 'ready') onError?.(detail || 'The in-browser softphone lost its registration.'); },
   });
 
-  return dialOutbound({ remoteNumber, onState, onActive, localStream });
+  return dialOutbound({ remoteNumber, onState, onActive, onEnded, localStream });
 }

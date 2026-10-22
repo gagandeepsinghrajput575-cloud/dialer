@@ -75,7 +75,7 @@ export function mediaUnavailableReason() {
  * @param {string}  [opts.countryCode] - default country code, for caller-ID display/matching
  * @param {string}  [opts.micDevice]   - preferred input device id
  * @param {function} opts.onActive     - called once when audio is genuinely flowing
- * @param {function} opts.onEnded      - called once when the session is finished
+ * @param {function} opts.onEnded      - called once when the session is finished: (dir, reason) — reason is the carrier's rejection sentence, '' when answered
  * @param {function} [opts.onIncoming] - called when the phone rings in the tab
  * @param {function} [opts.onIncomingEnded] - called when a ring ends unanswered
  */
@@ -374,7 +374,7 @@ export default function useWebRtc({
   }, [micDevice, startLevelMeter]);
 
   // ---- inbound ---------------------------------------------------------------------------
-  const finishActiveCall = useCallback((dir) => {
+  const finishActiveCall = useCallback((dir, reason = '') => {
     // Declared before hangUp uses it: closes the media and reports the end exactly once.
     if (dir === 'inbound') { inboundActiveRef.current = false; answeredInboundRef.current = null; }
     try { sipRef.current?.stop?.(); } catch { /* already gone */ }
@@ -382,12 +382,11 @@ export default function useWebRtc({
     releaseMedia();
     setStateSafe('ended');
     setDirection(null);
-    callbacksRef.current.onEnded?.(dir);
+    callbacksRef.current.onEnded?.(dir, reason);
     setTimeout(() => {
       if (stateRef.current === 'ended') setStateSafe(enabledRef.current ? 'standby' : 'idle');
     }, 400);
   }, [releaseMedia, setStateSafe]);
-
 
   // The ring ended before anybody picked up: the caller hung up (SIP CANCEL), the agent said
   // no, or another tab owns the call. The ringer stops first — always first.
@@ -836,8 +835,8 @@ export default function useWebRtc({
         session,
         remoteNumber: phone,
         localStream: streamRef.current,
-        onState: setStateSafe,
-        onError: (msg) => { setError(msg); setStateSafe('error'); },
+        onState: setStateSafe, onError: (msg) => { setError(msg); setStateSafe('error'); },
+        onEnded: ({ answered, reason }) => { if (!answered && reason) setError(reason); finishActiveCall('outbound', answered ? '' : reason); },
         onActive: () => {
           try {
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
@@ -876,11 +875,11 @@ export default function useWebRtc({
       setStateSafe('error');
       return { ok: false, reason };
     }
-  }, [enabled, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
+  }, [enabled, finishActiveCall, handleIncoming, openMicrophone, playTone, releaseMedia, setStateSafe, startRecording, startSimulatedLevel]);
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;
-    if (current === 'idle' || current === 'standby') return;
+    if (current === 'idle' || current === 'standby' || current === 'ended') return; // 'ended': already torn down
     const wasInbound = inboundActiveRef.current;
     finishActiveCall(wasInbound ? 'inbound' : 'outbound');
   }, [finishActiveCall]);

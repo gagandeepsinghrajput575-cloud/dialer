@@ -32,41 +32,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { formatCallerNumber, holdCrossTabLock } from './utils.js';
 import { createRinger } from './utils/ringer.js';
+// Capability probes, the keypad tones and the local tone player. Shared with the native SIP
+// engine (nativeSip.js), which has no peer connection but gives the same audible feedback.
+import {
+  DTMF_KEYS, DTMF_TONES, audioContextCtor, createTonePlayer as tonePlayer, listAudioDevices,
+  mediaSupported, mediaUnavailableReason,
+} from './utils/tones.js';
+// The other in-app engine: the headless SIP daemon the desktop app supervises. Same contract,
+// no microphone here — see nativeSip.js for why it exists and what it cannot do.
+import * as nativeSip from './nativeSip.js';
+import { startCallRecorder, stopCallRecorder } from './utils/recorder.js';
+
+// Re-exported so Dialer.jsx and Settings.jsx keep importing them from the engine they already
+// know, whichever engine is actually driving the call.
+export { DTMF_KEYS, DTMF_TONES, mediaSupported, mediaUnavailableReason, audioContextCtor, listAudioDevices };
 
 export const WEBRTC_STATES = ['idle', 'standby', 'registering', 'dialing', 'ringing', 'incoming', 'active', 'ended', 'error'];
 
 // The lock every tab competes for before it makes a sound. Named here, next to the engine that
 // takes it, so the dial lock and the audio lock cannot drift apart.
 export const INBOUND_AUDIO_LOCK = 'pulse-inbound-audio';
-
-// The tones a keypad produces. Frequencies are the standard DTMF pairs.
-export const DTMF_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
-const DTMF_TONES = {
-  1: [697, 1209], 2: [697, 1336], 3: [697, 1477],
-  4: [770, 1209], 5: [770, 1336], 6: [770, 1477],
-  7: [852, 1209], 8: [852, 1336], 9: [852, 1477],
-  '*': [941, 1209], 0: [941, 1336], '#': [941, 1477],
-};
-
-// ---- capability probes. Every one of these can legitimately be missing. ----
-export function mediaSupported() {
-  return typeof navigator !== 'undefined'
-    && !!navigator.mediaDevices
-    && typeof navigator.mediaDevices.getUserMedia === 'function';
-}
-
-export function audioContextCtor() {
-  if (typeof window === 'undefined') return null;
-  return window.AudioContext || window.webkitAudioContext || null;
-}
-
-// A short, honest sentence for why live audio is unavailable, used instead of a stack trace.
-export function mediaUnavailableReason() {
-  if (typeof navigator === 'undefined') return 'This environment has no browser media APIs.';
-  if (!navigator.mediaDevices) return 'The browser did not expose microphone access (it requires localhost or HTTPS).';
-  if (typeof navigator.mediaDevices.getUserMedia !== 'function') return 'getUserMedia is not available in this browser.';
-  return '';
-}
 
 /**
  * @param {object}  opts
@@ -123,6 +108,8 @@ export default function useWebRtc({
   const answerInboundRef = useRef(null);
   const declineInboundRef = useRef(null);
   const glareMutexRef = useRef(false); // glare window: outbound invite in-flight vs inbound INVITE
+  const nativeRef = useRef(null);      // the native engine, while the desktop daemon owns audio
+  const nativeMetaRef = useRef(null);  // which carrier/engine, for the badge and the dialer label
 
   callbacksRef.current = { onActive, onEnded, onIncoming, onIncomingEnded, onRecordingReady };
   enabledRef.current = enabled;
@@ -139,6 +126,17 @@ export default function useWebRtc({
     try { ringerRef.current?.stop(); } catch { /* a silent ringer is not an error */ }
   }, []);
 
+  // ---- the native engine seam ----------------------------------------------------------------
+  // Built once per session descriptor. It reports through the very setters the browser engine
+  // uses, so the rest of this hook — and everything above it — cannot tell the engines apart.
+  const makeNative = useCallback((session) => nativeSip.createNativeEngine({
+    session,
+    setState: setStateSafe, setStandby, setLevel, setMuted, setError, setTarget, setDirection,
+    setIncomingCall, setStandbyNote, setMicLabel, callbacksRef, countryCode,
+    lockKey: INBOUND_AUDIO_LOCK,
+  }), [countryCode, setDirection, setIncomingCall, setLevel, setMicLabel, setMuted, setStandby,
+    setStandbyNote, setStateSafe, setTarget]);
+
   const releaseInboundLock = useCallback(() => {
     const lock = lockRef.current;
     lockRef.current = null;
@@ -146,73 +144,18 @@ export default function useWebRtc({
   }, []);
 
   const startRecording = useCallback((callId) => {
-    if (dryRun || typeof window === 'undefined' || typeof window.MediaRecorder !== 'function') return;
-    const Ctx = audioContextCtor();
-    if (!Ctx) return;
-    try {
-      const ctx = new Ctx();
-      const dest = ctx.createMediaStreamDestination();
-      if (streamRef.current && streamRef.current.getAudioTracks().length) {
-        try {
-          const micSource = ctx.createMediaStreamSource(streamRef.current);
-          micSource.connect(dest);
-        } catch { /* ignore */ }
-      }
-      const remoteStream = audioRef.current?.srcObject;
-      if (remoteStream && remoteStream.getAudioTracks().length) {
-        try {
-          const remoteSource = ctx.createMediaStreamSource(remoteStream);
-          remoteSource.connect(dest);
-        } catch { /* ignore */ }
-      }
-      const mime = typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg');
-      const recorder = new MediaRecorder(dest.stream, { mimeType: mime });
-      const chunks = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-      const startedAt = Date.now();
-      recorder.start(1000);
-      recordingCallIdRef.current = callId || null;
-      recorderRef.current = {
-        recorder,
-        ctx,
-        chunks,
-        mimeType: mime,
-        startedAt,
-        callId,
-        stop: () => {
-          try {
-            if (recorder.state !== 'inactive') recorder.stop();
-          } catch { /* already stopped */ }
-        },
-      };
-    } catch {
-      recorderRef.current = null;
-    }
+    if (dryRun) return;
+    recordingCallIdRef.current = callId || null;
+    recorderRef.current = startCallRecorder(streamRef, audioRef, callId);
   }, [dryRun]);
 
   const stopRecording = useCallback(() => {
     const session = recorderRef.current;
     if (!session) return;
     recorderRef.current = null;
-    try {
-      session.recorder.onstop = () => {
-        try {
-          const durationSec = Math.max(0, Math.round((Date.now() - session.startedAt) / 1000));
-          const blob = new Blob(session.chunks, { type: session.mimeType });
-          if (blob.size > 0) {
-            callbacksRef.current.onRecordingReady?.({ blob, durationSec, callId: session.callId || recordingCallIdRef.current });
-          }
-        } catch { /* ignore assembly errors */ }
-        try { session.ctx.close(); } catch { /* ignore */ }
-      };
-      session.stop();
-    } catch {
-      try { session.ctx.close(); } catch { /* ignore */ }
-    }
+    stopCallRecorder(session, (r) => callbacksRef.current.onRecordingReady?.({
+      ...r, callId: r.callId || recordingCallIdRef.current,
+    }));
   }, []);
 
   // ---- teardown. Idempotent, and never throws. ----
@@ -326,41 +269,8 @@ export default function useWebRtc({
     }, 110);
   }, []);
 
-  // Ringback / DTMF tones. Purely local: nothing is transmitted anywhere.
-  // Hardened: track AudioContext alongside oscillators so releaseMedia can close it (G-5).
-  const playTone = useCallback((freqs, ms) => {
-    const Ctx = audioContextCtor();
-    if (!Ctx) return;
-    let ctx, gain, oscs = [];
-    try {
-      ctx = new Ctx();
-      if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
-      gain = ctx.createGain();
-      gain.gain.value = 0.06;                     // quiet: it is a cue, not a ringtone
-      gain.connect(ctx.destination);
-      oscs = freqs.map((f) => {
-        const o = ctx.createOscillator();
-        o.frequency.value = f;
-        o.connect(gain);
-        o.start();
-        return o;
-      });
-      const entry = { ctx, gain, oscs, osc: oscs[0], stop: () => {
-        for (const o of oscs) try { o.stop(); o.disconnect(); } catch {}
-        try { gain.disconnect(); } catch {}
-        try { if (ctx.state !== 'closed') ctx.close(); } catch {}
-      }};
-      tonesRef.current.push(entry);
-      setTimeout(() => {
-        try { entry.stop(); } catch {}
-        tonesRef.current = tonesRef.current.filter((e) => e !== entry);
-      }, ms);
-    } catch {
-      // Ensure partial context is closed on failure
-      try { for (const o of oscs) try { o.stop(); } catch {} } catch {}
-      try { if (ctx && ctx.state !== 'closed') ctx.close(); } catch {}
-    }
-  }, []);
+  // Ringback / DTMF tones live in utils/tones.js so the native engine can share them.
+  const playTone = useCallback(tonePlayer(tonesRef), [tonePlayer]);
 
   // ---- opening the microphone. One implementation for both directions. ----
   const openMicrophone = useCallback(async () => {
@@ -605,6 +515,7 @@ export default function useWebRtc({
   const declineInbound = useCallback(async () => {
     const entry = incomingRef.current;
     if (!entry) return { ok: false, reason: 'no-incoming' };
+    if (entry.native) return nativeRef.current?.decline() || { ok: false, reason: 'no-native-engine' };
     stopRinger();
     entry.endReason = 'declined';      // set before reject: the teardown reads it synchronously
     try { entry.reject?.({ statusCode: 603 }); } catch { /* ignore */ }
@@ -679,6 +590,17 @@ export default function useWebRtc({
         return;
       }
       if (cancelled) return;
+      // The desktop daemon holds the phone: register through it and skip the browser stack
+      // entirely — no getUserMedia, no peer connection, no WebSocket gateway to reach.
+      if (nativeSip.isNativeSession(session)) {
+        nativeMetaRef.current = { engine: 'native', carrier: session.provider, domain: session.domain };
+        if (!nativeRef.current) nativeRef.current = makeNative(session);
+        try { await nativeRef.current.start(); } catch (e) {
+          if (!cancelled) setStandby({ state: 'unavailable', reason: e?.message || String(e) });
+        }
+        return;
+      }
+      nativeMetaRef.current = null;
       if (!session?.canRegister) {
         setStandby({
           state: 'unavailable',
@@ -706,8 +628,14 @@ export default function useWebRtc({
       }
     })();
 
-    return () => { cancelled = true; };
-  }, [enabled, dryRun]);
+    return () => {
+      cancelled = true;
+      // Leaving the mode (or the tab) hands the audio device back: the daemon unregisters only
+      // when the desktop app quits, but this renderer must stop driving it.
+      try { nativeRef.current?.dispose(); } catch { /* already gone */ }
+      nativeRef.current = null;
+    };
+  }, [enabled, dryRun, makeNative]);
 
   // Switching the mode, or leaving the tab idle for good, must not leave a registration open.
   useEffect(() => {
@@ -750,6 +678,23 @@ export default function useWebRtc({
       }, 1400);
       tonesRef.current.push({ stop: () => { clearTimeout(dial); clearTimeout(ring); clearTimeout(live); } });
       return { ok: true, simulated: true };
+    }
+
+    // ---- native path ----
+    // The daemon owns SIP *and* the audio device, so there is no microphone to open and no peer
+    // connection to build: one command, and the carrier's trunk does the rest.
+    if (nativeSip.isNativeSession(session)) {
+      nativeMetaRef.current = { engine: 'native', carrier: session.provider, domain: session.domain };
+      const engine = nativeRef.current || (nativeRef.current = makeNative(session));
+      glareMutexRef.current = false;
+      const res = await engine.dial(phone, { callId });
+      if (res?.ok === false) {
+        glareMutexRef.current = false;
+        setError(res.error || 'The native softphone could not place that call.');
+        setStateSafe('error');
+        return { ok: false, reason: res.error || 'native-dial-failed' };
+      }
+      return { ok: true, native: true, ...res };
     }
 
     // ---- live path ----
@@ -880,12 +825,23 @@ export default function useWebRtc({
 
   const hangUp = useCallback(() => {
     const current = stateRef.current;
+    // A native call is hung up by the process that holds the dialog; 'ended' comes back as an
+    // event and drives the same teardown the browser engine would.
+    if (nativeRef.current && (nativeRef.current.live || nativeRef.current.incoming)) {
+      nativeRef.current.hangUp().catch(() => {});
+      return;
+    }
     if (current === 'idle' || current === 'standby') return;
     const wasInbound = inboundActiveRef.current;
     finishActiveCall(wasInbound ? 'inbound' : 'outbound');
   }, [finishActiveCall]);
 
   const toggleMute = useCallback(() => {
+    if (nativeRef.current?.live) {
+      mutedRef.current = !mutedRef.current;
+      nativeRef.current.toggleMute().catch(() => {});
+      return mutedRef.current;
+    }
     const next = !mutedRef.current;
     mutedRef.current = next;
     try {
@@ -901,6 +857,9 @@ export default function useWebRtc({
     if (!DTMF_KEYS.includes(String(digit))) return false;
     const key = String(digit);
     setDtmfLog((log) => [...log.slice(-11), key]);
+
+    // The native engine sends RFC 2833 through the daemon and plays the tone itself.
+    if (nativeRef.current?.live) { nativeRef.current.sendDtmf(key).catch(() => {}); return true; }
 
     // A real session can carry the tone in-band if the browser exposes DTMF on the sender.
     try {
@@ -947,25 +906,18 @@ export default function useWebRtc({
     start, hangUp, toggleMute, sendDtmf, reset,
     answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
+    // Which engine is holding the phone. The cockpit shows the label and, for the native one,
+    // says plainly that recording is the daemon's business — see nativeSip.js.
+    native: !!nativeMetaRef.current,
+    engine: nativeMetaRef.current?.engine || 'webrtc',
+    engineLabel: nativeMetaRef.current
+      ? nativeSip.nativeStandbyLabel({ provider: nativeMetaRef.current.carrier, domain: nativeMetaRef.current.domain })
+      : 'browser softphone',
+    nativeRecording: nativeRef.current?.recording || null,
+    nativeBridge: nativeSip.nativeAvailable(),
   }), [
     state, muted, level, error, target, dtmfLog, micLabel, standby, standbyNote, incomingCall, direction,
     start, hangUp, toggleMute, sendDtmf, reset, answerInbound, declineInbound, simulateIncomingCall, simulateCallerHangup,
     startRecording, stopRecording,
   ]);
-}
-
-// Enumerate the microphones/cameras the browser will admit to. Labels are blank until the
-// agent has granted permission at least once, which is a browser rule, not a bug.
-export async function listAudioDevices() {
-  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
-    return { supported: false, inputs: [], outputs: [], needsPermission: false };
-  }
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const inputs = devices.filter((d) => d.kind === 'audioinput').map((d) => ({ id: d.deviceId, label: d.label || 'Microphone' }));
-    const outputs = devices.filter((d) => d.kind === 'audiooutput').map((d) => ({ id: d.deviceId, label: d.label || 'Speaker' }));
-    return { supported: true, inputs, outputs, needsPermission: inputs.length > 0 && !inputs.some((d) => d.label && d.label !== 'Microphone') };
-  } catch (e) {
-    return { supported: false, inputs: [], outputs: [], needsPermission: false, error: String(e?.message || e) };
-  }
 }

@@ -1,0 +1,19 @@
+{
+  "name": "pulse-dialer-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pulse Dialer as a Mac app: one window, plus a headless native SIP daemon that owns the microphone, the speaker and the carrier trunk.",
+  "main": "main.js",
+  "scripts": {
+    "desktop": "electron .",
+    "daemon": "bin/pulse-sip-daemon --keep-alive --log-level=debug",
+    "daemon:help": "bin/pulse-sip-daemon --help",
+    "build:audio": "bash scripts/build-daemon.sh",
+    "release-phone": "node scripts/release-phone.js http://127.0.0.1:3001"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

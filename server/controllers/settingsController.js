@@ -1,5 +1,7 @@
 const settings = require('../repositories/settingsRepo');
 const telephony = require('../services/telephonyService');
+const carrierAccount = require('../services/carrierAccount');
+const softphoneSession = require('../services/softphoneSession');
 const emailService = require('../services/emailService');
 const backup = require('../db/backup');
 const path = require('path');
@@ -36,27 +38,34 @@ const testSoftphone = asyncHandler(async (req, res) => {
   const sample = telephony.normalizePhone(req.body?.number || '20123456');
 
   if (mode === 'webrtc') {
-    const session = telephony.webrtcSession();
+    // Whichever engine owns the in-app phone right now (see services/softphoneSession). With no
+    // desktop supervisor running this is the browser descriptor, exactly as it always was.
+    const session = softphoneSession.resolve();
+    const native = softphoneSession.isNative(session);
     return res.json({
       ok: true,
+      engine: native ? 'native' : 'webrtc',
       configured: session.canRegister,
       protocol: 'webrtc',
       telephonyMode: mode,
       sampleNumber: sample,
-      dialUri: telephony.buildWebRtcUri(sample),
-      dialUriFull: telephony.buildWebRtcUri(sample),
+      dialUri: native ? `sip:${sample}@${session.domain}` : telephony.buildWebRtcUri(sample),
+      dialUriFull: native ? `sip:${sample}@${session.domain}` : telephony.buildWebRtcUri(sample),
       inBrowser: true,
       callerId: session.callerId,
       callerIdPool: telephony.callerIdPool(),
       sipServer: session.server,
       wsUrl: session.wsUrl,
-      needsCredentialHandoff: session.configured && !session.credentialHandoff,
+      // The native engine keeps the secret server-side, so a handoff is never what it lacks.
+      needsCredentialHandoff: !native && session.configured && !session.credentialHandoff,
       webrtc: session,
-      message: session.canRegister
-        ? `Ready — the browser will dial ${sample} over ${session.wsUrl}.`
-        : session.configured
-          ? 'The SIP account is saved, but credential handoff is off, so the browser cannot register. Turn it on in Settings → Telephony.'
-          : `The in-browser softphone is missing: ${session.missing.join(', ')}. Add it in Settings → Telephony.`,
+      message: native
+        ? carrierAccount.testMessage(sample)
+        : session.canRegister
+          ? `Ready — the browser will dial ${sample} over ${session.wsUrl}.`
+          : session.configured
+            ? 'The SIP account is saved, but credential handoff is off, so the browser cannot register. Turn it on in Settings → Telephony.'
+            : `The in-browser softphone is missing: ${session.missing.join(', ')}. Add it in Settings → Telephony.`,
     });
   }
 

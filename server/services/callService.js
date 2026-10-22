@@ -7,6 +7,7 @@ const settings = require('../repositories/settingsRepo');
 const recordingRepo = require('../repositories/recordingRepo');
 const { recordingsDir } = require('../config/env');
 const telephony = require('./telephonyService');
+const softphoneSession = require('./softphoneSession');
 const prospectService = require('./prospectService');
 const { ApiError } = require('../middleware/errorHandler');
 const { OUTCOMES } = require('../config/defaults');
@@ -91,11 +92,22 @@ function start(prospectId, { tzOffset = null } = {}) {
   }
 
   const readiness = webrtc ? telephony.webrtcReadiness() : null;
+  // While the desktop supervisor holds a live native SIP daemon the call is placed by that
+  // daemon over UDP SIP, so the response carries the address it will actually dial. Call
+  // history keeps the gateway URI: that row describes the number, not the engine of the moment.
+  const native = webrtc ? softphoneSession.resolve() : null;
+  const useNative = softphoneSession.isNative(native);
 
   return {
     callId: call.id,
     dryRun: dry,
-    dialUri,
+    dialUri: useNative ? `sip:${telephony.normalizePhone(p.phone)}@${native.domain}` : dialUri,
+    engine: webrtc ? (useNative ? 'native' : 'webrtc') : proto,
+    native: useNative ? {
+      carrier: native.provider, domain: native.domain, port: native.port,
+      transport: native.transport, callerId: native.callerId, configured: native.configured,
+      missing: native.missing, hint: native.hint,
+    } : null,
     dialUriFull: webrtc ? dialUri : telephony.buildDialUriFull(p.phone),
     protocol: webrtc ? 'webrtc' : proto,
     telephonyMode: callMode,

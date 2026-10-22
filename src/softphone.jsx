@@ -174,6 +174,11 @@ export function SoftphoneProvider({ children }) {
     enabled, dryRun,
     standbyLabel: dryRun
       ? 'Standby · Test mode (calls simulated)'
+      // The native engine says so: the agent should be able to tell that the phone in their ear
+      // is the desktop daemon's, not the tab's, without opening Settings.
+      : engine.native ? `${engine.engineLabel} · ${engine.standby.state === 'ready' ? 'Ready for calls'
+        : engine.standby.state === 'registering' ? 'Registering…'
+          : engine.standby.state === 'unavailable' ? 'Unavailable' : 'Off'}`
       : engine.standby.state === 'ready' ? 'Standby · Ready for calls'
         : engine.standby.state === 'registering' ? 'Standby · Registering…'
           : engine.standby.state === 'unavailable' ? 'Standby unavailable'

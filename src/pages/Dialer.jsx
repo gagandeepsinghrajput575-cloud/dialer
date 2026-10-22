@@ -792,9 +792,9 @@ export default function Dialer() {
       }
       const r = guarded.value;
       setCallId(r.callId);
-      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, phone: r.phone });
+      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, engine: r.engine, phone: r.phone });
       patchLocal(active.id, { call_count: active.call_count + 1, last_called_at: new Date().toISOString() });
-      const softphone = softphoneLabel(r.telephonyMode);
+      const softphone = softphoneLabel(r.telephonyMode, r.engine);
 
       // ---- In-browser call: no OS dispatch and no invented 'active' ----
       // The server never hands out a sip:/tel: URI for this mode; the media session is built
@@ -840,7 +840,7 @@ export default function Dialer() {
   // Re-dispatch the same URI when the OS prompt was dismissed or the softphone was closed.
   const relaunchSoftphone = useCallback(() => {
     if (!dial?.uri) return;
-    const softphone = softphoneLabel(dial.mode);
+    const softphone = softphoneLabel(dial.mode, dial.engine);
     if (phaseRef.current === 'idle') return;
     // Test mode must never hand a dial URI to the OS — not even on a re-launch.
     if (settings?.dry_run === '1') {
@@ -1097,8 +1097,8 @@ export default function Dialer() {
       }
 
       setCallId(r.callId);
-      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, phone: r.phone });
-      const softphone = softphoneLabel(r.telephonyMode);
+      setDial({ uri: r.dialUri, full: r.dialUriFull, protocol: r.protocol, mode: r.telephonyMode, engine: r.engine, phone: r.phone });
+      const softphone = softphoneLabel(r.telephonyMode, r.engine);
 
       if (r.inBrowser) {
         const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
@@ -1282,7 +1282,7 @@ export default function Dialer() {
   // Tab labels are chips ("To call"), not prose — spelling them into a sentence produced
   // "Every lead in to call has been called". These are the same three queues, said out loud.
   const tabProse = { new: 'the call list', follow: 'the follow-up list', all: 'the list' }[tab] || 'this queue';
-  const softphone = softphoneLabel(settings?.telephony_mode);
+  const softphone = softphoneLabel(settings?.telephony_mode, webrtc?.engine);
   const cc = ccLabel(settings?.default_country_code);
   const proto = settings?.softphone_protocol === 'tel' ? 'tel' : 'sip';
   // In-browser mode reports the engine's own state, so the strip under the callbar says

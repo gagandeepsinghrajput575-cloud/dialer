@@ -3,10 +3,22 @@
 let sessionToken = '';
 let tokenLoad = null;
 
+// In a browser tab the API is same-origin, so every path below is relative and the dev server's
+// proxy does the rest. In the desktop app the page may be served from `file://` or from a
+// different origin than the API, where a relative path has nothing to resolve against — so
+// `desktop/preload.js` injects the server's absolute origin and every request (and every media
+// URL) is prefixed with it. Same code, both homes.
+const injectedBase = () => {
+  const b = typeof window !== 'undefined' ? window.pulseNativeSip?.apiBase : '';
+  return typeof b === 'string' ? b.replace(/\/+$/, '') : '';
+};
+export const apiBase = () => injectedBase();
+export const apiUrl = (path) => `${injectedBase()}${String(path || '').startsWith('/') ? path : `/${path}`}`;
+
 function loadToken() {
   if (sessionToken) return Promise.resolve(sessionToken);
   if (!tokenLoad) {
-    tokenLoad = fetch('/api/session')
+    tokenLoad = fetch(apiUrl('/api/session'))
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => { sessionToken = (j && j.token) || ''; return sessionToken; })
       .catch(() => '')
@@ -29,7 +41,7 @@ async function req(method, url, body, isForm, retried, signal) {
   if (body && !isForm) headers['Content-Type'] = 'application/json';
   if (sessionToken) headers['x-pulse-token'] = sessionToken;
   headers['x-requested-with'] = 'pulse-dialer';
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method,
     headers,
     body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
@@ -171,7 +183,7 @@ export const api = {
   },
   deleteRecording: (callId) => req('DELETE', `/api/recordings/${callId}`),
   demoRecordings: () => req('POST', '/api/recordings/demo', {}),
-  recordingAudioUrl: (callId) => `/api/recordings/${callId}/audio`,
+  recordingAudioUrl: (callId) => apiUrl(`/api/recordings/${callId}/audio`),
   recordingChats: (callId) => req('GET', `/api/recordings/${callId}/chats`),
   createRecordingChat: (callId, title) => req('POST', `/api/recordings/${callId}/chats`, { title }),
   getRecordingChat: (callId, chatId) => req('GET', `/api/recordings/${callId}/chats/${chatId}`),
@@ -179,6 +191,16 @@ export const api = {
   recordingAiChat: (callId, body) => req('POST', `/api/recordings/${callId}/ai-chat`, body),
   getRecordingScript: () => req('GET', '/api/recordings/script'),
   updateRecordingScript: (script) => req('PUT', '/api/recordings/script', { script }),
+
+  // ---- the in-app softphone, whichever engine holds it ----
+  // `webrtcSession()` (above) describes the engine that is live: 'webrtc' means the browser holds
+  // the media, a descriptor with `engine: 'native'` means the desktop daemon does. See
+  // server/services/softphoneSession.js for the switch.
+  // The SIP account the *daemon* registers with, secret included. The renderer never needs it —
+  // it is here so the desktop supervisor can be pointed at the API and fetch it itself.
+  carrierCredentials: (secret = true) => req('GET', `/api/telephony/carrier-credentials?secret=${secret ? 1 : 0}`),
+  // The supervisor's liveness beat: this is what makes the server hand the phone to the daemon.
+  nativeHeartbeat: (b) => req('POST', '/api/telephony/native-heartbeat', b || {}),
 
   // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
   flynumber: () => req('GET', '/api/telephony/flynumber'),

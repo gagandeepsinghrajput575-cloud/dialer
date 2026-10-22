@@ -5,6 +5,8 @@ const path = require('path');
 const settings = require('../repositories/settingsRepo');
 const telephony = require('../services/telephonyService');
 const followUpService = require('../services/followUpService');
+const carrierAccount = require('../services/carrierAccount');
+const softphoneSession = require('../services/softphoneSession');
 const { audioDir } = require('../config/env');
 const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
@@ -15,7 +17,36 @@ const businessHours = asyncHandler(async (req, res) => res.json(telephony.busine
 // allowlist (middleware/guard) and by an explicit session-token check on the route, because
 // this response is the only place a SIP credential can leave the process — and only when the
 // agent has turned the handoff on. See telephonyService.webrtcSession for that reasoning.
-const webrtcSession = asyncHandler(async (req, res) => res.json(telephony.webrtcSession()));
+//
+// While the desktop supervisor holds a live native SIP daemon, the same endpoint describes that
+// engine instead (see services/softphoneSession), so the cockpit has one call to make either way.
+const webrtcSession = asyncHandler(async (req, res) => res.json(softphoneSession.resolve()));
+
+// GET /api/telephony/carrier-credentials
+// The SIP account the *daemon* registers with, secret included. Token-gated like the session
+// endpoint and read by the local supervisor process only: the renderer gets `password: ''` from
+// webrtc-session and never sees this response, which keeps the secret off the browser.
+const carrierCredentials = asyncHandler(async (req, res) => {
+  const includeSecret = String(req.query?.secret || '1') !== '0';
+  res.json(carrierAccount.credentials({ includeSecret }));
+});
+
+// POST /api/telephony/native-heartbeat
+// The supervisor's liveness beat. Carrying `engine: 'pulse-sip-daemon'` is also the opt-in:
+// running the desktop app *is* the decision to use the native phone, and quitting it (or letting
+// the beat lapse for HEARTBEAT_TTL_MS) hands the app straight back to the browser engine.
+const nativeHeartbeat = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const engine = String(body.engine || '').trim();
+  if (engine === carrierAccount.NATIVE_ENGINE) {
+    carrierAccount.setEngine(true);
+  } else if (engine === 'off' || engine === 'none') {
+    carrierAccount.setEngine(false);
+  }
+  if (body.clear) carrierAccount.clearBeat();
+  else carrierAccount.beat({ pid: body.pid, version: body.version, audio: body.audio });
+  res.json({ ok: true, ...carrierAccount.webrtcSession() });
+});
 
 const callerIds = asyncHandler(async (req, res) => res.json({
   pool: telephony.callerIdPool(),
@@ -100,5 +131,6 @@ const updateFlynumber = asyncHandler(async (req, res) => {
 
 module.exports = {
   businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting,
-  greetingFile, followUpEmail, scheduleFollowUp, flynumber, updateFlynumber
+  greetingFile, followUpEmail, scheduleFollowUp, flynumber, updateFlynumber,
+  carrierCredentials, nativeHeartbeat,
 };

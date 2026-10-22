@@ -115,6 +115,9 @@ export default function SettingsPage() {
   const [devices, setDevices] = useState({ supported: false, inputs: [], outputs: [] });
   const [outboxCount, setOutboxCount] = useState(null);
   const [testingSmtp, setTestingSmtp] = useState(false);
+  // The in-app phone has two engines; this is the live report on the native one (the headless
+  // SIP daemon the desktop app supervises). null until the descriptor says it exists.
+  const [nativeSession, setNativeSession] = useState(null);
 
   useEffect(() => {
     if (settings && !f) setF({ ...settings, telnyx_sip_password: '', telnyx_api_key: '', flynumber_sip_password: '', dry_run: settings.dry_run === '1' });
@@ -124,6 +127,15 @@ export default function SettingsPage() {
     try { setBackups((await api.backups()).backups || []); } catch { /* ignore */ }
   }, []);
   useEffect(() => { loadBackups(); }, [loadBackups]);
+
+  useEffect(() => {
+    if (settings?.telephony_mode !== 'webrtc') { setNativeSession(null); return undefined; }
+    let cancelled = false;
+    api.webrtcSession()
+      .then((sess) => { if (!cancelled && sess?.engine === 'native') setNativeSession(sess); })
+      .catch(() => { /* no descriptor is not an error worth showing */ });
+    return () => { cancelled = true; };
+  }, [settings]);
 
   const testSmtp = async () => {
     setTestingSmtp(true); setSmtpTest(null);
@@ -184,7 +196,7 @@ export default function SettingsPage() {
   // The two modes hand out completely different URIs, so the sample must not lie about which
   // one Pulse will actually dial.
   const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer};transport=ws` : `${proto}:+${cc}20123456`;
-  const softphone = softphoneLabel(f.telephony_mode);
+  const softphone = softphoneLabel(f.telephony_mode, softphoneEngine?.engine);
 
   const save = async () => {
     setSaving(true);
@@ -385,6 +397,48 @@ export default function SettingsPage() {
           </div>
 
           <MicTester deviceId={f.webrtc_mic_device} onGranted={loadDevices} />
+
+          {/* ---- the second in-app engine: the headless native SIP daemon ------------------- */}
+          {/* FlyNumber publishes no WebRTC gateway, so a browser tab cannot register with it at
+              all. The desktop app runs a headless daemon that speaks plain UDP SIP and opens
+              CoreAudio itself: same cockpit, same keys, no second window to switch to. This card
+              reports which engine is live and, when the daemon is the one, exactly what it will
+              register — so "missing: wsUrl" can never be the whole story again. */}
+          <div className="handoff-row" style={{ alignItems: 'flex-start' }}>
+            <div>
+              <b><Headphones size={13} /> Native softphone (desktop app)</b>
+              <small>
+                {nativeSession
+                  ? `Live — the headless SIP daemon holds the phone: ${nativeSession.carrierName || nativeSession.provider} `
+                    + `over ${(nativeSession.transport || 'udp').toUpperCase()} SIP to ${nativeSession.domain}:${nativeSession.port}. `
+                    + 'The SIP secret stays on this machine: the daemon reads it from the local API and the browser never sees it.'
+                  : 'Not running. Start the desktop app (npm run desktop) and it takes over in-app calls — '
+                    + 'the only option for a carrier with no WebRTC gateway, like FlyNumber.'}
+              </small>
+              {nativeSession ? (
+                <span className="mono small">
+                  {nativeSession.username || '(no SIP user)'}@{nativeSession.domain}:{nativeSession.port}
+                  {' · caller ID '}{nativeSession.callerId || '(unset)'}
+                  {nativeSession.daemon?.audio ? ` · audio ${nativeSession.daemon.audio}` : ''}
+                  {nativeSession.daemon?.pid ? ` · pid ${nativeSession.daemon.pid}` : ''}
+                </span>
+              ) : (
+                <span className="mono small">
+                  would register {(f.flynumber_sip_user || '&lt;flynumber_sip_user&gt;')}@{f.flynumber_sip_server || 'sip.flynumber.com'}:5060
+                  {settings.has_flynumber_password ? ' · secret saved' : ' · no secret saved yet'}
+                </span>
+              )}
+              {nativeSession && !nativeSession.configured && (
+                <p className="muted small"><AlertTriangle size={12} /> {nativeSession.hint}</p>
+              )}
+              {!nativeSession && softphoneEngine?.nativeBridge && (
+                <p className="muted small"><AlertTriangle size={12} /> This is the desktop app, but the daemon is not beating — restart it from the app menu.</p>
+              )}
+            </div>
+            <span className={`cph-pill ${nativeSession?.configured ? 'clean' : 'pending'}`}>
+              {nativeSession?.configured ? '✓ Native phone live' : 'Browser engine'}
+            </span>
+          </div>
         </motion.section>
       )}
 

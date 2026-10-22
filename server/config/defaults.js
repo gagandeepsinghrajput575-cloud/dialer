@@ -93,6 +93,15 @@ const DEFAULTS = {
   webrtc_credential_handoff: '0',
   webrtc_mic_device: '', // preferred microphone deviceId ('' = browser default)
   webrtc_speaker_device: '', // preferred output deviceId ('' = browser default)
+  // ---- headless native SIP daemon (desktop/) ----
+  // A second in-app engine for carriers with no WebRTC gateway (FlyNumber): SIP over UDP with
+  // CoreAudio, run by the desktop supervisor. '' means "not installed" and the browser path
+  // keeps behaving exactly as before — the value is written by the supervisor, never by hand.
+  native_sip_engine: '',
+  native_daemon_last_seen: '0', // epoch ms of the supervisor's last heartbeat (0 = never)
+  native_daemon_pid: '0',
+  native_daemon_version: '',
+  native_daemon_audio: '', // audio backend in use: coreaudio | portaudio | null
   // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
   flynumber_did: '+4532331610',
   flynumber_status: 'pending', // 'pending' | 'active'
@@ -157,6 +166,7 @@ const ENV_SEEDS = {
   smtp_reply_to: 'SMTP_REPLY_TO',
   meet_link: 'PULSE_MEET_LINK',
   webrtc_ws_url: 'PULSE_WEBRTC_WS_URL',
+  native_sip_engine: 'PULSE_NATIVE_SIP_ENGINE',
 };
 
 module.exports = {

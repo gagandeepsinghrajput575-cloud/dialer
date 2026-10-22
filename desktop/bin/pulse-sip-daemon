@@ -1,0 +1,60 @@
+#!/bin/sh
+# pulse-sip-daemon — launcher for the headless SIP + CoreAudio daemon.
+#
+# This is the entry point named in the mission spec: `desktop/bin/pulse-sip-daemon`. It is a
+# POSIX shell script on purpose. The daemon itself is JavaScript (desktop/daemon), which means
+# there is nothing to compile for the SIP stack, nothing to codesign for it, and one artefact that
+# runs identically on Apple Silicon, Intel and Linux — including in CI, where
+# `test/unit/sip-daemon.test.js` drives the real thing over a real UDP socket.
+#
+# Runtime resolution, best first:
+#   1. a bundled native binary, if `desktop/scripts/build-daemon.sh` produced one
+#      (desktop/bin/pulse-sip-daemon.bin — a compiled CoreAudio addon host, or a packaged node)
+#   2. the Electron binary in Node mode (ELECTRON_RUN_AS_NODE=1) — the packaged app always has it
+#   3. node on PATH — development, and any machine that already has Node 18+
+#
+# Everything after `--` is passed straight through:
+#   pulse-sip-daemon --api-base http://127.0.0.1:3001 --audio coreaudio
+#   pulse-sip-daemon --domain sip.flynumber.com --user X --password Y --caller-id +4532331610
+#   pulse-sip-daemon --help
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+desktop=$(dirname -- "$here")
+entry="$desktop/daemon/main.js"
+bundled="$here/pulse-sip-daemon.bin"
+
+if [ ! -f "$entry" ]; then
+  echo "pulse-sip-daemon: cannot find $entry" >&2
+  exit 1
+fi
+
+# 1. a compiled/bundled binary wins: it carries its own runtime and its own CoreAudio addon.
+if [ -x "$bundled" ]; then
+  exec "$bundled" "$@"
+fi
+
+# 2. Electron's own binary, running as plain Node. This is what a packaged .app has.
+electron_js=""
+for candidate in \
+  "$desktop/node_modules/.bin/electron" \
+  "$desktop/../node_modules/.bin/electron" \
+  "$(command -v electron 2>/dev/null || true)"
+do
+  if [ -n "$candidate" ] && [ -e "$candidate" ]; then electron_js="$candidate"; break; fi
+done
+
+if [ -n "$electron_js" ]; then
+  # A symlinked .bin/electron still resolves to the real binary through the shell's own lookup.
+  ELECTRON_RUN_AS_NODE=1 exec "$electron_js" "$entry" "$@"
+fi
+
+# 3. plain node
+if command -v node >/dev/null 2>&1; then
+  exec node "$entry" "$@"
+fi
+
+echo "pulse-sip-daemon: no runtime found." >&2
+echo "  Install Node 18+ (https://nodejs.org), or run the desktop app (npm run desktop)," >&2
+echo "  or build the bundled binary: bash desktop/scripts/build-daemon.sh" >&2
+exit 127

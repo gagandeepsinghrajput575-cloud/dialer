@@ -142,8 +142,10 @@ export function useTimer(running) {
 
 // ---------- direct softphone dialing ----------
 // The softphone that answers a sip:/tel: URI on the agent's desktop.
-export const SOFTPHONE_LABEL = { softphone: 'Zoiper', webrtc: 'browser softphone' };
-export const softphoneLabel = (mode) => SOFTPHONE_LABEL[mode] || SOFTPHONE_LABEL.softphone;
+export const SOFTPHONE_LABEL = { softphone: 'Zoiper', webrtc: 'browser softphone', native: 'native softphone' };
+// `engine` is the second half of an in-app call: 'webrtc' means the browser holds the media,
+// 'native' means the desktop daemon does. Callers that do not know it get the mode's own label.
+export const softphoneLabel = (mode, engine) => (engine && SOFTPHONE_LABEL[engine]) || SOFTPHONE_LABEL[mode] || SOFTPHONE_LABEL.softphone;
 export const ccLabel = (cc) => (cc ? `+${String(cc).replace(/\D/g, '')}` : '');
 
 // Cross-tab mutual exclusion. The per-tab dialLockRef cannot see a second open tab, so two

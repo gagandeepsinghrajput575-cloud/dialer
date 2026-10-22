@@ -1,0 +1,20 @@
+{
+  "name": "pulse-sip-daemon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless SIP user agent for Pulse Dialer: UDP SIP, digest auth, SDP, RTP with G.711 and RFC 2833 DTMF, driven by JSON lines on stdin/stdout.",
+  "main": "main.js",
+  "bin": {
+    "pulse-sip-daemon": "../bin/pulse-sip-daemon"
+  },
+  "scripts": {
+    "start": "node main.js --keep-alive --log-level=debug",
+    "help": "node main.js --help",
+    "test": "node ../../test/unit/sip-daemon.test.js"
+  },
+  "//runtime": "No dependencies. Node 18+ is the whole runtime — SIP, SDP, digest, RTP and the G.711 codecs are implemented under lib/, which is why there is nothing to compile and one artefact runs on Apple Silicon, Intel and Linux alike. Audio comes from an optional native addon (desktop/native) or optional PortAudio: `npm i portaudio` here if you would rather not build the addon.",
+  "optionalDependencies": {},
+  "engines": {
+    "node": ">=18"
+  }
+}

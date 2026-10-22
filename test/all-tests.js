@@ -191,12 +191,17 @@ async function run() {
     'flynumber_did', 'flynumber_linphone_configured', 'flynumber_sip_password', 'flynumber_sip_server', 'flynumber_sip_user', 'flynumber_status',
     'followup_email_template', 'has_ai_key', 'has_api_key', 'has_flynumber_password', 'has_password', 'has_smtp_pass',
     'inbound_routing_mode', 'meet_link',
+    // The headless native SIP daemon (desktop/) reports its liveness through settings, so the
+    // supervisor's heartbeat survives a restart and the UI can say whether a native phone exists.
+    'native_daemon_audio', 'native_daemon_last_seen', 'native_daemon_pid', 'native_daemon_version', 'native_sip_engine',
     'queue_smart_sort', 'sales_script', 'smtp_from', 'smtp_host', 'smtp_pass', 'smtp_port', 'smtp_reply_to',
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
     'telnyx_api_key', 'telnyx_caller_id_verified', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
     'vm_auto_advance', 'vm_greeting',
     'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
   ]);
+  assert.strictEqual(s.native_sip_engine, '', 'the native SIP engine is opt-in: nothing claims it by default');
+  assert.strictEqual(s.native_daemon_last_seen, '0', 'and no daemon has ever beaten');
   assert.strictEqual(s.ai_provider, 'local', 'copilot defaults to the local summarizer');
   assert.strictEqual(s.business_tz, 'Europe/Copenhagen');
   assert.strictEqual(s.business_hours_start, '08:30');

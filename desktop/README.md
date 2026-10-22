@@ -199,6 +199,13 @@ bash desktop/scripts/build-daemon.sh
 That builds `desktop/native/build/Release/pulse_audio.node` for `aarch64-apple-darwin`, then
 self-tests the daemon (it must print `{"event":"ready", …}` and answer `hello`).
 
+`desktop/native/package.json` is part of that command, not decoration: `build-daemon.sh` runs
+`npm install` and `npm run build` in that directory, and `binding.gyp` resolves its include path
+with `require('node-addon-api').include_dir`. Without the manifest both steps fail, no addon is
+produced, and the daemon quietly falls back to the silent `null` backend — a call that connects and
+carries no audio in either direction. It is a devDependency of the build directory only: the repo
+root never installs it and the runtime never loads it.
+
 For distribution:
 
 ```bash
@@ -236,7 +243,9 @@ packaging step). Nothing else in the app changes when it does.
 | Daemon crashes mid-shift | Restarted with backoff (0.5 s → 30 s), renderer told via `{ event: "supervisor", restarting: true }`. |
 | Heartbeat lapses 45 s | The server stops claiming a native phone; the next dial goes through the browser engine. |
 | Carrier refuses registration | `registration_failed` → the standby badge shows the reason (e.g. `403 Forbidden`), with backoff at 5 s / 10 s / 20 s / 45 s. |
-| No audio device | The daemon still runs on the `null` backend: registration and signalling work, the UI says "no audio device" instead of going quiet. |
+| No audio device | The daemon still runs on the `null` backend: registration and signalling work, and the standby badge goes **unavailable** with the daemon's own reason plus the command that fixes it (`bash desktop/scripts/build-daemon.sh`, or `cd desktop/daemon && npm i portaudio` off macOS). It still registers, so an inbound call still rings — a silent call you can see beats one you cannot. |
+| Audio device will not open or start | The call is still reported `connected` — it *is* up — and the fault arrives as `{ event: "error", scope: "media" }` on screen. The device is retried on the next call rather than given up on. |
+| Call connects, no audio either way | After 12 s with zero RTP received the daemon emits `media_timeout` with the sent/received counts, and the dialer shows why. Signalling being healthy says nothing about media: this is the message that separates a NAT/routing problem from a codec one. |
 | Microphone permission refused | macOS 14 asks once per app; `AudioOutputUnitStart` fails and the error says permission is the likely cause (System Settings → Privacy → Microphone). |
 | Second inbound call while one is live | Refused with `486 Busy Here` — one audio device means one call. |
 | Two windows / two tabs | One cross-tab lock (`navigator.locks`) decides who rings; the other says "Call in progress on another tab". |
@@ -252,11 +261,13 @@ packaging step). Nothing else in the app changes when it does.
 | `test/unit/native-sip.test.js` | 10 checks. The server's half: inert by default, one heartbeat switches the engine, the secret only leaves behind a token, the dial URI becomes UDP SIP, a stale beat hands the phone back, readiness names exactly what is missing. |
 | `test/unit/desktop-supervisor.test.js` | 7 checks. `desktop/main.js` with Electron absent: spawns the daemon, matches answers to command ids, beats the heartbeat, releases the phone on quit, restarts cleanly, and adopts a running API server instead of starting a second one. |
 | `test/unit/sip-daemon.test.js` in CI | Runs with `--audio=null`, so no sound card is needed anywhere. |
+| `test/unit/native-audio.test.js` | 13 checks, and the reason `--audio=null` is not enough. Drives the **real** `UserAgent` and `media.js` against a backend with the CoreAudio addon's contract (`start()` throws unless `open()` ran first): the pump opens the device, a dead device still reports `connected`, the fault is retried next call, the 12 s media watchdog fires on silence and stays quiet on a working call or a short one, and the renderer's badge says "no audio device" before the first dial. Against the unfixed daemon checks 1–7 fail with `coreaudio: open() first` while the `null`-backend check passes — which is exactly why the older suites never saw it. |
 | `test/unit/telephony-chaos-stress.test.js` | 60 checks, numbered 1–60 across `telephony-chaos-part1` (1–28) and `telephony-chaos-part2` (29–60). Adversarial input only: truncated and folded SIP, junk CSeq, comma-separated Contact lists, `; tag = x` with whitespace, a `407`, a 200 OK whose ACK must match verbatim, duplicate final responses, garbage down the IPC channel, `audio_level` out of range. Exits 0 with `ALL 60/60 TELEPHONY STRESS CHECKS PASSED (0 FAILURES)`. |
 
 ```bash
 npm run test:unit          # every suite, including the three above and the 60 chaos checks
 npm run test:telephony     # the chaos suite on its own (~0.5 s, no sockets, no DB)
+npm run test:audio         # the 13 audio-path checks (~1 s, one spawned daemon)
 node test/all-tests.js     # the 38 integration groups — unchanged by this feature
 ```
 

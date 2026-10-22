@@ -2,3 +2,7 @@ node_modules
 dist
 data
 .env
+
+# The CoreAudio addon is built on the target Mac by desktop/scripts/build-daemon.sh.
+desktop/native/build/
+desktop/native/node_modules/

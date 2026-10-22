@@ -1,0 +1,24 @@
+{
+  "name": "pulse-audio-addon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CoreAudio AudioUnit addon for the Pulse Dialer SIP daemon: opens the microphone and speaker and exchanges 8 kHz mono Int16 frames with desktop/daemon/lib/audio/coreaudio.js. Built on macOS only; the daemon degrades to the silent 'null' backend elsewhere.",
+  "main": "build/Release/pulse_audio.node",
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "rebuild": "node-gyp rebuild",
+    "clean": "node-gyp clean"
+  },
+  "//why-this-file-exists": "desktop/scripts/build-daemon.sh runs `npm install` and `npm run build` in this directory. Without a manifest both commands fail, the addon is never produced, and the daemon silently falls back to the null backend — a call that connects and carries no audio in either direction. binding.gyp also resolves its include directory with `require('node-addon-api').include_dir`, so node-addon-api has to be installed here for the build to configure at all.",
+  "//platform": "macOS with Xcode command line tools (xcode-select --install). On any other OS `node-gyp rebuild` will fail; that is expected, and build-daemon.sh sets --skip-addon automatically when uname is not Darwin.",
+  "devDependencies": {
+    "node-addon-api": "^8.2.1",
+    "node-gyp": "^10.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ]
+}

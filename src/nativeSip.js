@@ -16,7 +16,7 @@
 //     `recording` reports that honestly instead of silently producing nothing;
 //   * registration lives in a process that outlives the tab, so a reload keeps the phone
 //     registered and an inbound call still rings.
-import { formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
+import { audioIssueMessage, formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
 import { createRinger } from './utils/ringer.js';
 import { createTonePlayer, DTMF_TONES, BUSY_TONE, RINGBACK_TONE } from './utils/tones.js';
 
@@ -78,6 +78,7 @@ export function createNativeEngine(opts) {
 
   const tone = createTonePlayer({ get current() { return tones; }, set current(v) { tones = v; } });
   const go = (next) => { if (!disposed) { state = next; setState(next); } };
+  let audioIssue = '';   // what the daemon's `ready` event said about the sound card
   const badge = (s, reason = '') => { if (!disposed) setStandby({ state: s, reason }); };
   const stopRinger = () => { try { ringer?.stop(); } catch { /* silence is never an error */ } };
   const stopTones = () => { for (const t of [...tones]) { try { t.stop(); } catch { /* gone */ } } tones = []; };
@@ -225,7 +226,7 @@ export function createNativeEngine(opts) {
     if (disposed || !msg || !msg.event) return;
     switch (msg.event) {
       case 'registered':
-        badge('ready');
+        badge(audioIssue ? 'unavailable' : 'ready', audioIssue);
         setError('');
         setMicLabel(msg.audio?.input || session.username || 'Native softphone');
         go(state === 'idle' ? 'standby' : state);
@@ -293,15 +294,16 @@ export function createNativeEngine(opts) {
       case 'rejected_incoming':
         endRing(msg.reason || 'rejected');
         break;
-      case 'error':
-        if (!live && !entry) setError(msg.message || 'The native softphone reported an error.');
+      case 'ready': audioIssue = audioIssueMessage(msg); break;   // no sound card still registers
+      case 'media_timeout': case 'error':
+        // A media fault lands mid-call, so the old "only when nothing is live" guard swallowed it.
+        if (msg.reason || msg.scope === 'media' || (!live && !entry)) setError(msg.reason || msg.message || 'The native softphone reported an error.');
         break;
       case 'shutdown':
         badge('unavailable', `The SIP daemon stopped (${msg.reason || 'unknown reason'}).`);
         if (live || entry) { const d = live?.direction || 'inbound'; teardown(); go('error'); cb().onEnded?.(d); }
         break;
-      default:
-        break; // 'ready', 'log', 'state', 'dtmf': useful in the log, nothing to render
+      default: break; // 'log', 'state', 'dtmf': useful in the log, nothing to render
     }
   };
 

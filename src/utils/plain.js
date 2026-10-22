@@ -180,3 +180,26 @@ export function phoneIssue(raw, countryCode = '45') {
   if (normalizePhoneClient(given, countryCode)) return null;
   return 'Please enter a valid phone number (e.g. +45 20 12 34 56)';
 }
+
+/**
+ * What the daemon's `ready` event says about the sound card, as one honest sentence.
+ *
+ * `''` means a real audio device is attached and a call will carry sound. Anything else is the
+ * reason it will not, plus the command that fixes it. The daemon has always reported this — the
+ * dialer used to throw the event away, so the agent got a green badge and a silent call.
+ *
+ * @param {{audio?: {name?: string}, audioErrors?: string[]}} ready the daemon's `ready` event
+ * @returns {string} empty when audio will work, otherwise the sentence to show on the badge
+ */
+export function audioIssueMessage(ready) {
+  const name = String(ready?.audio?.name || '').trim();
+  if (name && name !== 'null') return '';            // coreaudio / portaudio: a real device
+  const errors = Array.isArray(ready?.audioErrors) ? ready.audioErrors.filter(Boolean) : [];
+  const first = String(errors[0] || '').split('\n')[0];
+  // Off macOS the CoreAudio addon is not the fix — PortAudio is, and it needs no compiler.
+  const fix = /not darwin/i.test(first)
+    ? 'cd desktop/daemon && npm i portaudio'
+    : 'bash desktop/scripts/build-daemon.sh';
+  return `The SIP daemon has no audio device${first ? ` (${first})` : ''}`
+    + ` — calls would connect in silence. Run: ${fix}`;
+}

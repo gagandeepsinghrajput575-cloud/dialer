@@ -84,9 +84,12 @@ async function main(argv = process.argv.slice(2)) {
   });
 
   // Daemon -> controller. `ended` and `registered` are the two the UI cannot function without.
+  // 'error' must be in this list for a second reason: an EventEmitter that emits 'error' with no
+  // listener throws it as an uncaught exception, so a media fault would take the daemon down
+  // instead of reaching the screen.
   const forward = ['registered', 'unregistered', 'registering', 'registration_failed', 'incoming',
     'ringing', 'dialing', 'provisional', 'connected', 'ended', 'mute', 'dtmf', 'audio_level',
-    'state', 'rejected_incoming'];
+    'state', 'rejected_incoming', 'error', 'media_timeout'];
   for (const name of forward) ua.on(name, (data) => protocol.emit(name, data || {}));
 
   protocol.start();

@@ -84,23 +84,83 @@ function attach(ua) {
     ua.emit('audio_level', { input: ua.levels.input, output: ua.levels.output });
   };
 
+  // Open the sound card, once. CoreAudio's start() refuses to run before open() — it has no
+  // AudioUnit to drive — while null and portaudio create what they need inside start() and treat
+  // open() as a no-op. Nothing in the daemon used to call this, so a Mac with the addon built
+  // correctly still threw 'coreaudio: open() first' on the first call, the throw escaped
+  // onCallConfirmed before it could emit 'connected', and both directions were silent. The flag
+  // makes the retry-on-next-call path cheap.
+  ua.audioOpened = false;
+  ua.ensureAudioOpen = async function ensureAudioOpen() {
+    if (ua.audioOpened) return true;
+    if (!ua.audio?.open) { ua.audioOpened = true; return true; }
+    try { await ua.audio.open({}); ua.audioOpened = true; return true; } catch (e) {
+      ua.log('media', `could not open the audio device: ${e?.message || e}`);
+      return false;
+    }
+  };
+
+  // No RTP from the far end this many seconds after the call is confirmed means the media path is
+  // not there, however healthy the signalling looks. Reported once, never acted on: tearing down a
+  // call that may be one-way audio would hang up on a customer who can still hear the agent.
+  const MEDIA_WATCHDOG_MS = 12000;
+
   // The audio device is the clock: one 160-sample frame in, one RTP packet out, every 20 ms.
+  // Returns a promise (opening the device is async) that never rejects — a dead sound card is an
+  // error the agent can see, not an exception thrown into the dialog layer mid-200-OK.
   ua.startPump = function startPump(dialog) {
     ua.stopPump();
-    ua.audio?.start?.((frame) => {
+    let armed = dialog;
+    const onFrame = (frame) => {
+      if (!armed) return;
       const pcm = frame instanceof Int16Array ? frame : g711.toInt16(frame);
       ua.levels.input = g711.level(pcm);
-      if (!dialog.media || dialog.media.muted) return;
-      const bytes = g711.encode(pcm, dialog.media.codec);
-      dialog.media.send(dialog.media.session.packet(bytes, dialog.media.stats.sent === 0));
+      const media = armed.media;
+      if (!media || media.muted) return;
+      media.send(media.session.packet(g711.encode(pcm, media.codec), media.stats.sent === 0));
       ua.maybeEmitLevels();
-    });
+    };
+    const fail = (message) => {
+      if (ua.pump !== dialog) return;          // the call already ended; nothing left to report
+      ua.log('media', message);
+      ua.emit('error', { message, scope: 'media', callId: dialog.id });
+    };
     ua.pump = dialog;
+    return Promise.resolve()
+      .then(() => ua.ensureAudioOpen())
+      .then((opened) => {
+        if (ua.pump !== dialog) return;        // hung up while the device was opening
+        if (!ua.audio?.start) return;          // no backend at all: the null path is silent by design
+        if (!opened) { fail('The audio device would not open, so this call has no sound.'); return; }
+        try { ua.audio.start(onFrame); } catch (e) {
+          // Reset so the next call tries again — a transient device busy must not be permanent.
+          ua.audioOpened = false;
+          fail(`The audio device would not start: ${e?.message || e}`);
+          return;
+        }
+        // Overridable so the test suite can prove the watchdog in milliseconds, not 12 s.
+        const ms = ua.mediaWatchdogMs || MEDIA_WATCHDOG_MS;
+        dialog.mediaWatchdog = setTimeout(() => {
+          if (ua.pump !== dialog || !dialog.media) return;
+          const { sent, received } = dialog.media.stats;
+          if (received > 0) return;
+          ua.log('media', `no RTP from the far end after ${ms / 1000}s (sent ${sent})`);
+          ua.emit('media_timeout', {
+            callId: dialog.id, sent, received: 0, seconds: ms / 1000,
+            reason: sent > 0
+              ? 'The call is up and this end is sending audio, but nothing has come back — the media path is one-way or blocked.'
+              : 'The call is up but no audio has moved in either direction.',
+          });
+        }, ms);
+      })
+      .catch((e) => fail(`The audio pump stopped: ${e?.message || e}`));
   };
 
   ua.stopPump = function stopPump() {
-    try { ua.audio?.stop?.(); } catch { /* nothing running */ }
+    const dialog = ua.pump;
     ua.pump = null;
+    if (dialog?.mediaWatchdog) { clearTimeout(dialog.mediaWatchdog); dialog.mediaWatchdog = null; }
+    try { ua.audio?.stop?.(); } catch { /* nothing running */ }
   };
 
   // 183 with SDP: the far end is playing ringback, so wire the receive path early.

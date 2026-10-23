@@ -104,7 +104,7 @@ const checks = [
     try {
       await dial(t);
       await M.tick();
-      await new Promise((r) => setTimeout(r, 400));       // ~20 frames of 20 ms
+      await waitForRtpPath(t, 2000);
       const audio = t.audioPackets();
       ok(audio.length > 0, `the carrier received no audio RTP at all (total packets ${t.countRtp()})`);
       ok(audio.every((p) => p.payloadType === 0), 'every audio packet uses the negotiated payload type');

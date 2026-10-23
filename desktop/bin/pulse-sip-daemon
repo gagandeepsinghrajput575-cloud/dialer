@@ -13,8 +13,8 @@
 #   2. the Electron binary in Node mode (ELECTRON_RUN_AS_NODE=1) — the packaged app always has it
 #   3. node on PATH — development, and any machine that already has Node 18+
 #
+# Standalone use supplies CLI credentials; only the desktop supervisor may pass its API capability.
 # Everything after `--` is passed straight through:
-#   pulse-sip-daemon --api-base http://127.0.0.1:3001 --audio coreaudio
 #   pulse-sip-daemon --domain sip.flynumber.com --user X --password Y --caller-id +4532331610
 #   pulse-sip-daemon --help
 set -eu

@@ -140,7 +140,7 @@ export default function useWebRtc({
   const releaseInboundLock = useCallback(() => {
     const lock = lockRef.current;
     lockRef.current = null;
-    if (lock) lock.release?.().catch?.(() => {});
+    if (lock) lock.release?.().catch?.(() => { });
   }, []);
 
   const startRecording = useCallback((callId) => {
@@ -180,12 +180,12 @@ export default function useWebRtc({
           for (const sender of (pc.getSenders?.() || [])) {
             try {
               if (sender.track) {
-                try { sender.replaceTrack(null); } catch {}
-                try { pc.removeTrack(sender); } catch {}
+                try { sender.replaceTrack(null); } catch { }
+                try { pc.removeTrack(sender); } catch { }
               }
-            } catch {}
+            } catch { }
           }
-        } catch {}
+        } catch { }
         pc.close();
       }
     } catch { /* already closed */ }
@@ -194,8 +194,8 @@ export default function useWebRtc({
     // 2) Now stop tracks — PC no longer references them
     try {
       if (streamRef.current) for (const t of streamRef.current.getTracks()) {
-        try { t.enabled = false; } catch {}
-        try { t.stop(); } catch {}
+        try { t.enabled = false; } catch { }
+        try { t.stop(); } catch { }
       }
     } catch { /* nothing to stop */ }
     streamRef.current = null;
@@ -206,12 +206,12 @@ export default function useWebRtc({
     analyserRef.current = null;
     for (const entry of tonesRef.current) {
       try {
-        if (entry?.osc) { try { entry.osc.stop(); entry.osc.disconnect(); } catch {} }
-        else if (entry?.oscs) { for (const o of entry.oscs) try { o.stop(); o.disconnect(); } catch {} }
-        if (entry?.gain) try { entry.gain.disconnect(); } catch {}
-        if (entry?.ctx && entry.ctx.state !== 'closed') try { entry.ctx.close(); } catch {}
-        else if (entry?.stop) try { entry.stop(); } catch {}
-      } catch {}
+        if (entry?.osc) { try { entry.osc.stop(); entry.osc.disconnect(); } catch { } }
+        else if (entry?.oscs) { for (const o of entry.oscs) try { o.stop(); o.disconnect(); } catch { } }
+        if (entry?.gain) try { entry.gain.disconnect(); } catch { }
+        if (entry?.ctx && entry.ctx.state !== 'closed') try { entry.ctx.close(); } catch { }
+        else if (entry?.stop) try { entry.stop(); } catch { }
+      } catch { }
     }
     tonesRef.current = [];
     setLevel(0);
@@ -227,7 +227,7 @@ export default function useWebRtc({
       releaseMedia();
       // The tab is going away: leaving the registration open would have the provider ringing
       // a browser that is no longer there.
-      import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => {});
+      import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => { });
     };
   }, [releaseMedia]);
 
@@ -238,7 +238,7 @@ export default function useWebRtc({
     try {
       const ctx = new Ctx();
       ctxRef.current = ctx;
-      if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
+      if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => { });
       const src = ctx.createMediaStreamSource(node);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
@@ -470,7 +470,7 @@ export default function useWebRtc({
       const playRemote = (stream) => {
         if (!audioRef.current || !stream) return;
         audioRef.current.srcObject = stream;
-        audioRef.current.play?.().catch(() => {});
+        audioRef.current.play?.().catch(() => { });
       };
 
       if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
@@ -680,43 +680,64 @@ export default function useWebRtc({
       return { ok: true, simulated: true };
     }
 
-    // ---- native path ----
-    // The daemon owns SIP *and* the audio device, so there is no microphone to open and no peer
-    // connection to build: one command, and the carrier's trunk does the rest.
+    // Resolve the live descriptor now; standby may still be loading or the daemon may have stopped.
+    let session;
+    try {
+      session = await api.webrtcSession();
+    } catch (e) {
+      setError(e.message || 'Could not reach the softphone session endpoint.');
+      setStateSafe('error');
+      return { ok: false, reason: e.message };
+    }
+
+    // The daemon owns SIP/audio; check it before browser media because native needs no mic API.
     if (nativeSip.isNativeSession(session)) {
       nativeMetaRef.current = { engine: 'native', carrier: session.provider, domain: session.domain };
       const engine = nativeRef.current || (nativeRef.current = makeNative(session));
-      glareMutexRef.current = false;
-      const res = await engine.dial(phone, { callId });
-      if (res?.ok === false) {
+      try {
+        const registered = await engine.start();
+        if (registered?.ok === false) {
+          glareMutexRef.current = false;
+          setError(registered.error || 'The native softphone could not register.');
+          setStateSafe('error');
+          return { ok: false, reason: registered.error || 'native-register-failed' };
+        }
+        const res = await engine.dial(phone, { callId });
+        if (res?.ok === false) {
+          glareMutexRef.current = false;
+          setError(res.error || 'The native softphone could not place that call.');
+          setStateSafe('error');
+          return { ok: false, reason: res.error || 'native-dial-failed' };
+        }
         glareMutexRef.current = false;
-        setError(res.error || 'The native softphone could not place that call.');
+        return { ok: true, native: true, ...res };
+      } catch (e) {
+        glareMutexRef.current = false;
+        const reason = e?.message || 'The native softphone did not answer.';
+        setError(reason);
         setStateSafe('error');
-        return { ok: false, reason: res.error || 'native-dial-failed' };
+        return { ok: false, reason };
       }
-      return { ok: true, native: true, ...res };
     }
 
-    // ---- live path ----
+    // Dispose a stale native bridge before using the browser descriptor returned above.
+    if (nativeRef.current) {
+      try { nativeRef.current.dispose(); } catch { /* already gone */ }
+      nativeRef.current = null;
+    }
+    nativeMetaRef.current = null;
+
+    // ---- live browser path ----
     if (!mediaSupported()) {
       const reason = mediaUnavailableReason();
       setError(reason);
       setStateSafe('error');
       return { ok: false, reason };
     }
-
-    let session = null;
-    try {
-      session = await api.webrtcSession();
-    } catch (e) {
-      setError(e.message || 'Could not reach the browser-softphone session endpoint.');
-      setStateSafe('error');
-      return { ok: false, reason: e.message };
-    }
     if (!session?.canRegister) {
       const reason = session?.configured
         ? 'The browser softphone cannot register: turn on SIP credential handoff in Settings → Telephony.'
-        : `The browser softphone is not configured yet (missing: ${(session?.missing || []).join(', ') || 'credentials'}).`;
+        : `The in-browser softphone is not configured yet (missing: ${(session?.missing || []).join(', ') || 'credentials'}).`;
       setError(reason);
       setStateSafe('error');
       return { ok: false, reason };
@@ -753,7 +774,7 @@ export default function useWebRtc({
           const [remote] = ev.streams || [];
           if (audioRef.current && remote) {
             audioRef.current.srcObject = remote;
-            audioRef.current.play?.().catch(() => {});
+            audioRef.current.play?.().catch(() => { });
           }
         };
         pc.oniceconnectionstatechange = () => {
@@ -788,13 +809,13 @@ export default function useWebRtc({
             const sdh = sipRef.current?.inviter?.sessionDescriptionHandler;
             const sipPc = sdh?.peerConnection;
             if (sipPc && pcRef.current !== sipPc) {
-              try { pcRef.current?.close?.(); } catch {}
+              try { pcRef.current?.close?.(); } catch { }
               pcRef.current = sipPc;
             }
             const playRemote = (remStream) => {
               if (!audioRef.current || !remStream) return;
               audioRef.current.srcObject = remStream;
-              audioRef.current.play?.().catch(() => {});
+              audioRef.current.play?.().catch(() => { });
             };
             if (sdh?.remoteMediaStream && sdh.remoteMediaStream.getAudioTracks().length > 0) {
               playRemote(sdh.remoteMediaStream);
@@ -805,7 +826,7 @@ export default function useWebRtc({
               }
               if (remStream.getAudioTracks().length > 0) playRemote(remStream);
             }
-          } catch {}
+          } catch { }
           callbacksRef.current.onActive?.('outbound');
           if (recordingCallIdRef.current && !recorderRef.current) {
             startRecording(recordingCallIdRef.current);
@@ -828,10 +849,7 @@ export default function useWebRtc({
     // A native call is hung up by the process that holds the dialog; 'ended' comes back as an
     // event and drives the same teardown the browser engine would.
     if (nativeRef.current && (nativeRef.current.live || nativeRef.current.incoming)) {
-      // 'ended' comes back as an event and drives the same teardown the browser engine uses — but
-      // only if the daemon accepted the hang-up. A refusal or a dead bridge used to vanish into
-      // `.catch(() => {})`, leaving the call up on the daemon while the UI believed it was over.
-      // `reason: 'no-call'` is the engine's own "there was nothing to hang up", not a failure.
+      // The daemon's `ended` event drives teardown; report refusal instead of guessing.
       Promise.resolve()
         .then(() => nativeRef.current.hangUp())
         .then((res) => {
@@ -847,13 +865,7 @@ export default function useWebRtc({
 
   const toggleMute = useCallback(() => {
     if (nativeRef.current?.live) {
-      // The daemon owns the microphone, so it owns the answer. The engine reports what it actually
-      // applied and mirrors that into `muted` itself; this keeps the local mirror in step and
-      // surfaces a refusal instead of swallowing it. It used to flip mutedRef first, drop the result
-      // and eat the rejection, so a refused mute left the UI claiming "muted" while audio flowed.
-      // Returns undefined, meaning "the daemon decides — read `muted`". Dialer.jsx's toast sites
-      // announce only a definite boolean, so nothing is predicted that may not happen; the badge and
-      // the Mute button are already bound to the confirmed `muted` state.
+      // The daemon owns mute. Mirror only its applied state; undefined tells Dialer not to predict.
       Promise.resolve()
         .then(() => nativeRef.current.toggleMute())
         .then((applied) => { mutedRef.current = !!applied; setMuted(!!applied); })
@@ -874,19 +886,27 @@ export default function useWebRtc({
   const sendDtmf = useCallback((digit) => {
     if (!DTMF_KEYS.includes(String(digit))) return false;
     const key = String(digit);
-    setDtmfLog((log) => [...log.slice(-11), key]);
 
-    // The native engine sends RFC 2833 through the daemon and plays the tone itself. `true` here
-    // means "handed to the daemon", not "on the wire" — the engine's own answer is awaited and a
-    // refusal or a dead bridge is reported through `error` rather than swallowed, which is what the
-    // old unconditional `return true` did while the keypad logged the digit as sent.
+    // The native engine's reply is the only evidence a digit was sent. Do not put it in the
+    // "tones sent" log or return success until the daemon accepts it.
     if (nativeRef.current?.live) {
-      Promise.resolve()
+      return Promise.resolve()
         .then(() => nativeRef.current.sendDtmf(key))
-        .then((sent) => { if (!sent) setError(`The daemon could not send the ${key} tone.`); })
-        .catch((e) => setError(e?.message || `The ${key} tone did not reach the daemon.`));
-      return true;
+        .then((sent) => {
+          if (!sent) {
+            setError(`The daemon could not send the ${key} tone.`);
+            return false;
+          }
+          setDtmfLog((log) => [...log.slice(-11), key]);
+          return true;
+        })
+        .catch((e) => {
+          setError(e?.message || `The ${key} tone did not reach the daemon.`);
+          return false;
+        });
     }
+
+    setDtmfLog((log) => [...log.slice(-11), key]);
 
     // A real session can carry the tone in-band if the browser exposes DTMF on the sender.
     try {
@@ -920,7 +940,7 @@ export default function useWebRtc({
       if (incomingRef.current) endIncoming('canceled');
       reset();
     }
-    import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => {});
+    import('./webrtcSignalling.js').then((m) => m.disposeStandbySession()).catch(() => { });
   }, [enabled, endIncoming, reset, stopRinger]);
 
   return useMemo(() => ({

@@ -1,21 +1,4 @@
-// The native SIP engine: the desktop daemon's phone, rendered.
-//
-// `useWebRtc.js` owns the browser engine (sip.js, getUserMedia, a peer connection). This module
-// owns the other one — the headless daemon under `desktop/daemon`, which speaks plain UDP SIP to
-// the carrier and opens CoreAudio itself. It exists for the trunks that have no WebRTC gateway
-// (FlyNumber is one), where a browser tab simply cannot register.
-//
-// The two engines report the *same* contract, on purpose: Dialer.jsx and softphone.jsx never
-// learn which one is driving. That is what makes "no screen switching" true — the agent presses
-// the same C, sees the same waveform, gets the same classification modal.
-//
-// What is genuinely different:
-//   * no microphone here. The daemon owns the audio device, so `level` comes from its
-//     `audio_level` events and `micLabel` from its device description;
-//   * no call recording. MediaRecorder can only capture a MediaStream, and there is none —
-//     `recording` reports that honestly instead of silently producing nothing;
-//   * registration lives in a process that outlives the tab, so a reload keeps the phone
-//     registered and an inbound call still rings.
+// Native SIP adapter: maps daemon IPC/events to useWebRtc's state contract. Recording is unsupported.
 import { audioIssueMessage, formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
 import { createRinger } from './utils/ringer.js';
 import { createTonePlayer, DTMF_TONES, BUSY_TONE, RINGBACK_TONE } from './utils/tones.js';
@@ -33,32 +16,13 @@ export function nativeAvailable() {
 export const isNativeSession = (session) => !!session
   && (session.engine === 'native' || session.transport === 'udp' || session.wsUrlSource === 'native_daemon');
 
-// One renderer reason per way a call can stop, matching what softphone.jsx already understands:
-// 'declined' and 'canceled' have distinct toasts, everything else is a plain miss.
+// Match ring end reasons to the renderer's declined/canceled/missed labels.
 const RING_END = {
   rejected: 'declined', busy: 'missed', canceled: 'canceled',
   normal: 'canceled', 'no-answer': 'missed', error: 'canceled',
 };
 
-/**
- * Start the native engine.
- *
- * @param {object}   opts
- * @param {object}   opts.session    - the descriptor from GET /api/telephony/webrtc-session
- * @param {function} opts.setState   - the engine state machine ('standby' | 'dialing' | …)
- * @param {function} opts.setStandby - the registration badge ({ state, reason })
- * @param {function} opts.setLevel   - 0..1 voice level for the waveform
- * @param {function} opts.setMuted
- * @param {function} opts.setError
- * @param {function} opts.setTarget
- * @param {function} opts.setDirection - 'outbound' | 'inbound' while a call is live
- * @param {function} opts.setIncomingCall - the ringing entry, or null
- * @param {function} opts.setStandbyNote
- * @param {function} opts.setMicLabel
- * @param {object}   opts.callbacksRef - { current: { onActive, onEnded, onIncoming, onIncomingEnded } }
- * @param {string}   [opts.countryCode]
- * @param {string}   [opts.lockKey]    - the cross-tab audio lock the browser engine also takes
- */
+/** Create the bridge-backed engine using the hook's shared state setters and callbacks. */
 export function createNativeEngine(opts) {
   const b = bridge();
   const {
@@ -75,10 +39,12 @@ export function createNativeEngine(opts) {
   let lock = null;
   let tones = [];
   let ringer = null;
+  let registrationPromise = null;
 
   const tone = createTonePlayer({ get current() { return tones; }, set current(v) { tones = v; } });
   const go = (next) => { if (!disposed) { state = next; setState(next); } };
-  let audioIssue = '';   // what the daemon's `ready` event said about the sound card
+  let audioIssue = '';
+  let registered = false;
   const badge = (s, reason = '') => { if (!disposed) setStandby({ state: s, reason }); };
   const stopRinger = () => { try { ringer?.stop(); } catch { /* silence is never an error */ } };
   const stopTones = () => { for (const t of [...tones]) { try { t.stop(); } catch { /* gone */ } } tones = []; };
@@ -97,19 +63,15 @@ export function createNativeEngine(opts) {
     setTarget('');
   };
 
-  // ---- the ringing entry -------------------------------------------------------------------
-  // Same object shape the browser engine hands to softphone.jsx, so the CRM half (prospect
-  // lookup, ledger row, `attachCrm`) works unchanged — and mutates in place for the same reason:
-  // a far-end CANCEL has to find *this* ring still ringing.
+  // Ring entry shares the browser engine's CRM shape; keep its identity stable through CANCEL.
   const beginRing = async (payload) => {
     if (entry) return { ok: false, reason: 'already-ringing' };
     lock = await holdCrossTabLock(lockKey);
     if (disposed) { releaseLock(); return { ok: false, reason: 'disposed' }; }
     if (!lock.held) {
-      // Another tab (or another window of the desktop app) has the speakers: refuse politely so
-      // the carrier stops ringing instead of two phones fighting over one call.
+      // Refuse when another tab owns the audio lock.
       setStandbyNote('Call in progress on another tab');
-      send('reject', { callId: payload.callId, code: 486 }).catch(() => {});
+      send('reject', { callId: payload.callId, code: 486 }).catch(() => { });
       return { ok: false, reason: 'another-tab' };
     }
     setStandbyNote('');
@@ -120,7 +82,8 @@ export function createNativeEngine(opts) {
       startedAt: new Date().toISOString(),
       invitation: null, simulated: false, native: true, answered: false,
       prospect: null, matched: false, provisional: false,
-      callId: payload.callId ?? null,
+      callId: payload.callId ?? null,       // CRM row id may replace this after matching
+      dialogId: payload.callId ?? null,     // SIP daemon id must remain stable for commands
       engine: 'native',
       attachCrm: (patch) => {
         if (!entry) return;
@@ -129,7 +92,7 @@ export function createNativeEngine(opts) {
       },
       answer: () => answer(),
       decline: () => decline(),
-      terminate: () => { send('hangup', { callId: entry?.callId }).catch(() => {}); },
+      terminate: () => { send('hangup', { callId: entry?.dialogId }).catch(() => { }); },
       endReason: null,
     };
     setIncomingCall(entry);
@@ -155,13 +118,19 @@ export function createNativeEngine(opts) {
   const send = (action, payload = {}) => (b ? b.command(action, payload) : Promise.resolve({ ok: false, error: 'no bridge' }));
 
   async function answer() {
-    if (!entry) return { ok: false, reason: 'no-incoming' };
-    const callId = entry.callId;
-    const res = await send('answer', { callId });
+    const ringing = entry;
+    if (!ringing) return { ok: false, reason: 'no-incoming' };
+    const dialogId = ringing.dialogId;
+    const res = await send('answer', { callId: dialogId });
     if (!res?.ok) { setError(res?.error || 'The daemon could not answer that call.'); return res; }
     stopRinger();
-    entry.answered = true;
-    live = { callId, direction: 'inbound' };
+    // Either event/reply order must avoid resurrecting a canceled ring or reporting twice.
+    if (live && String(live.callId) === String(dialogId)) return res;
+    if (entry !== ringing) return { ok: false, reason: 'ring-ended' };
+    ringing.answered = true;
+    live = { callId: dialogId, direction: 'inbound' };
+    entry = null;
+    setIncomingCall(null);
     setDirection('inbound');
     go('active');
     cb().onActive?.('inbound');
@@ -169,16 +138,27 @@ export function createNativeEngine(opts) {
   }
 
   async function decline() {
-    if (!entry) return { ok: false, reason: 'no-incoming' };
-    const res = await send('reject', { callId: entry.callId, code: 603 });
-    entry.endReason = 'declined';
+    const ringing = entry;
+    if (!ringing) return { ok: false, reason: 'no-incoming' };
+    let res;
+    try { res = await send('reject', { callId: ringing.dialogId, code: 603 }); }
+    catch (e) { res = { ok: false, error: e?.message || 'The decline did not reach the daemon.' }; }
+    if (res?.ok === false) {
+      if (entry === ringing) setError(res.error || 'The daemon could not decline that call.');
+      return res;
+    }
+    if (entry !== ringing) return res; // the caller may have canceled while the command was in flight
+    ringing.endReason = 'declined';
     endRing('rejected');
     return res;
   }
 
   async function hangUp() {
-    const callId = live?.callId ?? entry?.callId ?? null;
-    if (entry && !live) { await decline(); return { ok: true }; }
+    const callId = live?.callId ?? entry?.dialogId ?? null;
+    if (entry && !live) {
+      const res = await decline();
+      return res?.ok === false ? res : { ok: true };
+    }
     if (!callId) { teardown(); go(disp() ? 'standby' : 'idle'); return { ok: false, reason: 'no-call' }; }
     const res = await send('hangup', { callId });
     return res;
@@ -214,17 +194,17 @@ export function createNativeEngine(opts) {
   async function sendDtmf(digit) {
     const key = String(digit);
     const res = await send('dtmf', { digit: key });
-    // The daemon puts the digit on the wire as RFC 2833; the tone is for the agent's ears only.
+    if (res?.ok === false) return false;
     const pair = DTMF_TONES[key];
     if (pair) tone(pair, 160);
-    return res?.ok !== false;
+    return true;
   }
 
-  // ---- events from the daemon --------------------------------------------------------------
   const onEvent = (msg) => {
     if (disposed || !msg || !msg.event) return;
     switch (msg.event) {
       case 'registered':
+        registered = true;
         badge(audioIssue ? 'unavailable' : 'ready', audioIssue);
         setError('');
         setMicLabel(msg.audio?.input || session.username || 'Native softphone');
@@ -234,9 +214,11 @@ export function createNativeEngine(opts) {
         badge('registering');
         break;
       case 'unregistered':
+        registered = false;
         badge('off', 'The daemon unregistered from the carrier.');
         break;
       case 'registration_failed':
+        registered = false;
         badge('unavailable', msg.reason || 'The carrier refused the SIP account.');
         break;
       case 'account':
@@ -258,14 +240,18 @@ export function createNativeEngine(opts) {
       case 'connected': {
         stopRinger();
         stopTones();
-        const direction = entry ? 'inbound' : 'outbound';
-        live = { callId: msg.callId ?? entry?.callId ?? null, direction };
-        if (entry) entry.answered = true;
-        entry = null;
-        setIncomingCall(null);
-        setDirection(direction);
-        go('active');
-        cb().onActive?.(direction);
+        const callId = msg.callId ?? entry?.dialogId ?? live?.callId ?? null;
+        const alreadyLive = live && String(live.callId) === String(callId);
+        const direction = alreadyLive ? live.direction : entry ? 'inbound' : 'outbound';
+        if (!alreadyLive) {
+          live = { callId, direction };
+          if (entry) entry.answered = true;
+          entry = null;
+          setIncomingCall(null);
+          setDirection(direction);
+          go('active');
+          cb().onActive?.(direction);
+        }
         break;
       }
       case 'mute':
@@ -293,12 +279,15 @@ export function createNativeEngine(opts) {
       case 'rejected_incoming':
         endRing(msg.reason || 'rejected');
         break;
-      case 'ready': audioIssue = audioIssueMessage(msg); break;   // no sound card still registers
+      case 'ready':
+        audioIssue = audioIssueMessage(msg);
+        if (registered) badge(audioIssue ? 'unavailable' : 'ready', audioIssue);
+        break; // no sound card still registers
       case 'media_timeout': case 'error':
-        // A media fault lands mid-call, so the old "only when nothing is live" guard swallowed it.
         if (msg.reason || msg.scope === 'media' || (!live && !entry)) setError(msg.reason || msg.message || 'The native softphone reported an error.');
         break;
       case 'shutdown':
+        registered = false;
         badge('unavailable', `The SIP daemon stopped (${msg.reason || 'unknown reason'}).`);
         if (live || entry) { const d = live?.direction || 'inbound'; teardown(); go('error'); cb().onEnded?.(d); }
         break;
@@ -308,18 +297,34 @@ export function createNativeEngine(opts) {
 
   const off = b?.onEvent?.(onEvent);
 
-  /** Register (or re-register) and report the badge. Called whenever the tab becomes the phone. */
+  /** Register once; the standby effect and a fast outbound dial may race each other. */
   async function start() {
     if (!b) { badge('unavailable', 'This browser has no native SIP bridge.'); return { ok: false }; }
-    badge('registering');
-    go('standby');
-    const res = await send('register', {
-      domain: session.domain, port: session.port, user: session.username,
-      callerId: session.callerId, transport: session.transport || 'udp',
-    });
-    if (res?.ok === false) badge('unavailable', res.error || 'The daemon could not register.');
-    return res;
+    if (registrationPromise) return registrationPromise;
+    registrationPromise = (async () => {
+      try {
+        // Recover the `ready` probe if React subscribed after the daemon emitted it.
+        const status = await b.status?.();
+        if (status?.audio) audioIssue = audioIssueMessage({ audio: { name: status.audio }, audioErrors: status.audioErrors });
+        badge('registering');
+        go('standby');
+        const res = await send('register', {
+          domain: session.domain, port: session.port, user: session.username,
+          callerId: session.callerId, transport: session.transport || 'udp',
+        });
+        if (res?.ok === false) {
+          badge('unavailable', res.error || 'The daemon could not register.');
+          registrationPromise = null;
+        }
+        return res;
+      } catch (e) {
+        registrationPromise = null;
+        throw e;
+      }
+    })();
+    return registrationPromise;
   }
+
 
   function dispose() {
     if (disposed) return;
@@ -335,7 +340,6 @@ export function createNativeEngine(opts) {
     get state() { return state; },
     get live() { return live; },
     get incoming() { return entry; },
-    // No MediaStream means no MediaRecorder: said out loud rather than discovered later.
     recording: { supported: false, reason: 'Call audio lives in the native daemon, so the browser cannot record it.' },
     descriptor: { engine: 'native', carrier: session.provider, domain: session.domain, port: session.port },
   };

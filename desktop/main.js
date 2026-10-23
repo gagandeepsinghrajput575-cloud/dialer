@@ -1,29 +1,14 @@
-// The desktop supervisor: one window, one headless SIP daemon, no second app to switch to.
-//
-// Pulse Dialer is a local server plus a page. This file makes it a Mac app with a *native* phone:
-// it starts `desktop/daemon`, tells the server a native phone exists, and pipes JSON both ways.
-//
-//   renderer ──ipc('sip:command')──▶ main ──stdin──▶ pulse-sip-daemon ──UDP SIP──▶ carrier
-//   renderer ◀──ipc('sip:event')──── main ◀──stdout── pulse-sip-daemon ◀──CoreAudio── mic/spk
-//
-// Three rules shaped it:
-//   1. The daemon is a child process, not a service: it dies with the app, restarts with backoff
-//      if it crashes, and never outlives the window that spawned it.
-//   2. The SIP secret never passes through this file — the daemon reads it from the local API
-//      itself (desktop/daemon/lib/credentials.js), so a bug here cannot leak it into a log.
-//   3. The server learns the truth by heartbeat, not by configuration. While this process beats
-//      the in-app phone is native; the moment it stops, the app falls back to the browser engine.
+// Electron supervisor for the API, one window, and a child SIP daemon. A per-process capability
+// reaches only the daemon; heartbeat controls which in-app engine the server exposes.
 'use strict';
 
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { ensureServer, stopServer } = require('./lib/serverProcess');
 
-// Electron is required lazily and defensively so this file can also be loaded by a plain Node
-// process — which is exactly what `test/unit/desktop-supervisor.test.js` does to prove the
-// daemon is really spawned, really answered and really stopped, on a machine with no Electron
-// installed. In the app itself the require always succeeds.
+// Lazy import keeps the supervisor testable in plain Node, without Electron installed.
 let electron = null;
 function el() {
   if (!electron) { try { electron = require('electron'); } catch { electron = {}; } }
@@ -34,8 +19,7 @@ const app = { whenReady: () => Promise.resolve(), on: () => {}, exit: () => {}, 
 const REPO = path.join(__dirname, '..');
 const DIST = path.join(REPO, 'dist');
 const DAEMON_MAIN = path.join(__dirname, 'daemon', 'main.js');
-// A compiled launcher, if `desktop/scripts/build-daemon.sh` produced one. Optional: Electron can
-// run the daemon's JavaScript directly, which is what happens in development.
+// The build script may produce a compiled launcher; otherwise Electron runs the JS daemon.
 const DAEMON_BIN = path.join(__dirname, 'bin', 'pulse-sip-daemon');
 
 const PORT = Number(process.env.PORT || 3001);
@@ -44,9 +28,11 @@ const HEARTBEAT_MS = 10000;         // the server treats 45 s of silence as "the
 const COMMAND_TIMEOUT_MS = 10000;
 const RESTART_DELAYS_MS = [500, 1500, 4000, 10000, 30000];
 const DAEMON_VERSION = '1.0.0';
+const DAEMON_TOKEN = crypto.randomBytes(32).toString('hex');
 
 let win = null;
 let daemon = null;
+let daemonWanted = false;         // explicit stops (window closed/restart) must not look like crashes
 let serverChild = null;      // non-null only when this app started the API server itself
 let heartbeat = null;
 let nextId = 1;
@@ -54,6 +40,7 @@ let quitting = false;
 let restarts = 0;
 let restartTimer = null;
 let audioName = '';
+let audioErrors = [];
 const pending = new Map();          // command id -> { resolve, timer }
 
 // --------------------------------------------------------------------------- local API
@@ -79,6 +66,7 @@ async function api(method, urlPath, body) {
 async function beat() {
   const res = await api('POST', '/api/telephony/native-heartbeat', {
     engine: 'pulse-sip-daemon',
+    daemonToken: DAEMON_TOKEN,
     pid: daemon?.pid || 0,
     version: DAEMON_VERSION,
     audio: audioName,
@@ -89,19 +77,14 @@ async function beat() {
   return res;
 }
 
-// Beat at once, then every HEARTBEAT_MS — the first beat is what flips the server's in-app engine
-// to native, so it must not wait out an interval. And only while a daemon exists: claiming a phone
-// that cannot answer is exactly the lie this design prevents.
+// Beat immediately, then every 10 s while a daemon exists; a missing beat returns ownership.
 const startHeartbeat = () => {
   if (heartbeat) clearInterval(heartbeat);
   beat();
   heartbeat = setInterval(() => { if (daemon) beat(); }, HEARTBEAT_MS);
 };
 
-/**
- * Ask the server to forget the native phone, so the browser engine takes over immediately instead
- * of 45 s later. The opt-in itself is left set: running the app again is the whole of re-enabling.
- */
+/** Clear liveness now; keep the opt-in so the next app launch restores native mode. */
 async function releasePhone() {
   if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
   return api('POST', '/api/telephony/native-heartbeat', { clear: true });
@@ -109,8 +92,7 @@ async function releasePhone() {
 
 // --------------------------------------------------------------------------- the daemon
 function daemonCommand() {
-  // A compiled arm64 launcher wins in a packaged app; otherwise run the daemon's JavaScript with
-  // the Electron binary in Node mode — no second runtime to install, no PATH to guess at.
+  // Prefer the packaged launcher; development runs daemon JS through Electron-as-Node.
   if (fs.existsSync(DAEMON_BIN)) return { file: DAEMON_BIN, args: [] };
   return { file: process.execPath, args: [DAEMON_MAIN], env: { ELECTRON_RUN_AS_NODE: '1' } };
 }
@@ -120,13 +102,7 @@ function sendToDaemon(payload) {
   try { daemon.stdin.write(`${JSON.stringify(payload)}\n`); return true; } catch { return false; }
 }
 
-/**
- * One command, one answer. Events are not answers: they carry no `id`.
- *
- * The daemon echoes `id` back as a *string* (protocol.js normalises it, so a controller cannot be
- * bitten by 1 !== "1"), so the pending map is keyed on the string form too — otherwise every
- * command would time out while the answer sat unread.
- */
+/** Match each command reply by its normalized string id; events have no id. */
 function command(action, payload = {}) {
   return new Promise((resolve) => {
     if (!daemon) { resolve({ ok: false, error: 'The SIP daemon is not running.' }); return; }
@@ -156,16 +132,38 @@ function onDaemonLine(line) {
   const replyId = msg.id === undefined || msg.id === null ? '' : String(msg.id);
   const entry = replyId ? pending.get(replyId) : null;
   if (entry) { pending.delete(replyId); clearTimeout(entry.timer); entry.resolve(msg); return; }
-  if (msg.event === 'ready') audioName = msg.audio?.name || '';
+  if (msg.event === 'ready') { audioName = msg.audio?.name || ''; audioErrors = msg.audioErrors || []; }
   forward(msg);
 }
 
+function settlePending(message) {
+  for (const [, entry] of pending) {
+    clearTimeout(entry.timer);
+    entry.resolve({ ok: false, error: message });
+  }
+  pending.clear();
+}
+
+function scheduleDaemonRestart() {
+  if (restartTimer) clearTimeout(restartTimer);
+  const delay = RESTART_DELAYS_MS[Math.min(restarts, RESTART_DELAYS_MS.length - 1)];
+  restarts += 1;
+  forward({ event: 'supervisor', restarting: true, attempt: restarts, delayMs: delay });
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (daemonWanted && !quitting) startDaemon();
+  }, delay);
+}
+
 function startDaemon() {
-  if (daemon || quitting) return null;
+  if (quitting) return null;
+  daemonWanted = true;
+  if (daemon) return null;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   const { file, args, env } = daemonCommand();
   const child = spawn(file, args, {
     cwd: __dirname,
-    env: { ...process.env, ...(env || {}), PULSE_API_BASE: API_BASE },
+    env: { ...process.env, ...(env || {}), PULSE_API_BASE: API_BASE, PULSE_DAEMON_TOKEN: DAEMON_TOKEN },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   daemon = child;
@@ -182,36 +180,40 @@ function startDaemon() {
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => process.stderr.write(`[sip] ${chunk}`));
 
-  child.on('error', (e) => forward({ event: 'error', message: `Could not start the SIP daemon: ${e.message}` }));
-  child.on('exit', (code, signal) => {
+  let exited = false;
+  const finish = (code, signal, reason) => {
+    if (exited) return;
+    exited = true;
+    // Ignore stale child exits so they cannot clear a replacement or trigger a restart.
+    if (daemon !== child) return;
     daemon = null;
-    for (const [, entry] of pending) {
-      clearTimeout(entry.timer);
-      entry.resolve({ ok: false, error: 'The SIP daemon exited.' });
-    }
-    pending.clear();
-    forward({ event: 'shutdown', reason: signal || `exit ${code}` });
-    if (quitting) return;
-    // A daemon that dies mid-shift must come back, but not in a tight loop: the delays grow, and
-    // the renderer is told, so a silent phone is never mistaken for a quiet one.
-    const delay = RESTART_DELAYS_MS[Math.min(restarts, RESTART_DELAYS_MS.length - 1)];
-    restarts += 1;
-    forward({ event: 'supervisor', restarting: true, attempt: restarts, delayMs: delay });
-    restartTimer = setTimeout(() => { restartTimer = null; startDaemon(); }, delay);
+    settlePending(reason || 'The SIP daemon exited.');
+    forward({ event: 'shutdown', reason: signal || reason || `exit ${code}` });
+    if (quitting || !daemonWanted) return;
+    // Recover crashes with capped backoff and tell the renderer.
+    scheduleDaemonRestart();
+  };
+
+  child.on('error', (e) => {
+    forward({ event: 'error', message: `Could not start the SIP daemon: ${e.message}` });
+    finish(null, null, e.message);
   });
+  child.on('exit', (code, signal) => finish(code, signal, 'The SIP daemon exited.'));
 
   startHeartbeat();
   return child;
 }
 
 function stopDaemon() {
+  daemonWanted = false;
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   const child = daemon;
-  daemon = null;
+  daemon = null;                     // mark this child stale before its exit event can run
+  settlePending('The SIP daemon was stopped.');
   if (!child) return;
-  // Ask politely first (the daemon sends BYE for a live call and unregisters), then insist.
+  // Ask politely first (the daemon sends BYE and unregisters), then insist.
   try { child.stdin.write(`${JSON.stringify({ action: 'shutdown' })}\n`); } catch { /* already gone */ }
-  const kill = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* already gone */ } }, 400);
+  const kill = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* already gone */ } }, 1200);
   kill.unref?.();
 }
 
@@ -228,19 +230,18 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
-      // The preload cannot see this process's environment, so the API origin is passed as an
-      // argument. It is what src/api.js prefixes requests with when the page is not served from
-      // that origin (a packaged app loading dist/ straight off disk, for instance).
+      // Pass API origin to preload for renderer requests.
       additionalArguments: [`--pulse-api-base=${API_BASE}`],
     },
   });
   win.once('ready-to-show', () => win?.show());
+  const created = win;
+  win.on?.('closed', () => { if (win === created) win = null; });
   // External links belong in the agent's browser, not in a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
   if (fs.existsSync(path.join(DIST, 'index.html'))) {
-    // The built app is served by the local API server, so every /api call is same-origin and the
-    // renderer needs no absolute base. `npm run build` first — the supervisor says so if not.
+    // Serve the built renderer from the API origin.
     win.loadURL(`${API_BASE}/`);
   } else {
     win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(NO_DIST_PAGE)}`);
@@ -248,8 +249,7 @@ function createWindow() {
   return win;
 }
 
-// Shown instead of a blank window when `npm run build` has not run: the three commands that fix
-// it, on the page, so nobody has to go looking in a terminal scrollback.
+// Show actionable build instructions when dist/ is missing.
 const NO_DIST_PAGE = `<!doctype html><meta charset="utf-8"><title>Pulse Dialer</title><style>
 body{background:#0b1020;color:#e6edf3;font:15px/1.7 -apple-system,sans-serif;margin:0;padding:14vh 8vw}
 code{background:#161b22;padding:2px 6px;border-radius:6px}p{color:#9fb0c3}</style>
@@ -261,8 +261,7 @@ code{background:#161b22;padding:2px 6px;border-radius:6px}p{color:#9fb0c3}</styl
 function boot() {
   const { app, ipcMain, BrowserWindow } = el();
 
-  // A second launch focuses the running app instead of starting a second daemon on the same
-  // microphone — one audio device means one call, and one supervisor means one registration.
+  // A second launch focuses this window instead of opening another daemon.
   if (app.requestSingleInstanceLock?.() === false) { app.quit(); return; }
   app.on('second-instance', () => {
     if (!win) return;
@@ -272,8 +271,7 @@ function boot() {
   });
 
   app.whenReady().then(() => {
-    // The point of the whole exercise: the phone is the app. No dock icon bouncing for a call, no
-    // menubar item, no second window — and the daemon itself has no UI at all.
+    // The phone lives in this window; the daemon has no UI.
     if (process.platform === 'darwin' && typeof app.dock?.hide === 'function') app.dock.hide();
     app.setLoginItemSettings?.({ openAtLogin: false });
 
@@ -285,7 +283,7 @@ function boot() {
     ipcMain.handle('sip:command', (_event, action, payload) => command(String(action || ''), payload || {}));
     ipcMain.handle('sip:status', () => ({
       running: !!daemon, pid: daemon?.pid || null, apiBase: API_BASE, version: DAEMON_VERSION,
-      platform: process.platform, arch: process.arch, audio: audioName, restarts,
+      platform: process.platform, arch: process.arch, audio: audioName, audioErrors, restarts,
       binary: fs.existsSync(DAEMON_BIN) ? DAEMON_BIN : null,
     }));
     ipcMain.handle('sip:restart', () => {
@@ -295,14 +293,15 @@ function boot() {
     });
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-      else win?.show();
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+        startDaemon();
+      } else win?.show();
     });
   });
 
   app.on('window-all-closed', () => {
-    // Closing the window ends the shift: the daemon must not keep a registration (and a
-    // microphone) alive with nobody looking at the cockpit. On macOS the app stays resident.
+    // Closing the last window releases the daemon; macOS keeps the app resident.
     stopDaemon();
     releasePhone();
     if (process.platform !== 'darwin') app.quit();
@@ -310,8 +309,7 @@ function boot() {
 
   app.on('before-quit', () => { quitting = true; });
   app.on('will-quit', (event) => {
-    // Synchronous on purpose: once this returns the process is gone and the server would keep
-    // believing a native phone exists for another 45 seconds.
+    // Clear server heartbeat before exit; otherwise native ownership lingers for 45 s.
     quitting = true;
     stopDaemon();
     stopServer(serverChild);
@@ -335,15 +333,13 @@ process.on('uncaughtException', (e) => {
   forward({ event: 'error', message: String(e?.message || e) });
 });
 
-// Only the real Electron main process wires the app lifecycle; anything that requires this file
-// (a test, a script) gets the supervisor's parts without booting an app.
+// Only Electron's main process wires app lifecycle handlers.
 if (require.main === module) boot();
 
 module.exports = {
   boot, startDaemon, stopDaemon, command, beat, releasePhone, releasePhoneSync, api, forward,
   createWindow, API_BASE, DAEMON_VERSION, DAEMON_BIN, HEARTBEAT_MS,
-  // The value the server compares against `native_sip_engine`, re-exported so a test can assert
-  // the two sides agree without reaching into the server module.
+  // Shared settings identity, exported for supervisor tests.
   NATIVE_ENGINE_NAME: require('../server/services/carrierAccount').NATIVE_ENGINE,
   isRunning: () => !!daemon, pid: () => daemon?.pid || null, restartCount: () => restarts,
   setWindow: (w) => { win = w; },

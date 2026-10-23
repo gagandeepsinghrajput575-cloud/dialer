@@ -10,11 +10,11 @@
 // whether that engine is actually alive, so `webrtcSession()` can hand back one shape whichever
 // engine wins — and stays byte-for-byte the browser descriptor while no daemon is running.
 //
-// Secret rule: the SIP password is released only by `GET /api/telephony/carrier-credentials`,
-// which demands the session token and is read by the local supervisor process. It is never put
-// in the renderer's session descriptor, so "this secret does not reach the browser" still holds.
+// Secret rule: the password endpoint needs the session token plus an in-memory daemon capability
+// installed by the no-Origin supervisor beat; the capability is never exposed to the renderer.
 'use strict';
 
+const crypto = require('crypto');
 const settings = require('../repositories/settingsRepo');
 const telephony = require('./telephonyService');
 
@@ -32,6 +32,7 @@ const DESCRIPTOR_ENGINE = 'native';
 // The supervisor beats every 10 s while it holds the daemon; 45 s of silence means the process
 // is gone (crashed, quit, never started) and the app must stop claiming a native phone exists.
 const HEARTBEAT_TTL_MS = 45000;
+let daemonToken = '';
 
 const hostOf = (raw) => String(raw || '').trim().replace(/^sips?:\/?\/?/i, '').replace(/:\d+$/, '').replace(/\/+$/, '');
 const portOf = (raw) => parseInt(String(raw || '').match(/:(\d+)$/)?.[1] || '', 10) || 0;
@@ -94,6 +95,14 @@ function heartbeat() {
 }
 
 const isActive = () => engineSelected() && heartbeat().alive;
+
+// Capability token lives only in server memory; it is installed by the no-Origin supervisor beat.
+function setDaemonToken(value) { daemonToken = String(value || '').trim(); }
+function daemonAuthorized(value) {
+  const supplied = Buffer.from(String(value || ''), 'utf8');
+  const expected = Buffer.from(daemonToken, 'utf8');
+  return isActive() && expected.length > 0 && supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
 
 /**
  * What is missing before the native engine could carry a call. Mirrors `webrtcReadiness()` so
@@ -177,8 +186,8 @@ function testMessage(sample) {
 }
 
 /**
- * The full account, secret included. Only ever served behind the session token, to a local
- * process; `includeSecret: false` is what a diagnostic caller should ask for.
+ * The full account, secret included. The controller also requires the daemon capability;
+ * `includeSecret: false` is a redacted diagnostic response.
  */
 function credentials({ includeSecret = true } = {}) {
   const r = readiness();
@@ -214,6 +223,7 @@ function beat({ pid = 0, version = '', audio = '' } = {}) {
 
 /** The supervisor says goodbye (or simply stopped beating): drop the native claim. */
 function clearBeat() {
+  daemonToken = '';
   settings.set('native_daemon_last_seen', '0');
   settings.set('native_daemon_pid', '0');
   return heartbeat();
@@ -227,6 +237,7 @@ function setEngine(enabled) {
 
 module.exports = {
   activeAccount, readiness, webrtcSession, credentials, heartbeat, beat, clearBeat, setEngine,
+  setDaemonToken, daemonAuthorized,
   isActive, engineSelected, hintText, testMessage, ENGINE_KEY, NATIVE_ENGINE, DESCRIPTOR_ENGINE,
   HEARTBEAT_TTL_MS,
 };

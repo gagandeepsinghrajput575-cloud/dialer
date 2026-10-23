@@ -1,42 +1,56 @@
-// Credential fetch: the daemon pulls its own SIP account from the local API.
-//
-// The SIP secret is deliberately *not* routed through the renderer. The browser only learns
-// that a native engine exists; the daemon — a local process on the same machine — authenticates
-// with the session token from GET /api/session and reads GET /api/telephony/carrier-credentials.
-// That keeps the existing rule ("this secret never reaches the browser") true in native mode.
+// The daemon fetches its SIP account with a capability that never reaches the renderer.
 'use strict';
 
 const DEFAULT_TIMEOUT_MS = 4000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function getJson(base, path, token, timeoutMs = DEFAULT_TIMEOUT_MS) {
+async function getJson(base, path, token, timeoutMs = DEFAULT_TIMEOUT_MS, daemonToken = '') {
   const url = `${String(base).replace(/\/+$/, '')}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      headers: { ...(token ? { 'x-pulse-token': token } : {}), accept: 'application/json' },
+      headers: {
+        ...(token ? { 'x-pulse-token': token } : {}),
+        ...(daemonToken ? { 'x-pulse-daemon-token': daemonToken } : {}),
+        accept: 'application/json',
+      },
       signal: controller.signal,
     });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* non-JSON error page */ }
-    if (!res.ok) throw new Error(json?.error || `${res.status} ${res.statusText} from ${path}`);
+    if (!res.ok) {
+      const error = new Error(json?.error || `${res.status} ${res.statusText} from ${path}`);
+      error.status = res.status;
+      throw error;
+    }
     return json;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/**
- * @param {string} apiBase e.g. http://127.0.0.1:3001
- * @returns {Promise<{token:string, credentials:object}>}
- */
 async function load(apiBase) {
   if (!apiBase) throw new Error('No API base URL — pass --api-base or PULSE_API_BASE.');
+  const daemonToken = String(process.env.PULSE_DAEMON_TOKEN || '');
+  if (!daemonToken) throw new Error('No desktop supervisor capability token; use the desktop app to fetch SIP credentials.');
   const session = await getJson(apiBase, '/api/session', '');
   const token = session?.token;
   if (!token) throw new Error('The API did not hand out a session token.');
-  const credentials = await getJson(apiBase, '/api/telephony/carrier-credentials', token);
+
+  // The desktop supervisor publishes its capability in the heartbeat just before spawning us.
+  // On a cold start this first request can race that beat; retry only its temporary 401.
+  let credentials;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      credentials = await getJson(apiBase, '/api/telephony/carrier-credentials', token, DEFAULT_TIMEOUT_MS, daemonToken);
+      break;
+    } catch (e) {
+      if (e.status !== 401 || attempt === 9) throw e;
+      await sleep(100);
+    }
+  }
   if (!credentials?.configured) {
     const missing = (credentials?.missing || []).join(', ') || 'credentials';
     throw new Error(`No carrier SIP account is configured yet (missing: ${missing}).`);

@@ -9,6 +9,7 @@ desktop/bin/
 
 # Generated delivery artifact & release bundles
 native-sip-daemon.patch
+<<<<<<< HEAD
 release/
 dist/
 
@@ -18,6 +19,13 @@ data/
 .DS_Store
 
 # Zenith harness surface. Generated per-machine by `zenith init`
+=======
+
+# Zenith harness surface. Generated per-machine by `zenith init` because .mcp.json and
+# .codex/config.toml embed the ABSOLUTE path of the local harness checkout — committing them
+# would hand another machine a path that does not exist there. Recreate with:
+#   uv run --project <zenith>/zenith zenith init --workspace-dir <repo> --agent claude
+>>>>>>> origin/arena/86f63651-dialer
 .mcp.json
 .claude/
 .codex/
@@ -26,5 +34,9 @@ data/
 .agents/skills/
 __pycache__/
 
+<<<<<<< HEAD
 # Zenith harness workspace guidance
+=======
+# Zenith harness workspace guidance (canonical copy lives in the project bucket .zenith/)
+>>>>>>> origin/arena/86f63651-dialer
 AGENTS.md

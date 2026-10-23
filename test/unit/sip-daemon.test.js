@@ -310,7 +310,13 @@ async function run() {
     });
     assert.notStrictEqual(exited, 'timeout', 'the daemon exits on shutdown');
     assert.ok(t.events.some((e) => e.event === 'shutdown'), 'a shutdown event is emitted before exiting');
-    ok(`shutdown during a live call tears down and exits (${exited})`);
+    assert.ok(t.carrier.method('BYE').length >= 1, 'shutdown sends BYE for the connected call before closing UDP');
+    const unregisters = t.carrier.method('REGISTER').filter((m) => m.headers.expires === '0');
+    const authenticatedRelease = unregisters.find((m) => m.headers.authorization);
+    assert.ok(authenticatedRelease, 'shutdown sends authenticated REGISTER Expires: 0');
+    assert.ok(t.carrier.sent.some((m) => m.startLine.startsWith('SIP/2.0 200')
+      && m.headers['call-id'] === authenticatedRelease.headers['call-id']), 'the carrier confirms the release');
+    ok(`shutdown during a live call tears down, unregisters and exits (${exited})`);
     t.carrier.close();
   }
 }

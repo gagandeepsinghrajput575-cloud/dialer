@@ -23,11 +23,13 @@ const businessHours = asyncHandler(async (req, res) => res.json(telephony.busine
 const webrtcSession = asyncHandler(async (req, res) => res.json(softphoneSession.resolve()));
 
 // GET /api/telephony/carrier-credentials
-// The SIP account the *daemon* registers with, secret included. Token-gated like the session
-// endpoint and read by the local supervisor process only: the renderer gets `password: ''` from
-// webrtc-session and never sees this response, which keeps the secret off the browser.
+// The SIP account the daemon registers with. The route requires the session token and a separate
+// in-memory supervisor capability; the renderer has neither the capability nor a client helper.
 const carrierCredentials = asyncHandler(async (req, res) => {
   const includeSecret = String(req.query?.secret || '1') !== '0';
+  if (includeSecret && !carrierAccount.daemonAuthorized(req.get('x-pulse-daemon-token'))) {
+    throw ApiError.unauthorized('The daemon capability token is missing or expired.');
+  }
   res.json(carrierAccount.credentials({ includeSecret }));
 });
 
@@ -40,8 +42,10 @@ const nativeHeartbeat = asyncHandler(async (req, res) => {
   const engine = String(body.engine || '').trim();
   if (engine === carrierAccount.NATIVE_ENGINE) {
     carrierAccount.setEngine(true);
+    carrierAccount.setDaemonToken(body.daemonToken);
   } else if (engine === 'off' || engine === 'none') {
     carrierAccount.setEngine(false);
+    carrierAccount.setDaemonToken('');
   }
   if (body.clear) carrierAccount.clearBeat();
   else carrierAccount.beat({ pid: body.pid, version: body.version, audio: body.audio });

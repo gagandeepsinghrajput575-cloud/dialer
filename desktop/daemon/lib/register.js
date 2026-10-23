@@ -35,7 +35,7 @@ function attach(ua) {
     };
   };
 
-  ua.sendRegister = function sendRegister(expires, authHeader, triedAuth = false) {
+  ua.sendRegister = function sendRegister(expires, authHeader, triedAuth = false, onComplete = null) {
     // The REGISTER request-URI is the realm, not a user address (RFC 3261 §10.2).
     const uri = `sip:${ua.account.domain}`;
     ua.cseq += 1;
@@ -57,12 +57,17 @@ function attach(ua) {
       method: 'REGISTER',
       target: { host: ua.account.domain, port: ua.account.port },
       invite: false,
-      onFinal: (res) => ua.onRegisterResponse(res, { uri, expires, triedAuth }),
-      onTimeout: () => ua.failRegistration('no response from the SIP server'),
+      onFinal: (res) => ua.onRegisterResponse(res, { uri, expires, triedAuth, onComplete }),
+      onTimeout: () => {
+        if (expires === 0) {
+          ua.registration.state = 'unregistered';
+          onComplete?.({ status: 0, reason: 'no response from the SIP server' });
+        } else ua.failRegistration('no response from the SIP server');
+      },
     });
   };
 
-  ua.onRegisterResponse = function onRegisterResponse(res, { uri, expires, triedAuth = false }) {
+  ua.onRegisterResponse = function onRegisterResponse(res, { uri, expires, triedAuth = false, onComplete = null }) {
     if (res.status >= 200 && res.status < 300) {
       // `Expires: 0` is the answer to a de-registration, and 0 is falsy — the old
       // `parseInt(...) || expires || REGISTER_EXPIRES` chain discarded it, fell through the
@@ -76,8 +81,8 @@ function attach(ua) {
         const was = ua.registration.state;
         ua.registration.state = 'unregistered';
         ua.registration.expires = 0;
-        // unregister() already reported this synchronously; do not report one release twice.
         if (was !== 'unregistered') ua.emit('unregistered', { account: ua.registration.account });
+        onComplete?.(res);
         return;
       }
       ua.registration.state = 'registered';
@@ -85,6 +90,7 @@ function attach(ua) {
       ua.registration.expires = granted;
       ua.emit('registered', { account: ua.registration.account, expires: granted });
       ua.scheduleRefresh(granted);
+      onComplete?.(res);
       return;
     }
     // 401/407 is the normal first answer: the carrier wants the digest, not a failure report.
@@ -96,10 +102,17 @@ function attach(ua) {
           method: 'REGISTER', uri, username: ua.account.user,
           password: ua.account.password, challenge, nc: 1,
         });
-        return ua.sendRegister(expires, header, true);
+        return ua.sendRegister(expires, header, true, onComplete);
       }
     }
+    if (expires === 0) {
+      ua.stopRegistrationTimer();
+      ua.registration.state = 'unregistered';
+      onComplete?.(res);
+      return;
+    }
     ua.failRegistration(`${res.status || 'transport'} ${res.reason || ''}`.trim());
+    onComplete?.(res);
   };
 
   ua.failRegistration = function failRegistration(reason) {
@@ -146,10 +159,18 @@ function attach(ua) {
 
   ua.unregister = function unregister() {
     ua.stopRegistrationTimer();
-    if (ua.account.domain && ua.account.user) ua.sendRegister(0, null);
-    ua.registration.state = 'unregistered';
-    ua.emit('unregistered', { account: ua.registration.account });
-    return { ok: true };
+    if (!ua.account.domain || !ua.account.user) {
+      ua.registration.state = 'unregistered';
+      ua.emit('unregistered', { account: ua.registration.account });
+      return Promise.resolve({ ok: true });
+    }
+    return new Promise((resolve) => {
+      ua.sendRegister(0, null, false, (res) => resolve({
+        ok: res.status >= 200 && res.status < 300,
+        ...(res.status ? { status: res.status } : {}),
+        ...(res.reason ? { error: res.reason } : {}),
+      }));
+    });
   };
 
   return ua;

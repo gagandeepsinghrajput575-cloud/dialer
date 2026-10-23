@@ -45,7 +45,7 @@ const ok = (m) => { checks += 1; console.log('  ✓', m); };
  * Returns the live hook result plus the bridge transcript, and drives the engine to a connected
  * call so the native branches in useWebRtc are the ones under test.
  */
-async function renderHook(reply, ctx) {
+async function renderHook(reply, ctx = {}) {
   const { JSDOM } = require('jsdom');
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'http://localhost:3001/', pretendToBeVisual: true,
@@ -79,7 +79,15 @@ async function renderHook(reply, ctx) {
   const handlers = [];
   win.pulseNativeSip = {
     available: true,
-    command: async (action, payload) => { sent.push([action, payload]); return reply(action, payload); },
+    command: async (action, payload) => {
+      sent.push([action, payload]);
+      if (action === 'answer' && ctx.connectedOnAnswer === 'event-first') fire({ event: 'connected', callId: payload.callId });
+      const result = await reply(action, payload);
+      if (action === 'answer' && ctx.connectedOnAnswer === 'reply-first') {
+        setTimeout(() => fire({ event: 'connected', callId: payload.callId }), 0);
+      }
+      return result;
+    },
     onEvent: (h) => { handlers.push(h); return () => {}; },
   };
   const fire = (msg) => handlers.forEach((h) => h(msg));
@@ -92,7 +100,7 @@ async function renderHook(reply, ctx) {
   const container = win.document.getElementById('root');
   const root = createRoot(container);
   let api = null;
-  const Probe = () => { api = mod.default({ enabled: true, dryRun: false, softphone: 'Dialer', countryCode: 'US' }); return null; };
+  const Probe = () => { api = mod.default({ enabled: true, dryRun: false, softphone: 'Dialer', countryCode: 'US', onActive: ctx.onActive }); return null; };
 
   await act(async () => { root.render(React.createElement(Probe)); });
   await act(async () => { await sleep(30); });
@@ -100,7 +108,7 @@ async function renderHook(reply, ctx) {
   // Reach a connected call through the real event path, so `nativeRef.current.live` is set and the
   // native branches of toggleMute/sendDtmf/hangUp are the code being exercised.
   await act(async () => { fire({ event: 'registered' }); });
-  await act(async () => { fire({ event: 'connected', callId: 'call-1' }); });
+  if (ctx.connect !== false) await act(async () => { fire({ event: 'connected', callId: 'call-1' }); });
   await act(async () => { await sleep(10); });
 
   const cleanup = async () => {
@@ -199,9 +207,12 @@ async function main() {
     const reply = (a) => (a === 'dtmf' ? { ok: false, error: 'No live call to send tones on.' } : DEFAULT_REPLY(a));
     const h = await renderHook(reply);
     try {
-      await h.act(async () => { h.api().sendDtmf('5'); });
+      let sent;
+      await h.act(async () => { sent = await h.api().sendDtmf('5'); });
       await h.sleep(30);
       assert.ok(sentActions(h.sent).includes('dtmf'), 'the digit must have been sent to the daemon');
+      assert.deepStrictEqual(h.api().dtmfLog, [], 'a refused digit must not appear in the sent-tones log');
+      assert.strictEqual(sent, false, 'a refused digit must not report itself as sent');
       assert.ok(h.api().error, `a refused digit must surface an error, got "${h.api().error}"`);
       ok(`error="${h.api().error}"`);
     } finally { await h.cleanup(); }
@@ -212,7 +223,7 @@ async function main() {
     const h = await renderHook(DEFAULT_REPLY);
     try {
       let returned;
-      await h.act(async () => { returned = h.api().sendDtmf('5'); });
+      await h.act(async () => { returned = await h.api().sendDtmf('5'); });
       await h.sleep(30);
       assert.strictEqual(returned, true, 'an accepted digit reports sent');
       assert.deepStrictEqual(h.api().dtmfLog.slice(-1), ['5'], 'the keypad log still records the digit');
@@ -268,6 +279,61 @@ async function main() {
     });
   }
 
+  // 8. The primary user path: starting an outbound native call from standby must reach the
+  //    daemon's dial command. In particular, it must not fall through to the browser/WebRTC path.
+  await check(8, 'an outbound native call is handed to the daemon from standby', async () => {
+    const h = await renderHook(DEFAULT_REPLY, { connect: false });
+    try {
+      let result;
+      await h.act(async () => { result = await h.api().start('+12025550123', { callId: 42 }); });
+      assert.strictEqual(result?.ok, true, 'the native dial should be accepted');
+      assert.ok(sentActions(h.sent).includes('dial'), `expected a native dial command, saw ${sentActions(h.sent)}`);
+      assert.deepStrictEqual(lastPayload(h.sent, 'dial'), { number: '+12025550123', callId: 42 });
+      ok('native outbound dial reached the daemon with the CRM call id');
+    } finally { await h.cleanup(); }
+  });
+
+  // 9. Declining an inbound call is also a remote control command. A refusal must leave the
+  //    ring visible; locally clearing it would log a missed call while the carrier keeps ringing.
+  await check(9, 'a refused inbound decline leaves the ring visible and reports the error', async () => {
+    const reply = (action) => action === 'reject'
+      ? { ok: false, error: 'The daemon could not reject the INVITE.' }
+      : DEFAULT_REPLY(action);
+    const h = await renderHook(reply, { connect: false });
+    try {
+      await h.act(async () => { h.fire({ event: 'incoming', callId: 'ring-2', callerPhone: '+12025550123' }); });
+      await h.sleep(20);
+      assert.strictEqual(h.api().state, 'incoming', 'the incoming ring must be visible first');
+      await h.act(async () => { h.api().hangUp(); });
+      await h.sleep(30);
+      assert.strictEqual(h.api().state, 'incoming', 'a refused reject must not clear the ring locally');
+      assert.strictEqual(h.api().incomingCall?.callId, 'ring-2');
+      assert.match(h.api().error, /could not reject/i);
+      ok('the ring remains actionable until the daemon confirms the decline');
+    } finally { await h.cleanup(); }
+  });
+
+  // CRM replaces `entry.callId`; the daemon's dialog id and the connected callback must remain stable.
+  await check(10, 'inbound CRM attachment preserves SIP control and a single active transition', async () => {
+    for (const order of ['event-first', 'reply-first']) {
+      let activations = 0;
+      const h = await renderHook(DEFAULT_REPLY, { connect: false, connectedOnAnswer: order, onActive: () => { activations += 1; } });
+      try {
+        await h.act(async () => { h.fire({ event: 'incoming', callId: 'dialog-7', callerPhone: '+12025550123' }); });
+        await h.sleep(20);
+        const entry = h.api().incomingCall;
+        assert.ok(entry, `${order}: the inbound ring is visible`);
+        await h.act(async () => { entry.attachCrm({ callId: 99, prospect: { id: 4 } }); });
+        let answer;
+        await h.act(async () => { answer = await entry.answer(); });
+        await h.sleep(20);
+        assert.strictEqual(answer?.ok, true, `${order}: answer completes without resurrecting a cleared entry`);
+        assert.deepStrictEqual(lastPayload(h.sent, 'answer'), { callId: 'dialog-7' }, `${order}: SIP uses its own dialog id`);
+        assert.strictEqual(activations, 1, `${order}: connected is reported exactly once`);
+      } finally { await h.cleanup(); }
+    }
+    ok('CRM id stays separate from SIP id; either event/reply order activates once');
+  });
   const total = checks + failed;
   if (failed) {
     console.log(`\n\u{1F4A5} Native call controls: ${checks}/${total} passed, ${failed} FAILED`);

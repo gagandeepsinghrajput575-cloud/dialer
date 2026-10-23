@@ -5,6 +5,11 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { db } = require('../../server/db');
+// These suites read real tables. Every other DB suite calls migrate.run() itself; these three
+// never did, so they have failed with `no such table` since they were written and the behaviour
+// they cover has been unverified the whole time.
+const migrate = require('../../server/db/migrate');
+migrate.run();
 const { audioDir, recordingsDir, backupDir } = require('../../server/config/env');
 
 const BASE = process.env.API_BASE || 'http://127.0.0.1:3001';

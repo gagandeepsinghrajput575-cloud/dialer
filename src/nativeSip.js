@@ -118,13 +118,8 @@ export function createNativeEngine(opts) {
       callerNumber: formatCallerNumber(raw, countryCode) || raw || 'Unknown',
       rawNumber: raw,
       startedAt: new Date().toISOString(),
-      invitation: null,
-      simulated: false,
-      native: true,
-      answered: false,
-      prospect: null,
-      matched: false,
-      provisional: false,
+      invitation: null, simulated: false, native: true, answered: false,
+      prospect: null, matched: false, provisional: false,
       callId: payload.callId ?? null,
       engine: 'native',
       attachCrm: (patch) => {
@@ -204,10 +199,14 @@ export function createNativeEngine(opts) {
     return res;
   }
 
+  // Returns the state the daemon APPLIED, never the one asked for. It used to return `next` even
+  // when the daemon refused, which told the hook — and through it the operator's toast — that the
+  // microphone was muted while the customer could still hear everything.
   async function toggleMute() {
     const next = !mutedNow;
-    const res = await send('mute', { enabled: next });
-    if (res?.ok !== false) { mutedNow = next; setMuted(next); }
+    const res = await send('mute', { enabled: next }).catch((e) => ({ ok: false, error: e?.message }));
+    if (res?.ok === false) { setError(res?.error || 'The daemon could not change the mute.'); return mutedNow; }
+    mutedNow = next; setMuted(next);
     return next;
   }
   let mutedNow = false;

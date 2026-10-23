@@ -1,12 +1,24 @@
-node_modules
-dist
-data
-.env
-
-# The CoreAudio addon is built on the target Mac by desktop/scripts/build-daemon.sh.
+# In-app telephone addon build artifacts. The addon is optional (the null driver works without it).
 desktop/native/build/
+desktop/native/dist/
+desktop/bin/
 desktop/native/node_modules/
 
 # Generated delivery artifact — never a tracked source file, and it must never contain itself
 native-sip-daemon.patch
 release/
+
+# Zenith harness surface. Generated per-machine by `zenith init` because .mcp.json and
+# .codex/config.toml embed the ABSOLUTE path of the local harness checkout — committing them
+# would hand another machine a path that does not exist there. Recreate with:
+#   uv run --project <zenith>/zenith zenith init --workspace-dir <repo> --agent claude
+.mcp.json
+.claude/
+.codex/
+.hermes/
+.zenith/
+.agents/skills/
+__pycache__/
+
+# Zenith harness workspace guidance (canonical copy lives in the project bucket .zenith/)
+AGENTS.md

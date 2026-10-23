@@ -21,7 +21,9 @@
 #endif
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -75,18 +77,33 @@ struct Resampler {
     last = 0.0f;
   }
 
-  // float32 -> int16, device rate -> 8 kHz
-  void down(const float* in, size_t have, int16_t* out, size_t want) {
-    for (size_t i = 0; i < want; i++) {
-      const size_t idx = static_cast<size_t>(pos);
-      const float frac = static_cast<float>(pos - static_cast<double>(idx));
-      const float a = idx < have ? in[idx] : last;
+  // float32 -> int16, device rate -> 8 kHz, STREAMING across device buffers.
+  //
+  // `pos` is the read offset into `in` and may be carried in NEGATIVE from the previous buffer; a
+  // negative offset interpolates between `last` (that buffer's final sample) and `in[0]`, which is
+  // what keeps the phase continuous across callbacks instead of snapping it back to zero.
+  //
+  // Returns the number of outputs actually written, capped by `cap` and by the input available, so
+  // the caller can carry `pos - have` as a double and never cast a negative one to size_t.
+  //
+  // This replaced a version that took a `want` count and wrapped `pos` modulo `have` when it ran
+  // past the end. Called as `down(in, n, pcm, n)` — n outputs from n inputs at step 6 — that wrap
+  // replayed the same device buffer about six times, so the microphone ran roughly six times too
+  // slow, and the caller's `pos - n` went negative and was then cast to size_t.
+  size_t down(const float* in, size_t have, int16_t* out, size_t cap) {
+    size_t i = 0;
+    const double limit = static_cast<double>(have);
+    while (i < cap && pos < limit) {
+      const double d = pos;
+      const size_t idx = d < 0.0 ? 0 : static_cast<size_t>(d);
+      const float a = d < 0.0 ? last : in[idx];
       const float b = (idx + 1) < have ? in[idx + 1] : a;
-      out[i] = clamp16(a + (b - a) * frac);
+      const float frac = static_cast<float>(d - std::floor(d));
+      out[i++] = clamp16(a + (b - a) * frac);
       pos += step;
-      while (pos >= static_cast<double>(have) && have) pos -= static_cast<double>(have);
     }
     if (have) last = in[have - 1];
+    return i;
   }
 
   // int16 -> float32, 8 kHz -> device rate
@@ -123,7 +140,6 @@ struct Unit {
 #if defined(__APPLE__)
   AudioUnit au = nullptr;
 #endif
-  Ring inRing;                 // produced by the audio thread, consumed by JS
   Ring outRing;                // produced by JS, consumed by the audio thread
   Resampler down;              // device rate -> 8 kHz (microphone)
   Resampler up;                // 8 kHz -> device rate (speaker)
@@ -136,19 +152,65 @@ struct Unit {
   std::vector<int16_t> frame;      // the 160-sample frame being assembled
   std::vector<int16_t> outScratch; // a frame pulled from the ring for the speaker
   std::vector<float> upScratch;    // that frame, upsampled to the device rate
+  std::vector<float> carry;        // the surplus of the last expanded frame, for the next callback
+  std::vector<int16_t> tail;       // the partial 20 ms frame Write() is still assembling
   double downPos = 0.0;            // resampler state carried across callbacks
   float downLast = 0.0f;
-  size_t have = 0;                 // samples in inScratch/pcm this callback
-  size_t consumed = 0;             // samples already handed to JS
+  size_t have = 0;                 // 8 kHz samples held in pcm, carried across callbacks
+  size_t consumed = 0;             // of those, how many were already assembled into frames
+  size_t carryLen = 0;             // valid floats at the front of carry
+  size_t tailLen = 0;              // valid samples at the front of tail
+  // Device samples one 20 ms frame expands to: kFrame * deviceRate / kRate — 960 at 48 kHz, 882 at
+  // 44.1 kHz. Computed once in Open() because the render callback must not derive or allocate it.
+  size_t expand = kFrame;
 
   void allocate() {
     inScratch.assign(4096, 0.0f);
     pcm.assign(4096, 0);
     upScratch.assign(4096, 0.0f);
+    carry.assign(4096, 0.0f);
     frame.assign(kFrame, 0);
     outScratch.assign(kFrame, 0);
+    tail.assign(kFrame, 0);
   }
 };
+
+// ---- speaker frame assembly ---------------------------------------------------------------------
+// Split out of Write() so the framing can be exercised on a host build (test/native/dsp) instead of
+// only on a Mac with a real audio device. Write() calls this; nothing else does.
+//
+// Accepts any number of samples and queues whole 20 ms frames, holding a partial tail until the next
+// call completes it — so the ring only ever contains exactly one frame per slot, which is what lets
+// the render callback treat "a frame" and "20 ms" as the same thing.
+//
+// The tail is per-unit. It used to be a function-level `static`, which was shared by every open
+// handle, and it was `assign(kFrame, 0)`-zeroed on every call while `tailLen` persisted: that
+// destroyed the samples it was holding and then wrote new ones at offset tailLen, pushing a frame
+// whose first tailLen samples were silence. Any write whose length was not a multiple of 160
+// therefore injected up to 159 zeros into the far-end audio — a click on every write.
+inline size_t queueFrames(Unit* unit, const int16_t* data, size_t samples) {
+  if (!unit || !data || samples == 0) return 0;
+  int16_t* tail = unit->tail.data();
+  size_t offset = 0;
+  size_t queued = 0;
+  if (unit->tailLen) {
+    const size_t take = std::min(static_cast<size_t>(kFrame) - unit->tailLen, samples);
+    std::memcpy(tail + unit->tailLen, data, take * sizeof(int16_t));
+    unit->tailLen += take;
+    offset += take;
+    if (unit->tailLen == static_cast<size_t>(kFrame)) { unit->outRing.push(tail); unit->tailLen = 0; queued++; }
+  }
+  while (samples - offset >= static_cast<size_t>(kFrame)) {
+    unit->outRing.push(data + offset);
+    offset += static_cast<size_t>(kFrame);
+    queued++;
+  }
+  if (offset < samples) {
+    unit->tailLen = samples - offset;
+    std::memcpy(tail, data + offset, unit->tailLen * sizeof(int16_t));
+  }
+  return queued;
+}
 
 // ---- the device layer, implemented in coreaudio_impl.mm ----------------------------------------
 // Declared here (not in an anonymous namespace) so the binding file can call them: an anonymous

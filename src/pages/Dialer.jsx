@@ -1202,8 +1202,8 @@ export default function Dialer() {
       // Mute lives on M, like every other softphone. Only meaningful with a live mic.
       if (k === 'm' && isWebrtcRef.current && webrtcLiveRef.current) {
         e.preventDefault();
-        const nowMuted = webrtcRef.current?.toggleMute();
-        toast(nowMuted ? 'Microphone muted' : 'Microphone live');
+        const nowMuted = webrtcRef.current?.toggleMute(); // undefined = the daemon owns the answer
+        if (typeof nowMuted === 'boolean') toast(nowMuted ? 'Microphone muted' : 'Microphone live');
         return;
       }
       if (k === 'd') {
@@ -1624,7 +1624,7 @@ export default function Dialer() {
                       <>
                         <button
                           className={`btn xs ${webrtc.muted ? 'danger' : ''}`}
-                          onClick={() => { const m = webrtc.toggleMute(); toast(m ? 'Microphone muted' : 'Microphone live'); }}
+                          onClick={() => { const m = webrtc.toggleMute(); if (typeof m === 'boolean') toast(m ? 'Microphone muted' : 'Microphone live'); }}
                           title={webrtc.muted ? 'Unmute the microphone (M)' : 'Mute the microphone (M)'}
                         >
                           {webrtc.muted ? <MicOff size={12} /> : <Mic size={12} />} {webrtc.muted ? 'Unmute' : 'Mute'}
@@ -1878,7 +1878,7 @@ export default function Dialer() {
                 onKey={(d) => webrtc.sendDtmf(d)}
                 onClose={() => setDtmfOpen(false)}
                 muted={webrtc.muted}
-                onToggleMute={() => { const m = webrtc.toggleMute(); toast(m ? 'Microphone muted' : 'Microphone live'); }}
+                onToggleMute={() => { const m = webrtc.toggleMute(); if (typeof m === 'boolean') toast(m ? 'Microphone muted' : 'Microphone live'); }}
               />
             </motion.div>
           </>

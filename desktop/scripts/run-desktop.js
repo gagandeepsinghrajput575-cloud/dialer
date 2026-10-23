@@ -20,9 +20,34 @@ const CANDIDATES = [
   'electron',                                  // installed globally (npm i -g electron)
 ];
 
+/** Resolve `name` through PATH. Node has no `which`, so search it directly. */
+function onPath(name) {
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32'
+    ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+    : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const p = path.join(dir, name + ext);
+      try {
+        if (fs.statSync(p).isFile()) return p;
+      } catch { /* not in this directory */ }
+    }
+  }
+  return null;
+}
+
 function findElectron() {
   for (const candidate of CANDIDATES) {
-    if (candidate === 'electron') return candidate;   // resolved through PATH at spawn time
+    // The bare name used to be returned unconditionally, with a comment saying spawn would resolve
+    // it through PATH later. That made `return null` below unreachable, so the guidance this whole
+    // file exists to print could never print and the operator got `spawn electron ENOENT` instead —
+    // the exact failure named in the header comment. Resolve it here so absence is detected.
+    if (candidate === 'electron') {
+      const found = onPath(candidate);
+      if (found) return found;
+      continue;
+    }
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;

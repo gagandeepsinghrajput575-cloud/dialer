@@ -42,6 +42,18 @@ Unit* unitFrom(const Napi::CallbackInfo& info, size_t index) {
   return static_cast<Unit*>(info[index].As<Napi::External<Unit>>().Data());
 }
 
+}  // namespace
+// Only kNotBuilt and unitFrom above are file-private helpers. Everything below is DECLARED in
+// pulse_audio.h at `namespace pulse` scope, so it must have external linkage: `Init` at the bottom
+// of this file binds those exact symbols into the export table, and the daemon's
+// lib/audio/coreaudio.js calls them through it.
+//
+// They used to be defined inside the anonymous namespace opened above, which created nine DIFFERENT
+// internal entities. Nothing in this translation unit called those, so -O2 discarded them and the
+// addon was left with pulse::Open/Start/Write/Stop/Close/Devices/SampleRate/InputDevice/OutputDevice
+// undefined at link time — a second, independent linkage failure alongside the one in
+// coreaudio_impl.mm. Per-file compilation cannot show this; test/native/macho-symbols.py can.
+
 #if defined(__APPLE__)
 
 Napi::Value Open(const Napi::CallbackInfo& info) {
@@ -93,7 +105,10 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
   OSStatus err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enable, sizeof(enable));
   if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enable, sizeof(enable));
   if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &useOut, sizeof(useOut));
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioInputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 1, &useIn, sizeof(useIn));
+  // kAudioOutputUnitProperty_CurrentDevice is the ONLY CurrentDevice property: element 0 selects the
+  // output device, element 1 the input one. kAudioInputUnitProperty_CurrentDevice does not exist
+  // in any macOS SDK — it was not a typo for a real symbol, it was never a symbol at all.
+  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 1, &useIn, sizeof(useIn));
 
   // One unit, one clock. The input's nominal rate is what the callbacks actually see, so it wins
   // when the two devices disagree (a USB headset on a 48 kHz Mac is the common case).
@@ -130,6 +145,13 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
 
   unit->down.configure(g_deviceRate, kRate);
   unit->up.configure(kRate, g_deviceRate);
+  // One 20 ms frame at 8 kHz is 160 samples and expands to 160 * deviceRate / 8000 device samples:
+  // 960 at 48 kHz, 882 at 44.1 kHz, 441 at 22.05 kHz. Derived here, once, because the render
+  // callback must not compute or allocate anything. Clamped to the scratch allocate() sized.
+  const double ratio = (g_deviceRate > 0.0) ? g_deviceRate / static_cast<double>(kRate) : 1.0;
+  unit->expand = static_cast<size_t>(static_cast<double>(kFrame) * ratio + 0.5);
+  if (unit->expand < 1) unit->expand = 1;
+  if (unit->expand > unit->upScratch.size()) unit->expand = unit->upScratch.size();
   g_units.push_back(unit);
   return Napi::External<Unit>::New(env, unit);
 }
@@ -142,11 +164,13 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
     unit->tsfn = Napi::ThreadSafeFunction::New(env, info[1].As<Napi::Function>(), "pulse-audio-in", 0, 1);
     unit->tsfnReady = true;
   }
-  unit->inRing.reset();
   unit->outRing.reset();
   unit->have = 0;
   unit->consumed = 0;
+  unit->carryLen = 0;      // a stale surplus from the last call must not start the new one
+  unit->tailLen = 0;       // nor a half-assembled frame from a write that never completed
   unit->downPos = 0.0;
+  unit->downLast = 0.0f;
   unit->running = true;
   const OSStatus err = AudioOutputUnitStart(unit->au);
   if (err != noErr) {
@@ -187,26 +211,9 @@ Napi::Value Write(const Napi::CallbackInfo& info) {
   }
   if (!data || samples == 0) return Napi::Boolean::New(env, false);
 #if defined(__APPLE__)
-  // Only the JS thread writes, so a static tail buffer is safe and keeps this allocation-free.
-  static std::vector<int16_t> tail;
-  static size_t tailLen = 0;
-  tail.assign(kFrame, 0);
-  size_t offset = 0;
-  if (tailLen) {
-    const size_t take = std::min(static_cast<size_t>(kFrame) - tailLen, samples);
-    std::memcpy(tail.data() + tailLen, data, take * sizeof(int16_t));
-    tailLen += take;
-    offset += take;
-    if (tailLen == static_cast<size_t>(kFrame)) { unit->outRing.push(tail.data()); tailLen = 0; }
-  }
-  while (samples - offset >= static_cast<size_t>(kFrame)) {
-    unit->outRing.push(data + offset);
-    offset += static_cast<size_t>(kFrame);
-  }
-  if (offset < samples) {
-    tailLen = samples - offset;
-    std::memcpy(tail.data(), data + offset, tailLen * sizeof(int16_t));
-  }
+  // Framing lives in pulse_audio.h as queueFrames() so a host build can exercise the real code;
+  // see the comment there for why the tail is per-unit and is never zeroed.
+  queueFrames(unit, data, samples);
 #endif
   return Napi::Boolean::New(env, true);
 }
@@ -288,7 +295,6 @@ Napi::Value Unsupported(const Napi::CallbackInfo& info) {
   return info.Env().Undefined();
 }
 
-}  // namespace
 }  // namespace pulse
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {

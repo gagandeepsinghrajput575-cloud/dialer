@@ -4,6 +4,11 @@ const aiPronunciationService = require('../../server/services/aiPronunciationSer
 const prospectService = require('../../server/services/prospectService');
 const prospectsRepo = require('../../server/repositories/prospectRepo');
 const { db } = require('../../server/db');
+// These suites read real tables. Every other DB suite calls migrate.run() itself; these three
+// never did, so they have failed with `no such table` since they were written and the behaviour
+// they cover has been unverified the whole time.
+const migrate = require('../../server/db/migrate');
+migrate.run();
 
 console.log('--- Unit: Danish Pronunciation Engine & AI Batch Service ---');
 

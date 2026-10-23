@@ -19,7 +19,16 @@ const settings = require('../repositories/settingsRepo');
 const telephony = require('./telephonyService');
 
 const ENGINE_KEY = 'native_sip_engine';
+// Two different identities that used to be conflated, which is why the descriptor's engine field and
+// softphoneSession's witness disagreed:
+//   NATIVE_ENGINE     is the SETTINGS VALUE — what `native_sip_engine` stores and what the
+//                     daemon-facing credential object reports as itself.
+//   DESCRIPTOR_ENGINE is the DESCRIPTOR FIELD VALUE — what `webrtcSession()` puts in `engine` and
+//                     what the renderer's own isNativeSession() in src/nativeSip.js tests for.
+// They are not the same string and never were. Naming both is the fix; comparing one against the
+// other was BUG 18.
 const NATIVE_ENGINE = 'pulse-sip-daemon';
+const DESCRIPTOR_ENGINE = 'native';
 // The supervisor beats every 10 s while it holds the daemon; 45 s of silence means the process
 // is gone (crashed, quit, never started) and the app must stop claiming a native phone exists.
 const HEARTBEAT_TTL_MS = 45000;
@@ -113,7 +122,7 @@ function webrtcSession() {
   const active = engineSelected() && r.daemon.alive;
   return {
     mode: 'webrtc', // still "the call happens in-app", which is the distinction this field makes
-    engine: 'native',
+    engine: DESCRIPTOR_ENGINE,
     active,
     provider: r.carrier,
     carrierName: r.carrierName,
@@ -218,5 +227,6 @@ function setEngine(enabled) {
 
 module.exports = {
   activeAccount, readiness, webrtcSession, credentials, heartbeat, beat, clearBeat, setEngine,
-  isActive, engineSelected, hintText, testMessage, ENGINE_KEY, NATIVE_ENGINE, HEARTBEAT_TTL_MS,
+  isActive, engineSelected, hintText, testMessage, ENGINE_KEY, NATIVE_ENGINE, DESCRIPTOR_ENGINE,
+  HEARTBEAT_TTL_MS,
 };

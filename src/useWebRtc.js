@@ -828,7 +828,16 @@ export default function useWebRtc({
     // A native call is hung up by the process that holds the dialog; 'ended' comes back as an
     // event and drives the same teardown the browser engine would.
     if (nativeRef.current && (nativeRef.current.live || nativeRef.current.incoming)) {
-      nativeRef.current.hangUp().catch(() => {});
+      // 'ended' comes back as an event and drives the same teardown the browser engine uses — but
+      // only if the daemon accepted the hang-up. A refusal or a dead bridge used to vanish into
+      // `.catch(() => {})`, leaving the call up on the daemon while the UI believed it was over.
+      // `reason: 'no-call'` is the engine's own "there was nothing to hang up", not a failure.
+      Promise.resolve()
+        .then(() => nativeRef.current.hangUp())
+        .then((res) => {
+          if (res && res.ok === false && res.reason !== 'no-call') setError(res.error || 'The daemon could not hang up that call.');
+        })
+        .catch((e) => setError(e?.message || 'The hang-up did not reach the daemon.'));
       return;
     }
     if (current === 'idle' || current === 'standby') return;
@@ -838,9 +847,18 @@ export default function useWebRtc({
 
   const toggleMute = useCallback(() => {
     if (nativeRef.current?.live) {
-      mutedRef.current = !mutedRef.current;
-      nativeRef.current.toggleMute().catch(() => {});
-      return mutedRef.current;
+      // The daemon owns the microphone, so it owns the answer. The engine reports what it actually
+      // applied and mirrors that into `muted` itself; this keeps the local mirror in step and
+      // surfaces a refusal instead of swallowing it. It used to flip mutedRef first, drop the result
+      // and eat the rejection, so a refused mute left the UI claiming "muted" while audio flowed.
+      // Returns undefined, meaning "the daemon decides — read `muted`". Dialer.jsx's toast sites
+      // announce only a definite boolean, so nothing is predicted that may not happen; the badge and
+      // the Mute button are already bound to the confirmed `muted` state.
+      Promise.resolve()
+        .then(() => nativeRef.current.toggleMute())
+        .then((applied) => { mutedRef.current = !!applied; setMuted(!!applied); })
+        .catch((e) => setError(e?.message || 'The mute change did not reach the daemon.'));
+      return undefined;
     }
     const next = !mutedRef.current;
     mutedRef.current = next;
@@ -858,8 +876,17 @@ export default function useWebRtc({
     const key = String(digit);
     setDtmfLog((log) => [...log.slice(-11), key]);
 
-    // The native engine sends RFC 2833 through the daemon and plays the tone itself.
-    if (nativeRef.current?.live) { nativeRef.current.sendDtmf(key).catch(() => {}); return true; }
+    // The native engine sends RFC 2833 through the daemon and plays the tone itself. `true` here
+    // means "handed to the daemon", not "on the wire" — the engine's own answer is awaited and a
+    // refusal or a dead bridge is reported through `error` rather than swallowed, which is what the
+    // old unconditional `return true` did while the keypad logged the digit as sent.
+    if (nativeRef.current?.live) {
+      Promise.resolve()
+        .then(() => nativeRef.current.sendDtmf(key))
+        .then((sent) => { if (!sent) setError(`The daemon could not send the ${key} tone.`); })
+        .catch((e) => setError(e?.message || `The ${key} tone did not reach the daemon.`));
+      return true;
+    }
 
     // A real session can carry the tone in-band if the browser exposes DTMF on the sender.
     try {

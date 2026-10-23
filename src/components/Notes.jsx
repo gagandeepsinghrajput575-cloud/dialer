@@ -28,10 +28,22 @@ export default function Notes({ pid, notes = [], reload, autoFocusKey, draftValu
   const ta = useRef(null);
   draftRef.current = draft;
 
-  // never lose an unsaved note: save it when switching prospect / leaving
+  // Never lose an unsaved note: save it when switching prospect / leaving.
+  //
+  // The rejection must not be swallowed. This cleanup is the LAST chance the text gets: the component
+  // is going away, the draft with it, so a failed save is a note the agent typed and no longer has —
+  // and `.catch(() => {})` meant they were never told. `toast` comes from the store rather than from
+  // this component's state, so calling it from a cleanup is safe.
+  //
+  // `toast` is deliberately NOT in the dependency array. Adding it would re-create the effect on every
+  // render whose toast identity changed, and re-creating runs the cleanup — which would save the same
+  // draft over and over while the agent is still typing it.
   useEffect(() => () => {
     const t = draftRef.current.trim();
-    if (t) api.addNote(pid, t).catch(() => {});
+    if (t) {
+      api.addNote(pid, t).catch((e) => toast(
+        `That unsaved note could not be saved: ${e?.message || 'the server refused it'}.`, 'error'));
+    }
   }, [pid]);
 
   useEffect(() => { if (autoFocusKey) ta.current?.focus(); }, [autoFocusKey]);

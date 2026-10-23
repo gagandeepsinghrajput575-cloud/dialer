@@ -39,10 +39,24 @@ std::string cfToString(CFStringRef ref) {
   return "";
 }
 
+// Hand one microphone frame to JavaScript. Runs on the JS thread, so Buffer::Copy is safe here.
+void deliverFrame(Napi::Env env, Napi::Function jsCallback, int16_t* data) {
+  if (env == nullptr || jsCallback == nullptr || data == nullptr) return;
+  Napi::HandleScope scope(env);
+  jsCallback.Call({Napi::Buffer<int16_t>::Copy(env, data, kFrame)});
+}
+
+}  // namespace
+// Everything below is DECLARED in pulse_audio.h, so it must have external linkage: pulse_audio.mm
+// calls detail::pickDevice, detail::fallbackDevice, detail::rateOf, detail::nameOf and installs
+// detail::inputProc / detail::renderProc as callbacks. Wrapping them in an anonymous namespace gave
+// them internal linkage — each translation unit compiled happily on its own and the addon then failed
+// to link with nine undefined symbols. The header says so in as many words.
+
 std::string uidOf(AudioDeviceID id) {
   CFStringRef uid = nullptr;
   UInt32 size = sizeof(uid);
-  const AudioDevicePropertyAddress addr = {
+  const AudioObjectPropertyAddress addr = {
     kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
   };
   if (AudioObjectGetPropertyData(id, &addr, 0, nullptr, &size, &uid) != noErr) return "";
@@ -54,7 +68,7 @@ std::string uidOf(AudioDeviceID id) {
 std::string nameOf(AudioDeviceID id) {
   CFStringRef name = nullptr;
   UInt32 size = sizeof(name);
-  const AudioDevicePropertyAddress addr = {
+  const AudioObjectPropertyAddress addr = {
     kAudioDevicePropertyDeviceNameCFString, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
   };
   if (AudioObjectGetPropertyData(id, &addr, 0, nullptr, &size, &name) != noErr) return "";
@@ -64,7 +78,7 @@ std::string nameOf(AudioDeviceID id) {
 }
 
 bool hasStreams(AudioDeviceID id, AudioObjectPropertyScope scope) {
-  const AudioDevicePropertyAddress addr = {
+  const AudioObjectPropertyAddress addr = {
     kAudioDevicePropertyStreamConfiguration, scope, kAudioObjectPropertyElementMain
   };
   UInt32 size = 0;
@@ -111,20 +125,13 @@ AudioDeviceID pickDevice(const std::string& want, bool input) {
 }
 
 double rateOf(AudioDeviceID id) {
-  const AudioDevicePropertyAddress addr = {
+  const AudioObjectPropertyAddress addr = {
     kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
   };
   double rate = 0.0;
   UInt32 size = sizeof(rate);
   if (AudioObjectGetPropertyData(id, &addr, 0, nullptr, &size, &rate) != noErr || rate <= 0) return 48000.0;
   return rate;
-}
-
-// Hand one microphone frame to JavaScript. Runs on the JS thread, so Buffer::Copy is safe here.
-void deliverFrame(Napi::Env env, Napi::Function jsCallback, int16_t* data) {
-  if (env == nullptr || jsCallback == nullptr || data == nullptr) return;
-  Napi::HandleScope scope(env);
-  jsCallback.Call({Napi::Buffer<int16_t>::Copy(env, data, kFrame)});
 }
 
 OSStatus inputProc(void* userData, AudioUnitRenderActionFlags* flags, const AudioTimeStamp* time,
@@ -144,22 +151,33 @@ OSStatus inputProc(void* userData, AudioUnitRenderActionFlags* flags, const Audi
   const size_t n = static_cast<size_t>(frames);
 
   // 1. Downsample to 8 kHz mono Int16, continuing the fractional position from the last callback
-  //    so there is no seam (and no drift) between device buffers.
+  //    so there is no seam (and no drift) between device buffers. `down` returns how many 8 kHz
+  //    samples it actually produced from these `n` device samples — about n/6 at 48 kHz — and
+  //    appends them after whatever the previous callback left unfinished.
+  //
+  //    This used to ask for `n` OUTPUTS from `n` inputs. With step 6 that ran the read position six
+  //    times past the end of the buffer, where the old resampler wrapped it modulo `have` and
+  //    replayed the same audio, so the microphone ran about six times too slow. The caller then
+  //    stored `pos - n`, which was negative, and the next callback cast that negative double to
+  //    size_t — undefined behaviour. `downPos` stays a double now and may legitimately be <= 0.
   unit->down.step = g_deviceRate / static_cast<double>(kRate);
   unit->down.pos = unit->downPos;
   unit->down.last = unit->downLast;
-  unit->down.down(in, n, unit->pcm.data(), n);
+  const size_t room = unit->pcm.size() - unit->have;
+  if (room) unit->have += unit->down.down(in, n, unit->pcm.data() + unit->have, room);
   unit->downPos = unit->down.pos - static_cast<double>(n);
   unit->downLast = unit->down.last;
-  unit->have = n;
-  unit->consumed = 0;
 
   // 2. Assemble whole 20 ms frames. The copy is malloc'd here and freed on the JS thread — the
   //    one allocation the realtime thread makes, and the deal ThreadSafeFunction offers.
+  //
+  //    Nothing is pushed to a mic ring any more: there was no `read` export and no other consumer,
+  //    so inRing was write-only state that cost a 320-byte memcpy per frame on the realtime thread
+  //    and 20 KB per unit for nothing. Microphone frames reach JavaScript through the
+  //    ThreadSafeFunction below and by no other route.
   while (unit->have - unit->consumed >= static_cast<size_t>(kFrame)) {
     std::memcpy(unit->frame.data(), unit->pcm.data() + unit->consumed, sizeof(int16_t) * kFrame);
     unit->consumed += static_cast<size_t>(kFrame);
-    unit->inRing.push(unit->frame.data());
     if (!unit->tsfnReady || !unit->running) continue;
     int16_t* copy = static_cast<int16_t*>(std::malloc(sizeof(int16_t) * kFrame));
     if (!copy) continue;
@@ -168,6 +186,15 @@ OSStatus inputProc(void* userData, AudioUnitRenderActionFlags* flags, const Audi
       deliverFrame(env, js, data);
       std::free(data);
     });
+  }
+
+  // 3. Keep the unfinished remainder at the front of pcm so the next callback appends after it.
+  //    Both buffers were sized once by allocate(); nothing is resized on this thread.
+  if (unit->consumed) {
+    const size_t left = unit->have - unit->consumed;
+    if (left) std::memmove(unit->pcm.data(), unit->pcm.data() + unit->consumed, left * sizeof(int16_t));
+    unit->have = left;
+    unit->consumed = 0;
   }
   return noErr;
 }
@@ -182,22 +209,48 @@ OSStatus renderProc(void* userData, AudioUnitRenderActionFlags* flags, const Aud
 
   // Pull as many 20 ms frames as this callback needs, upsample each, concatenate. Silence fills
   // any gap: an underrun must never replay the previous frame.
+  //
+  // One ring frame expands to `unit->expand` DEVICE samples (960 at 48 kHz), not to kFrame. The old
+  // loop capped each frame's expansion at kFrame = 160 device samples, so a 960-sample callback
+  // popped SIX frames and played the far end about six times too fast; resetting `up.pos = 0.0` per
+  // iteration on top of that kept only about 27 of every 160 samples. `expand` is computed once in
+  // Open() and the surplus that does not fit in this callback is carried in a buffer allocate()
+  // pre-sized, so the realtime thread neither derives nor allocates anything.
   size_t written = 0;
-  while (written < frames) {
-    const size_t want = std::min(static_cast<size_t>(kFrame), static_cast<size_t>(frames) - written);
-    if (unit->outRing.pop(unit->outScratch.data())) {
-      unit->up.step = static_cast<double>(kRate) / g_deviceRate;
-      unit->up.pos = 0.0;
-      unit->up.up(unit->outScratch.data(), kFrame, unit->upScratch.data(), want);
-      std::memcpy(out + written, unit->upScratch.data(), want * sizeof(float));
-    } else {
-      std::memset(out + written, 0, want * sizeof(float));
+
+  // Finish the frame the previous callback could not fit. Already expanded: this is a plain copy.
+  if (unit->carryLen) {
+    const size_t take = std::min(unit->carryLen, static_cast<size_t>(frames));
+    std::memcpy(out, unit->carry.data(), take * sizeof(float));
+    if (take < unit->carryLen) {
+      std::memmove(unit->carry.data(), unit->carry.data() + take,
+                   (unit->carryLen - take) * sizeof(float));
     }
-    written += want;
+    unit->carryLen -= take;
+    written += take;
+  }
+
+  const size_t expand = unit->expand ? unit->expand : static_cast<size_t>(kFrame);
+  while (written < frames) {
+    if (!unit->outRing.pop(unit->outScratch.data())) {
+      std::memset(out + written, 0, (static_cast<size_t>(frames) - written) * sizeof(float));
+      break;                                       // underrun: silence, never a replayed frame
+    }
+    unit->up.step = static_cast<double>(kRate) / g_deviceRate;
+    unit->up.pos = 0.0;
+    unit->up.up(unit->outScratch.data(), kFrame, unit->upScratch.data(), expand);
+    const size_t take = std::min(expand, static_cast<size_t>(frames) - written);
+    std::memcpy(out + written, unit->upScratch.data(), take * sizeof(float));
+    written += take;
+    if (take < expand) {                           // the rest belongs to the next callback
+      unit->carryLen = expand - take;
+      std::memcpy(unit->carry.data(), unit->upScratch.data() + take, unit->carryLen * sizeof(float));
+      break;
+    }
   }
   return noErr;
 }
 
-}  // namespace
 }  // namespace detail
+}  // namespace pulse
 #endif  // __APPLE__

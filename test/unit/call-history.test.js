@@ -1,5 +1,10 @@
 const assert = require('assert');
 const { db } = require('../../server/db');
+// These suites read real tables. Every other DB suite calls migrate.run() itself; these three
+// never did, so they have failed with `no such table` since they were written and the behaviour
+// they cover has been unverified the whole time.
+const migrate = require('../../server/db/migrate');
+migrate.run();
 const callRepo = require('../../server/repositories/callRepo');
 const prospectRepo = require('../../server/repositories/prospectRepo');
 const callService = require('../../server/services/callService');

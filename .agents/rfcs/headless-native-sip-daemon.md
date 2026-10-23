@@ -61,15 +61,16 @@ Renderer (Dialer.jsx, unchanged)
                                       ├── SIP/RTP (UDP 5060) ──▶ sip.flynumber.com
                                       └── CoreAudio (AudioUnit) ──▶ headset mic / speaker
 Server (Express, loopback)
-   └── GET /api/telephony/carrier-credentials  (token-gated) ←── the daemon fetches its own
-                                                                 credentials; they never
-                                                                 transit the renderer
+   └── GET /api/telephony/carrier-credentials  (session + daemon capability; no Origin)
+                                             ←── the daemon fetches its own credentials; they
+                                                  never transit the renderer
 ```
 
-Credential rule: the renderer **never** receives the SIP secret in native mode. The daemon
-is a local process that authenticates with `x-pulse-token` from `GET /api/session` and pulls
-the secret itself. `webrtcSession()` gains `engine`/`native` fields and keeps every existing
-field, so the browser path and all current tests are untouched.
+Credential rule: the renderer **never** receives the SIP secret in native mode. The no-Origin
+desktop supervisor provisions a random capability in server memory and passes it only to the
+child daemon's environment; the daemon presents that capability plus `x-pulse-token` to fetch the
+secret. Browser-origin heartbeat/credential requests are refused. `webrtcSession()` keeps the
+password blank in native mode.
 
 ## 4. IPC contract
 
@@ -205,26 +206,28 @@ only visible change is the label ("native softphone") and the standby strip nami
 
 **Server surface added:** `server/services/carrierAccount.js` (account choice: FlyNumber when its
 SIP user *and* secret are saved, otherwise the dormant legacy Telnyx SIP settings),
-`GET /api/telephony/carrier-credentials` (token-gated, the only route that releases the secret, and
-it is the daemon that calls it), `POST /api/telephony/native-heartbeat`, and five settings keys
-(`native_sip_engine`, `native_daemon_{last_seen,pid,version,audio}`) registered in both `DEFAULTS`
-and the `settingsUpdate` schema, which the existing key-parity test enforces.
+`GET /api/telephony/carrier-credentials` (session token + ephemeral supervisor capability, no browser
+Origin; only the daemon receives the secret), `POST /api/telephony/native-heartbeat`, and five
+settings keys (`native_sip_engine`, `native_daemon_{last_seen,pid,version,audio}`) registered in
+`DEFAULTS`. Supervisor state is deliberately stripped from user `settingsUpdate` payloads.
 
-**Ceilings.** `Dialer.jsx` 2040/2040, `useWebRtc.js` 923/970 (it went *down*: the tone player,
-capability probes and the call recorder moved to `src/utils/tones.js` and `src/utils/recorder.js`),
-`webrtcSignalling.js` untouched at its pre-existing 497/413, `softphone.jsx` 192/350,
-`telephonyService.js` 480/480 (untouched — the native session lives in `carrierAccount.js` behind a
-26-line resolver). Every new file is ≤350 lines, `test/all-tests.js` excepted (pre-existing 1711).
+**Current file ceilings after the post-closure audit.** `Dialer.jsx` 2040/2040,
+`useWebRtc.js` 969/970, `nativeSip.js` 350/350, `desktop/main.js` 346/350,
+`webrtcSignalling.js` 497/498, `telephonyService.js` 480/480; all new files remain ≤350 lines.
 
-**Tests.** Three new suites, all green here:
+**Current verification.** `npm run test:unit` passes 30/30 suites (448 checks); `npm test` passes
+38/38 groups; `npm run test:ui` passes 230/230; `npm run build` succeeds; the host DSP harness passes
+29/29. The dispatch runtime has no verdicts, and none of these checks substitutes for a real Mac or
+carrier call.
 
 | Suite | Checks | What it drives |
 | --- | --- | --- |
-| `test/unit/sip-daemon.test.js` | 18 | the real daemon child against `test/helpers/mock-carrier.js` on a real UDP socket |
-| `test/unit/native-sip.test.js` | 10 | the server half: inert by default, one beat switches engines, secret only behind a token, stale beat hands the phone back |
-| `test/unit/desktop-supervisor.test.js` | 7 | `desktop/main.js` with Electron absent: spawn, id-matched answers, heartbeat, release on quit, restart, server adoption |
-
-Wired into `npm run test:unit`. `npm run build` succeeds. `test/all-tests.js` passes 38/38 groups.
+| `test/unit/sip-daemon.test.js` | 18 | real daemon and mock UDP carrier; shutdown sends BYE and authenticated `REGISTER Expires: 0` |
+| `test/unit/native-sip.test.js` | 11 | descriptor, read-only supervisor settings, secret capability gate and fallback |
+| `test/unit/desktop-supervisor.test.js` | 7 | spawn, command IDs, heartbeat, release, restart and server adoption |
+| `test/unit/desktop-supervisor-lifecycle.test.js` | 2 | intentional stop and stale-child restart race |
+| `test/unit/native-controls.test.js` | 26 | outbound native dial, honest controls, inbound decline/answer and CRM/SIP ID separation |
+| `test/unit/native-audio-badge.test.js` | 3 | missed/late audio-ready event and the null-backend badge |
 
 **Two pre-existing failures, unchanged by this work** (verified by stashing every edit, rebuilding
 and re-running): `test/ui/dialer-race.test.js` aborts at check 90 ("timed out waiting for the live

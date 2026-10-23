@@ -100,8 +100,9 @@ Run the app:
   (cd "$REPO" && npm start)         # the local API server on port ${PORT:-3001}
   (cd "$REPO" && npm run desktop)   # this supervisor + the daemon
 
-Talk to the daemon by hand:
-  "$DESKTOP/bin/pulse-sip-daemon" --api-base http://127.0.0.1:${PORT:-3001}
+Talk to the daemon by hand (explicit credentials; API credential fetch is supervisor-only):
+  "$DESKTOP/bin/pulse-sip-daemon" --domain sip.flynumber.com --user USER --password PASS \\
+      --caller-id +4532331610 --audio coreaudio
   echo '{"id":1,"action":"status"}' | "$DESKTOP/bin/pulse-sip-daemon" --domain sip.flynumber.com \\
       --user USER --password PASS --caller-id +4532331610 --audio coreaudio
 

@@ -100,10 +100,20 @@ function requireToken(req, res, next) {
   next();
 }
 
+// The desktop supervisor and daemon are Node processes, not renderer fetches. Requiring a request
+// without browser Origin/Referer prevents page code from provisioning or using the daemon secret.
+function requireLocalProcess(req, res, next) {
+  if (req.headers.origin || req.headers.referer) {
+    return next(ApiError.forbidden('This endpoint is reserved for the local desktop process'));
+  }
+  next();
+}
+
 module.exports = {
   guard,
   session,
   requireToken,
+  requireLocalProcess,
   sessionToken: () => TOKEN,
   TOKEN_HEADER,
   hostAllowed,

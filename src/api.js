@@ -196,12 +196,6 @@ export const api = {
   // `webrtcSession()` (above) describes the engine that is live: 'webrtc' means the browser holds
   // the media, a descriptor with `engine: 'native'` means the desktop daemon does. See
   // server/services/softphoneSession.js for the switch.
-  // The SIP account the *daemon* registers with, secret included. The renderer never needs it —
-  // it is here so the desktop supervisor can be pointed at the API and fetch it itself.
-  carrierCredentials: (secret = true) => req('GET', `/api/telephony/carrier-credentials?secret=${secret ? 1 : 0}`),
-  // The supervisor's liveness beat: this is what makes the server hand the phone to the daemon.
-  nativeHeartbeat: (b) => req('POST', '/api/telephony/native-heartbeat', b || {}),
-
   // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
   flynumber: () => req('GET', '/api/telephony/flynumber'),
   saveFlynumber: (data) => req('POST', '/api/telephony/flynumber', data),

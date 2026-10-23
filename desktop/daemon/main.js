@@ -5,7 +5,7 @@
 // interface is JSON lines on stdin/stdout. Executed either by Electron itself
 // (ELECTRON_RUN_AS_NODE=1, which is what desktop/bin/pulse-sip-daemon does) or by any Node 18+.
 //
-//   --api-base URL      fetch carrier credentials from the local API (recommended)
+//   --api-base URL      fetch credentials with the desktop supervisor's capability token
 //   --user/--password/--domain/--port/--caller-id
 //                       inline credentials, for a manual run or a carrier the API does not know
 //   --audio BACKEND     coreaudio | portaudio | null | auto   (default auto)
@@ -106,18 +106,41 @@ async function main(argv = process.argv.slice(2)) {
   } else if (ua.validateAccount().length === 0) {
     ua.register();
   } else {
-    protocol.emit('registration_failed', { reason: 'No credentials: pass --api-base or --domain/--user/--password.' });
+    protocol.emit('registration_failed', { reason: 'No credentials: use the desktop supervisor or pass --domain/--user/--password.' });
   }
 
-  function shutdown(why) {
+  let shuttingDown = false;
+  async function shutdown(why) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     protocol.log('info', `shutting down (${why})`);
+    // Release the carrier binding before closing UDP. Without Expires: 0 the registration remains
+    // valid for up to five minutes after this process is gone, so inbound calls keep routing to a
+    // dead phone. Give the authenticated REGISTER one short round trip, then close even if the
+    // carrier is unreachable; its expiry remains the fallback.
+    const bounded = (work, ms) => new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      Promise.resolve(work).then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        () => { clearTimeout(timer); resolve(false); },
+      );
+    });
+    for (const dialog of [...ua.dialogs.values()]) {
+      if (dialog.ended) continue;
+      const wasConfirmed = dialog.state === 'confirmed';
+      const work = wasConfirmed ? dialog.bye()
+        : dialog.direction === 'inbound' ? dialog.reject(603) : dialog.cancel();
+      try { await bounded(work, 400); } catch { /* best-effort call teardown */ }
+      if (!dialog.ended) dialog.end(wasConfirmed ? 'normal' : 'failed', { detail: 'daemon shutting down' });
+    }
+    try { await bounded(ua.unregister(), 700); } catch { /* best-effort release */ }
     try { ua.close(); } catch { /* already down */ }
     try { control?.close(); } catch { /* already down */ }
     protocol.emit('shutdown', { reason: why });
     setTimeout(() => process.exit(0), 30).unref();
   }
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => { shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { shutdown('SIGINT'); });
   process.on('uncaughtException', (e) => {
     protocol.emit('error', { message: String(e?.message || e), stack: String(e?.stack || '').split('\n')[1] || '' });
     protocol.log('error', `uncaught: ${e?.message || e}`);
@@ -199,7 +222,7 @@ function openControlSocket(port, protocol) {
 }
 
 const HELP = `pulse-sip-daemon ${VERSION} — headless SIP audio daemon for Pulse Dialer
-Usage: pulse-sip-daemon [--api-base URL] [--audio coreaudio|portaudio|null|auto]
+Usage: pulse-sip-daemon [--api-base URL (desktop supervisor only)] [--audio coreaudio|portaudio|null|auto]
                         [--domain HOST --port N --user U --password P --caller-id +45...]
                         [--sip-port N] [--control-port N] [--log-level debug|info|warn|error]
                         [--keep-alive]   stay up when stdin closes (tests, manual runs)

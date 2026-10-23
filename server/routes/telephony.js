@@ -3,7 +3,7 @@ const multer = require('multer');
 const c = require('../controllers/telephonyController');
 const s = require('../validation/schemas');
 const { validate } = require('../middleware/validate');
-const { requireToken } = require('../middleware/guard');
+const { requireToken, requireLocalProcess } = require('../middleware/guard');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
@@ -11,11 +11,11 @@ router.get('/business-hours', c.businessHours);
 // Returns live SIP credentials in opt-in mode, so it demands the session token even though
 // it is a GET — see requireToken in middleware/guard.
 router.get('/webrtc-session', requireToken, c.webrtcSession);
-// Hands the SIP secret to the local desktop supervisor, so it is token-gated too. `?secret=0`
-// returns the same account with the secret withheld, for diagnostics.
-router.get('/carrier-credentials', requireToken, c.carrierCredentials);
-// The supervisor's liveness beat; also the opt-in that switches the in-app phone to native.
-router.post('/native-heartbeat', requireToken, c.nativeHeartbeat);
+// The secret endpoint needs both the session token and the in-memory desktop capability; browser
+// Origin/Referer requests are refused even when they have a session token.
+router.get('/carrier-credentials', requireToken, requireLocalProcess, c.carrierCredentials);
+// Only the no-Origin desktop supervisor may publish its liveness/capability beat.
+router.post('/native-heartbeat', requireToken, requireLocalProcess, c.nativeHeartbeat);
 router.get('/caller-ids', c.callerIds);
 router.get('/voicemail-greeting', c.greetingMeta);
 router.post('/voicemail-greeting', upload.single('file'), c.uploadGreeting);

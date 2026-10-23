@@ -62,7 +62,7 @@ node test/unit/native-sip.test.js            # the server's half of the contract
 node test/unit/desktop-supervisor.test.js    # the supervisor, with Electron stubbed out
 npm run test:telephony                       # 60 chaos checks: parsing, dialog state, IPC
 ./desktop/bin/pulse-sip-daemon --help
-./desktop/bin/pulse-sip-daemon --api-base http://127.0.0.1:3001 --audio coreaudio
+./desktop/bin/pulse-sip-daemon --domain sip.flynumber.com --user USER --password PASS --audio coreaudio
 ```
 
 ---
@@ -122,7 +122,7 @@ A command that cannot be honoured answers `ok: false` with a reason; it never go
 | Action | Payload | Notes |
 | --- | --- | --- |
 | `hello` | — | version, audio backend, the list of actions |
-| `register` | `{ domain, port, user, password, callerId, transport, expires }` | all optional: with `--api-base` the daemon fetches its own account |
+| `register` | `{ domain, port, user, password, callerId, transport, expires }` | all optional; the desktop supervisor starts it with `--api-base` and an unexposed capability, standalone runs use CLI credentials |
 | `unregister` | — | sends `REGISTER` with `Expires: 0` |
 | `dial` | `{ number, callId }` | `callId` is the CRM call row, echoed back on every event |
 | `answer` | `{ callId }` | answers the ringing call; 200 OK carries our SDP |
@@ -165,23 +165,26 @@ carries `rawReason` when the SIP cause was something else — a `486` becomes `b
 {"id":4,"action":"hangup"}
 ```
 
-Or let it read its own account — the recommended way, and the only way the SIP password stays out
-of a process list and a shell history:
+The desktop app's supervisor passes the daemon an ephemeral capability so it can read its own
+account without exposing the password to the renderer. A manually launched daemon can use explicit
+CLI credentials instead (avoid putting the password in shared shell history):
 
 ```bash
-./desktop/bin/pulse-sip-daemon --api-base http://127.0.0.1:3001 --audio coreaudio
+./desktop/bin/pulse-sip-daemon --domain sip.flynumber.com --user USER --password PASS \\
+  --caller-id +4532331610 --audio coreaudio
 ```
 
 ---
 
 ## Credentials, and the rule about the browser
 
-The SIP password is released by exactly one endpoint, `GET /api/telephony/carrier-credentials`,
-which demands the session token and is read by **the daemon process**, not the page. The renderer's
-descriptor (`GET /api/telephony/webrtc-session`) always says `password: ""`. So the promise the
-Settings screen makes — *your credential stays in this computer's local database* — holds in native
-mode too, and the `webrtc_credential_handoff` switch is simply not needed: a daemon can register
-without handing anything to a browser.
+The SIP password is released by exactly one endpoint, `GET /api/telephony/carrier-credentials`.
+It requires both the session token and an ephemeral daemon capability published by the supervisor
+in a no-Origin heartbeat; the route rejects browser Origin/Referer requests. The capability exists
+only in server memory and the daemon's environment — it is not exposed by the preload bridge or the
+renderer API client. The renderer descriptor (`GET /api/telephony/webrtc-session`) always says
+`password: ""`. So the Settings promise — *your credential stays in this computer's local database* —
+holds in native mode too, and `webrtc_credential_handoff` is not needed.
 
 **The renderer's `register` command therefore carries no password, and must not be able to erase
 the one the daemon already has.** `ua.setAccount` used to spread the incoming payload over the
@@ -274,9 +277,12 @@ packaging step). Nothing else in the app changes when it does.
 
 | Suite | What it proves |
 | --- | --- |
-| `test/unit/sip-daemon.test.js` | 18 checks. Spawns the **real** daemon against `test/helpers/mock-carrier.js` on a real UDP socket: 401 digest challenge, outbound call with PCMU both ways, mute, RFC 2833 DTMF, local and remote BYE, `486` → busy, inbound INVITE → 180 → 200 → audio, 603 on decline, one-call-at-a-time, malformed input, shutdown mid-call. Plus the pure libraries: G.711 round-trip, SDP negotiation, the RFC 2617 digest reference vector, SIP parsing, RTP arithmetic. |
-| `test/unit/native-sip.test.js` | 10 checks. The server's half: inert by default, one heartbeat switches the engine, the secret only leaves behind a token, the dial URI becomes UDP SIP, a stale beat hands the phone back, readiness names exactly what is missing. |
-| `test/unit/desktop-supervisor.test.js` | 7 checks. `desktop/main.js` with Electron absent: spawns the daemon, matches answers to command ids, beats the heartbeat, releases the phone on quit, restarts cleanly, and adopts a running API server instead of starting a second one. |
+| `test/unit/sip-daemon.test.js` | 18 checks. Spawns the **real** daemon against `test/helpers/mock-carrier.js` on a real UDP socket: 401 digest challenge, outbound/inbound PCMU, mute, DTMF, BYE, busy/decline, malformed input, and shutdown that sends BYE plus `REGISTER Expires: 0`. Also checks G.711, SDP, digest, SIP parsing and RTP arithmetic. |
+| `test/unit/native-sip.test.js` | 11 checks. Server handoff, read-only supervisor settings, session plus daemon-capability secret gate, browser-origin rejection, UDP dial URI, stale-beat fallback and readiness. |
+| `test/unit/desktop-supervisor.test.js` | 7 checks. With Electron absent: spawns the daemon, matches command IDs, beats/releases the phone, restarts, and adopts an existing API server. |
+| `test/unit/desktop-supervisor-lifecycle.test.js` | 2 checks: intentional stop remains stopped, and an old child's delayed exit cannot orphan a replacement. |
+| `test/unit/native-controls.test.js` | 26 checks across mute, DTMF, hang-up, refusal paths, native outbound dialing, inbound decline, CRM/dialog ID separation, and both answer-event orderings. |
+| `test/unit/native-audio-badge.test.js` | 3 checks: a missed/late `ready` event cannot mark the silent backend ready; a working CoreAudio backend remains ready. |
 | `test/unit/sip-daemon.test.js` in CI | Runs with `--audio=null`, so no sound card is needed anywhere. |
 | `test/unit/call-path.test.js` | 13 checks over the whole call path, each one a confirmed defect: `unregister` releases instead of re-registering, a granted `Expires` is honoured, the failure backoff escalates 5/10/20/45 and a manual register resets it, hang-up while ringing sends `CANCEL` (and a confirmed call still sends `BYE`, never `CANCEL`), hang-up on an inbound ring sends `603`, a decline still sends `486`, a second INVITE while one is ringing is refused and the line frees up afterwards, an outbound dial on top of a ringing inbound is refused, a re-INVITE is answered with SDP, and `end()` can put a refusal on the wire at all. Against the unfixed modules 9 of the 13 fail and the 4 that pass are the 4 negative controls. |
 | `test/unit/native-audio.test.js` | 13 checks, and the reason `--audio=null` is not enough. Drives the **real** `UserAgent` and `media.js` against a backend with the CoreAudio addon's contract (`start()` throws unless `open()` ran first): the pump opens the device, a dead device still reports `connected`, the fault is retried next call, the 12 s media watchdog fires on silence and stays quiet on a working call or a short one, and the renderer's badge says "no audio device" before the first dial. Against the unfixed daemon checks 1–7 fail with `coreaudio: open() first` while the `null`-backend check passes — which is exactly why the older suites never saw it. |

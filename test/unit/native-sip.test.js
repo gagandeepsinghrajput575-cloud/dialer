@@ -31,6 +31,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const FLY_USER = 'flynumber-4532';
 const FLY_PASS = 'copenhagen-sip-secret';
+const DAEMON_TOKEN = 'unit-only-desktop-capability-token';
 
 async function main() {
   const app = createApp();
@@ -43,6 +44,7 @@ async function main() {
   const call = async (method, url, body, opts = {}) => {
     const headers = { 'content-type': 'application/json' };
     if (token && opts.anonymous !== true) headers['x-pulse-token'] = token;
+    Object.assign(headers, opts.headers || {});
     const res = await fetch(base + url, { method, headers, body: body ? JSON.stringify(body) : undefined });
     let json = null;
     try { json = await res.json(); } catch { /* an empty body is a valid answer */ }
@@ -79,6 +81,15 @@ async function main() {
     assert.strictEqual(carrierAccount.isActive(), false, 'the native engine is off until asked for');
     ok('with no supervisor the browser descriptor is returned untouched');
 
+    await call('PUT', '/api/settings', {
+      native_sip_engine: carrierAccount.NATIVE_ENGINE,
+      native_daemon_last_seen: String(Date.now()), native_daemon_pid: '999', native_daemon_audio: 'forged',
+    });
+    assert.strictEqual(settings.get('native_sip_engine'), '', 'a settings-form PUT cannot opt into native mode');
+    assert.strictEqual(settings.get('native_daemon_last_seen'), '0', 'a settings-form PUT cannot forge liveness');
+    assert.strictEqual(settings.get('native_daemon_pid'), '0', 'a settings-form PUT cannot forge the pid');
+    ok('supervisor-owned engine/liveness fields are read-only through Settings PUT');
+
     // A dial in that state is still the gateway URI, so nothing about the legacy path moved.
     const prospect = await call('POST', '/api/prospects', { name: 'Native Test', phone: '20334455' });
     const pid = prospect.json.id;
@@ -90,7 +101,7 @@ async function main() {
 
     // ------------------------------------------------------------------ 2. the opt-in + beat
     let beat = await call('POST', '/api/telephony/native-heartbeat', {
-      engine: carrierAccount.NATIVE_ENGINE, pid: 4242, version: '1.0.0', audio: 'coreaudio',
+      engine: carrierAccount.NATIVE_ENGINE, daemonToken: DAEMON_TOKEN, pid: 4242, version: '1.0.0', audio: 'coreaudio',
     });
     assert.strictEqual(beat.status, 200);
     assert.strictEqual(beat.json.engine, 'native', 'the beat answers with the descriptor it enabled');
@@ -117,8 +128,15 @@ async function main() {
 
     // ------------------------------------------------------------------ 3. the secret channel
     const anon = await call('GET', '/api/telephony/carrier-credentials', null, { anonymous: true });
-    assert.strictEqual(anon.status, 401, 'the credentials endpoint refuses a caller with no token');
-    const creds = (await call('GET', '/api/telephony/carrier-credentials')).json;
+    assert.strictEqual(anon.status, 401, 'the credentials endpoint refuses a caller with no session token');
+    const renderer = await call('GET', '/api/telephony/carrier-credentials');
+    assert.strictEqual(renderer.status, 401, 'a renderer session token alone cannot read the SIP secret');
+    const browserBeat = await call('POST', '/api/telephony/native-heartbeat', {
+      engine: carrierAccount.NATIVE_ENGINE, daemonToken: 'renderer-chosen-token',
+    }, { headers: { origin: base } });
+    assert.strictEqual(browserBeat.status, 403, 'browser-origin code cannot provision a daemon capability');
+    const daemonHeaders = { 'x-pulse-daemon-token': DAEMON_TOKEN };
+    const creds = (await call('GET', '/api/telephony/carrier-credentials', null, { headers: daemonHeaders })).json;
     assert.strictEqual(creds.password, FLY_PASS, 'the supervisor gets the secret it must register with');
     assert.strictEqual(creds.domain, 'sip.flynumber.com');
     assert.strictEqual(creds.user, FLY_USER);
@@ -129,7 +147,7 @@ async function main() {
     const publicSettings = (await call('GET', '/api/settings')).json;
     assert.strictEqual(publicSettings.flynumber_sip_password, '', 'the settings view still masks the secret');
     assert.strictEqual(publicSettings.native_sip_engine, carrierAccount.NATIVE_ENGINE, 'and reports the engine honestly');
-    ok('the SIP secret reaches the local supervisor only, behind the session token');
+    ok('only the no-Origin supervisor with its ephemeral capability can read the SIP secret');
 
     // ------------------------------------------------------------------ 4. dialing natively
     dial = await call('POST', `/api/prospects/${pid}/call`);
@@ -182,10 +200,11 @@ async function main() {
     assert.strictEqual(dial.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws');
     ok('when the heartbeat lapses the phone returns to the browser engine');
 
-    await call('POST', '/api/telephony/native-heartbeat', { pid: 4242 });
+    await call('POST', '/api/telephony/native-heartbeat', { engine: carrierAccount.NATIVE_ENGINE, daemonToken: DAEMON_TOKEN, pid: 4242 });
     assert.strictEqual(carrierAccount.isActive(), true, 'beating again restores it');
     await call('POST', '/api/telephony/native-heartbeat', { clear: true });
     assert.strictEqual(carrierAccount.heartbeat().alive, false, 'an explicit goodbye drops the claim');
+    assert.strictEqual(carrierAccount.daemonAuthorized(DAEMON_TOKEN), false, 'goodbye expires the daemon capability too');
     assert.strictEqual(settings.get('native_sip_engine'), carrierAccount.NATIVE_ENGINE,
       'but the opt-in stays: restarting the desktop app is enough to get the phone back');
     sess = (await call('GET', '/api/telephony/webrtc-session')).json;
@@ -196,7 +215,7 @@ async function main() {
     const missing = carrierAccount.readiness();
     assert.deepStrictEqual(missing.missing, ['daemon'], 'only the daemon is missing now');
     assert.match(carrierAccount.hintText(missing), /desktop app/i, 'and the hint says how to fix it');
-    await call('POST', '/api/telephony/native-heartbeat', { pid: 7 });
+    await call('POST', '/api/telephony/native-heartbeat', { engine: carrierAccount.NATIVE_ENGINE, daemonToken: DAEMON_TOKEN, pid: 7 });
     assert.deepStrictEqual(carrierAccount.readiness().missing, [], 'configured once it beats');
     // Empty both carriers: only then is there truly no SIP user to register with.
     settings.set('flynumber_sip_user', '');

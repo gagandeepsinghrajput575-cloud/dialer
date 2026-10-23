@@ -240,9 +240,18 @@ async function run() {
     const { SETTING_KEYS } = require('../server/config/defaults');
     const { settingsUpdate } = require('../server/validation/schemas');
     const schemaKeys = new Set(Object.keys(settingsUpdate.shape || {}));
-    const unschemaed = SETTING_KEYS.filter((k) => !schemaKeys.has(k));
+    // These are runtime-owned supervisor values. They appear in public settings so the cockpit can
+    // display them, but a full-form PUT must never overwrite a heartbeat or select an engine.
+    const supervisorState = new Set([
+      'native_sip_engine', 'native_daemon_last_seen', 'native_daemon_pid',
+      'native_daemon_version', 'native_daemon_audio',
+    ]);
+    const unschemaed = SETTING_KEYS.filter((k) => !schemaKeys.has(k) && !supervisorState.has(k));
+    const wronglyWritable = [...supervisorState].filter((k) => schemaKeys.has(k));
     assert.deepStrictEqual(unschemaed, [],
-      `settings exist in DEFAULTS but are stripped by the settingsUpdate schema: ${unschemaed.join(', ')}`);
+      `user settings exist in DEFAULTS but are stripped by settingsUpdate: ${unschemaed.join(', ')}`);
+    assert.deepStrictEqual(wronglyWritable, [],
+      `supervisor-owned settings must not be writable through settingsUpdate: ${wronglyWritable.join(', ')}`);
   }
 
   // The in-browser softphone settings must round-trip rather than be silently dropped.

@@ -9,3 +9,14 @@ desktop/native/node_modules/
 
 # Generated delivery artifact — never a tracked source file, and it must never contain itself
 native-sip-daemon.patch
+
+# Zenith harness surface. Generated per-machine by `zenith init` because .mcp.json and
+# .codex/config.toml embed the ABSOLUTE path of the local harness checkout — committing them
+# would hand another machine a path that does not exist there. Recreate with:
+#   uv run --project <zenith>/zenith zenith init --workspace-dir <repo> --agent claude
+.mcp.json
+.claude/
+.codex/
+.hermes/
+.zenith/
+.agents/skills/

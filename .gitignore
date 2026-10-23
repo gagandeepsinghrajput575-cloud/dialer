@@ -22,3 +22,7 @@ __pycache__/
 
 # Zenith harness workspace guidance (canonical copy lives in the project bucket .zenith/)
 AGENTS.md
+node_modules
+.env
+data/
+dist/

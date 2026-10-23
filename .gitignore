@@ -1,17 +1,23 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
 # In-app telephone addon build artifacts. The addon is optional (the null driver works without it).
 desktop/native/build/
 desktop/native/dist/
 desktop/bin/
-desktop/native/node_modules/
 
-# Generated delivery artifact — never a tracked source file, and it must never contain itself
+# Generated delivery artifact & release bundles
 native-sip-daemon.patch
 release/
+dist/
 
-# Zenith harness surface. Generated per-machine by `zenith init` because .mcp.json and
-# .codex/config.toml embed the ABSOLUTE path of the local harness checkout — committing them
-# would hand another machine a path that does not exist there. Recreate with:
-#   uv run --project <zenith>/zenith zenith init --workspace-dir <repo> --agent claude
+# Local runtime data & environment
+.env
+data/
+.DS_Store
+
+# Zenith harness surface. Generated per-machine by `zenith init`
 .mcp.json
 .claude/
 .codex/
@@ -20,9 +26,5 @@ release/
 .agents/skills/
 __pycache__/
 
-# Zenith harness workspace guidance (canonical copy lives in the project bucket .zenith/)
+# Zenith harness workspace guidance
 AGENTS.md
-node_modules
-.env
-data/
-dist/

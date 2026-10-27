@@ -142,7 +142,7 @@ class Dialog {
     const media = await this.ua.openMediaSocket();
     this.media = this.media || media;
     const body = sdp.build({
-      ip: this.ua.publicIp || this.ua.transport.host,
+      ip: this.ua.publicIp || this.ua.transport.localHost,
       port: this.media.port,
     });
     this.localSdp = sdp.parse(body);
@@ -244,7 +244,7 @@ class Dialog {
   async answer() {
     if (this.ended) return false;
     this.media = await this.ua.openMediaSocket();
-    const body = sdp.build({ ip: this.ua.publicIp || this.ua.transport.host, port: this.media.port });
+    const body = sdp.build({ ip: this.ua.publicIp || this.ua.transport.localHost, port: this.media.port });
     this.localSdp = sdp.parse(body);
     const headers = this.responseHeaders({ extra: { 'Content-Type': 'application/sdp' } });
     const msg = serialize({ startLine: 'SIP/2.0 200 OK', headers, body });

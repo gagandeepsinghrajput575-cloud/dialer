@@ -112,6 +112,8 @@ function header(msg, name) {
   const contact = transport.contactUri({ user: 'alice', domain: 'localhost', port });
   check(/;transport=tls/.test(contact) && !/192\.168|127\.0\.0\.1/.test(contact),
     'Contact advertises the trunk domain with transport=tls, never a private address');
+  check(/^\d{1,3}(\.\d{1,3}){3}$/.test(transport.localHost),
+    'localHost stays an IP literal for SDP, while host is the carrier domain');
 
   const register = (callId) => {
     const branch = `z9hG4bK${callId}`;

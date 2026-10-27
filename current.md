@@ -530,6 +530,15 @@ wins.
 
 ### D. Known risk
 
+Turning TLS on in the portal surfaced one more defect, now fixed: the SDP `c=` line was built from
+`transport.host`, which over TLS is the *carrier's* domain — `c=IN IP4 sip.flynumber.com` is invalid
+SDP and would have produced a connected call with no audio. SDP now uses `transport.localHost`
+(always an IP literal); `host` keeps meaning "the address in Via/Contact".
+
+**Live state (2026-10-28 02:59):** portal TLS ON, `PULSE_SIP_TRANSPORT=tls` in `.env`, daemon
+registered over 5061 — `TCP 192.168.0.100:56404->138.197.42.26:5061 (ESTABLISHED)` and
+`{"event":"registered","expires":300}`.
+
 Outbound calling should work as soon as the portal is on. **Inbound** depends on FlyNumber honouring
 `alias`/connection reuse, because our Contact is behind NAT and not dialable. If inbound fails while
 outbound works, the next step is RFC 5626 `outbound` (`;ob`, `reg-id`, `+sip.instance`) — which the

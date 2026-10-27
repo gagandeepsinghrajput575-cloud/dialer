@@ -152,6 +152,17 @@ class Transport extends EventEmitter {
   }
 
   /**
+   * Our own address, for SDP. This must stay an IP literal in every mode: over TLS `host` is the
+   * carrier's domain (that is what belongs in Via/Contact), and putting a domain in `c=IN IP4`
+   * produces invalid SDP and no media.
+   */
+  get localHost() {
+    const bound = this.address?.address;
+    if (bound && bound !== '0.0.0.0' && bound !== '::') return bound;
+    return this.advertisedAddress;
+  }
+
+  /**
    * A Via for a request we originate.
    *
    * `alias` (RFC 5923) asks the proxy to reuse this connection for everything addressed to us,

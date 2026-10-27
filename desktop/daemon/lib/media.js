@@ -108,6 +108,13 @@ function attach(ua) {
       }
     }
     if (rtp.isRtcp(packetBuf)) return;
+    if (!media.loggedFirstPacket) {
+      media.loggedFirstPacket = true;
+      const b0 = packetBuf[0];
+      // One line that answers "why is the audio noise": payload type, extension bit, CSRC count.
+      ua.log('media', `first RTP: pt=${packetBuf[1] & 0x7f} ext=${(b0 & 0x10) ? 1 : 0} `
+        + `cc=${b0 & 0x0f} len=${packetBuf.length} srtp=${media.srtpIn ? 1 : 0}`);
+    }
     const packet = rtp.parse(packetBuf);
     if (!packet) return;
     media.stats.received += 1;
@@ -297,6 +304,7 @@ function attach(ua) {
     dialog.codec = chosen.name;
 
     // Secure media: our key came from the offer, theirs from the answer (SDES is per-direction).
+    ua.log('media', `remote sdp: crypto=${remote.crypto ? 'yes' : 'no'} key=${dialog.srtpKey ? 'yes' : 'no'}`);
     if (dialog.srtpKey && remote.crypto) {
       const theirs = srtp.parseCrypto(remote.crypto);
       if (theirs) {

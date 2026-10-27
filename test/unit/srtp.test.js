@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { SrtpContext, parseCrypto } = require('../../desktop/daemon/lib/srtp');
+const { SrtpContext, parseCrypto, headerLength } = require('../../desktop/daemon/lib/srtp');
 
 let passed = 0;
 let failed = 0;
@@ -107,8 +107,35 @@ console.log('\n=== VAL-NET-013: SRTP (AES_CM_128_HMAC_SHA1_80) ===\n');
   const parsed = parseCrypto(line);
   check(parsed && parsed.tag === 1 && parsed.suite === 'AES_CM_128_HMAC_SHA1_80',
     'a carrier crypto line is parsed');
+  // Regression: sdp.parse once stored the attribute with its `crypto:` prefix, parseCrypto returned
+  // null, no context was built, and the 10-byte SRTP tag was played as audio (a loud buzz).
+  check(parseCrypto(`crypto:${line}`)?.suite === 'AES_CM_128_HMAC_SHA1_80',
+    'the raw attribute with its crypto: prefix is accepted');
+  check(parseCrypto(`a=crypto:${line}`)?.suite === 'AES_CM_128_HMAC_SHA1_80',
+    'a whole a=crypto: line is accepted');
   check(parseCrypto('1 FOO_BAR inline:AAAA') === null, 'an unsupported suite is refused, not guessed');
   check(parseCrypto('') === null, 'an absent crypto line parses to null');
+}
+
+// 6. Header length, including the RFC 5285 extension that shifts the payload.
+{
+  const plain = rtpPacket({ seq: 1, ssrc: 3 });
+  check(headerLength(plain) === 12, 'a bare RTP header is 12 bytes');
+  const oneCsrc = Buffer.from(plain);
+  oneCsrc[0] = 0x81;                                   // one CSRC
+  check(headerLength(Buffer.concat([oneCsrc, Buffer.alloc(4)])) === 16, 'each CSRC adds 4 bytes');
+  const ext = Buffer.alloc(4);
+  ext.writeUInt16BE(0xbeef, 0);
+  ext.writeUInt16BE(2, 2);                             // two 32-bit words
+  const withExt = Buffer.concat([Buffer.from([0x90]), plain.slice(1, 12), ext, Buffer.alloc(8), Buffer.from([1, 2])]);
+  check(headerLength(withExt) === 24, 'a header extension adds 4 bytes plus its words');
+
+  // Round-trip through an extension-bearing packet: the payload must decrypt from the right byte.
+  const sender = new SrtpContext({ key });
+  const receiver = new SrtpContext({ key });
+  const sealed = sender.protect(withExt);
+  const opened = receiver.unprotect(sealed);
+  check(opened && opened.equals(withExt), 'an extension-bearing packet round-trips intact');
 }
 
 assert.strictEqual(failed, 0, `${failed} SRTP check(s) failed`);

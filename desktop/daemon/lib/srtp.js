@@ -17,9 +17,28 @@ const SUITES = {
   AES_CM_128_HMAC_SHA1_32: { keyLen: 16, saltLen: 14, tagLen: 4, authLen: 20, label: 32 },
 };
 
+/**
+ * Where the payload starts: fixed header, CSRC list, and (bit 0x10) the RFC 5285 extension.
+ *
+ * Getting this wrong is worse than a dropped packet. The SRTP tag authenticates the *ciphertext*,
+ * so a wrong offset still verifies, decrypts from the wrong byte, and plays as full-scale noise —
+ * which is exactly the "loud buzz" a call with a header extension produces.
+ */
+function headerLength(packet) {
+  if (!Buffer.isBuffer(packet) || packet.length < 12) return packet ? packet.length : 0;
+  let length = 12 + 4 * (packet[0] & 0x0f);
+  if ((packet[0] & 0x10) && packet.length >= length + 4) {
+    const words = packet.readUInt16BE(length + 2);
+    length += 4 + 4 * words;
+  }
+  return Math.min(length, packet.length);
+}
+
 /** `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BASE64` -> { tag, suite, key } */
 function parseCrypto(value) {
-  const raw = String(value || '').trim();
+  // Accept the raw attribute or the whole `a=crypto:` line: callers differ, and a silent null here
+  // means the call plays its SRTP tag as audio.
+  const raw = String(value || '').trim().replace(/^a=crypto:/i, '').replace(/^crypto:/i, '');
   const m = /^(\d+)\s+(\S+)\s+inline:([A-Za-z0-9+/=]+)/.exec(raw);
   if (!m) return null;
   const suite = SUITES[m[2]];
@@ -110,7 +129,7 @@ class SrtpContext {
     const seq = packet.readUInt16BE(2);
     const ssrc = packet.readUInt32BE(8);
     const roc = this.updateRoc(seq);
-    const offset = 12 + 4 * (packet[0] & 0x0f);
+    const offset = headerLength(packet);
     if (packet.length < offset) return packet;
     const head = packet.slice(0, offset);
     const body = this.crypt(packet.slice(offset), ssrc, (roc * 0x10000) + seq);
@@ -131,7 +150,7 @@ class SrtpContext {
     const tag = packet.slice(packet.length - this.spec.tagLen);
     const expected = this.auth(sealed, roc);
     if (expected.length !== tag.length || !crypto.timingSafeEqual(expected, tag)) return null;
-    const offset = 12 + 4 * (sealed[0] & 0x0f);
+    const offset = headerLength(sealed);
     if (sealed.length < offset) return null;
     const head = sealed.slice(0, offset);
     const body = this.crypt(sealed.slice(offset), ssrc, (roc * 0x10000) + seq);
@@ -139,4 +158,4 @@ class SrtpContext {
   }
 }
 
-module.exports = { SrtpContext, parseCrypto, derive, SUITES };
+module.exports = { SrtpContext, parseCrypto, derive, headerLength, SUITES };

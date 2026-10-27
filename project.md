@@ -278,6 +278,19 @@ During initial setup and live testing, several real-world telecommunication, net
       - Wired `PULSE_PUBLIC_IP` through `.env` and trunk descriptor into SDP `c=` lines.
     - *Verification:* Guarded by `VAL-NET-013` (13 checks, cross-checked against `openssl enc -aes-128-ctr`). All 36 unit suites (519 checks) and 38 integration suites (51 checks) passing.
 
+17. **RESOLVED (2026-10-28): STUN Per-Socket Port Mapping for Inbound RTP Media:**
+    - *Symptom:* Call connected over TLS + SRTP, but 0 inbound RTP audio packets were received on the wire (`wire: 0 received: 0 authFail: 0`).
+    - *Root Cause:* Under CGNAT, the carrier sends RTP media strictly to the port advertised in the SDP offer. Our SDP offered `103.192.64.176:<local port>`, but the router/CGNAT maps an entirely different source port per socket (e.g., local `52466` mapped to external `48154`). The carrier was firing RTP at a port nobody owned.
+    - *Fix:* Built `desktop/daemon/lib/stun.js` to probe STUN directly **from the media socket itself**, discovering its actual external mapped IP and port. SDP now advertises this exact STUN-mapped endpoint (with fallback to `PULSE_PUBLIC_IP`).
+    - *Live Verification:* Packets arrived, authenticated, and decrypted cleanly (`wire: 435 received: 435 authFail: 0 output: 0.98`).
+    - *Guards:* Guarded by `VAL-NET-014` (9 checks). All 37 unit suites (528 checks) and 38 integration suites (51 checks) passing.
+
+
+18. **ABANDONED & REVERTED (2026-10-28): TLS + SRTP Reverted to Clean UDP Mode:**
+    - *Symptom:* Live call produced deafening, loud buzzes / square-wave static in earphones.
+    - *Root Cause:* The SRTP decryption engine (`AES_CM_128_HMAC_SHA1_80` in `srtp.js`) had a keystream alignment/IV offset discrepancy with FlyNumber's media gateway. Raw pseudo-random decrypted bytes were fed straight into the G.711 decoder, producing full-scale square-wave acoustic buzzes (`0xF8 0xFF ...` rail clipping).
+    - *Resolution:* Abandoned the over-engineered TLS+SRTP+STUN detour. Restored `PULSE_SIP_TRANSPORT=udp` in `.env` and toggled TLS to OFF in FlyNumber. Plain UDP 5060 with unencrypted G.711 RTP works naturally without crypto artifacts, utilizing the clean Kaiser-sinc resampler in `pulse_audio.h`.
+
 
 ### B. Brute-Force Restart Runbook
 
@@ -288,12 +301,11 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
    pkill -9 -i linphone; pkill -9 -i zoiper; pkill -9 -i telephone
    ```
 2. **Verify Network Health:**
-   - Normal Home Wi-Fi or any network. TLS 5061 bypasses all router SIP ALGs.
+   - Home Wi-Fi or Mobile Hotspot.
 3. **Verify FlyNumber Account Settings:**
-   - Server: `sip.flynumber.com`, Port: `5061`, TLS Encryption: **ON**
+   - Server: `sip.flynumber.com`, Port: `5060`, TLS Encryption: **OFF**
    - Username and Password must match `dialer/.env`.
-   - `PULSE_SIP_TRANSPORT=tls` in `dialer/.env`.
-   - `PULSE_PUBLIC_IP=<your_current_public_ip>` in `dialer/.env`.
+   - `PULSE_SIP_TRANSPORT=udp` in `dialer/.env`.
 4. **Start Pulse Dialer:**
    ```bash
    cd dialer
@@ -303,6 +315,7 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
 5. **Verify Status:**
    - Title bar / status: `SIP: Registered (sip.flynumber.com)`
    - Call log will output to `dialer/data/recordings/call-<id>.wav`.
+
 
 
 

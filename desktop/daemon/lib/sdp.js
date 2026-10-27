@@ -88,7 +88,7 @@ function parse(body) {
         if (m[2].toUpperCase() === 'TELEPHONE-EVENT') out.dtmfPt = pt;
       }
       if (/^(sendrecv|sendonly|recvonly|inactive)$/.test(value)) out.direction = value;
-      if (/^crypto:/i.test(value)) out.crypto = value;
+      if (/^crypto:/i.test(value)) out.crypto = value.replace(/^crypto:/i, '').trim();
     }
   }
   if (!out.dtmfPt && out.payloadTypes.includes(PT_DTMF)) out.dtmfPt = PT_DTMF;

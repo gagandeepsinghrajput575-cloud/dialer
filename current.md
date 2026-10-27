@@ -458,8 +458,16 @@ answers `200 OK` in ~230 ms) before the first INVITE:
 - no answer within **1.5 s** → `dial` refuses with `reason: "carrier_unreachable"` and a message
   telling the operator to switch to a hotspot, instead of a 32 s hang
 - daemon action `reachability` exposes it on demand; `status.carrier` reports the last result
-- guarded by **`VAL-NET-010`** in `test/unit/reachability.test.js` (17 checks, including a silent
+- guarded by **`VAL-NET-010`** in `test/unit/reachability.test.js` (20 checks, including a silent
   carrier, a dead port, bad DNS, and the "no dialog is created" assertion)
+- after a Timer B `timeout`, `onDialogEnded` marks the carrier suspect, so the **next** dial probes
+  once even while registered and clears the flag when the probe answers
+
+**Limit worth knowing:** this ALG answers `OPTIONS` and `REGISTER` even while dialogs break, so the
+preflight proves "the path carries SIP", not "dialogs route". It converts a dead network and a
+dropped Wi-Fi into a 1.5 s error; it cannot detect the *rewritten-Contact* case. Only TLS (below)
+removes that class entirely.
+
 
 ### D. Fix 2 (next) — SIP over TLS on 5061
 

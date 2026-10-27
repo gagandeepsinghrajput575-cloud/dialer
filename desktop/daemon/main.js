@@ -63,7 +63,9 @@ async function main(argv = process.argv.slice(2)) {
   if (opts.help) { process.stderr.write(HELP); return 0; }
 
   const chosen = audio.load(opts.audio);
-  const transport = new Transport({ sipPort: opts.sipPort });
+  // The CLI can force a mode before credentials arrive; `applyAccount` switches it if the trunk
+  // descriptor disagrees, because the socket must settle before the first REGISTER.
+  const transport = new Transport({ sipPort: opts.sipPort, mode: opts.account?.transport });
   await transport.open();
 
   // `ua` and `protocol` reference each other, so both are declared before either is used: the
@@ -151,13 +153,21 @@ async function main(argv = process.argv.slice(2)) {
 
 function applyAccount(ua, creds, inline = {}) {
   // Command-line credentials win: they are how an operator debugs one account against a trunk.
+  const transport = String(inline.transport || creds.transport || 'udp').toLowerCase() === 'tls' ? 'tls' : 'udp';
+  // The socket must be in the right mode before the first REGISTER, and credentials arrive after
+  // boot, so this is where the switch actually happens.
+  ua.transport.setMode?.(transport);
+  const requested = Number(inline.port || creds.port || 0);
+  const port = transport === 'tls'
+    ? (requested && requested !== 5060 ? requested : 5061)
+    : (requested || 5060);
   ua.setAccount({
     domain: inline.domain || creds.domain,
-    port: inline.port || creds.port || 5060,
+    port,
     user: inline.user || creds.user,
     password: inline.password || creds.password,
     callerId: inline.callerId || creds.callerId || creds.did || '',
-    transport: creds.transport || 'udp',
+    transport,
     expires: creds.expires || 300,
   });
   return ua.account;

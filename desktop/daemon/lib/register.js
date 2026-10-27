@@ -8,6 +8,7 @@
 const crypto = require('crypto');
 const { buildUri, serialize } = require('./sipMessage');
 const { branch } = require('./dialog');
+const { viaOf, contactOf } = require('./transport');
 const digest = require('./digest');
 
 const REGISTER_EXPIRES = 300;
@@ -54,12 +55,12 @@ function attach(ua) {
   ua.registerHeaders = function registerHeaders(uri, expires, viaBranch = branch()) {
     const aor = buildUri({ user: ua.account.user, host: ua.account.domain });
     return {
-      Via: `SIP/2.0/UDP ${ua.transport.host}:${ua.transport.port};rport;branch=${viaBranch}`,
+      Via: viaOf(ua.transport, viaBranch),
       'Max-Forwards': '70',
       From: `<${aor}>;tag=${crypto.randomBytes(6).toString('hex')}`,
       To: `<${aor}>`,
       'Call-ID': `${crypto.randomBytes(10).toString('hex')}@${ua.transport.host}`,
-      Contact: `<${buildUri({ user: ua.account.user, host: ua.transport.host, port: ua.transport.port })}>;expires=${expires}`,
+      Contact: `${contactOf(ua.transport, { user: ua.account.user, domain: ua.account.domain, port: ua.account.port })};expires=${expires}`,
       Expires: String(expires),
       'User-Agent': ua.userAgent,
     };

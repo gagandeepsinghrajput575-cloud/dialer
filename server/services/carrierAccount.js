@@ -38,6 +38,20 @@ const hostOf = (raw) => String(raw || '').trim().replace(/^sips?:\/?\/?/i, '').r
 const portOf = (raw) => parseInt(String(raw || '').match(/:(\d+)$/)?.[1] || '', 10) || 0;
 
 /**
+ * UDP or TLS for the daemon's SIP socket.
+ *
+ * TLS exists for one reason: a network whose SIP ALG rewrites plaintext headers cannot touch an
+ * encrypted stream, so Via/Contact survive intact (measured: current.md §14). Opt in with
+ * PULSE_SIP_TRANSPORT=tls or the `flynumber_sip_transport` setting.
+ */
+function sipTransport() {
+  const raw = String(settings.get('flynumber_sip_transport') || process.env.PULSE_SIP_TRANSPORT || 'udp')
+    .trim()
+    .toLowerCase();
+  return raw === 'tls' ? 'tls' : 'udp';
+}
+
+/**
  * The wholesale SIP trunk the daemon registers with. FlyNumber is the sole carrier Pulse uses.
  */
 function activeAccount() {
@@ -45,12 +59,19 @@ function activeAccount() {
   const flyUser = String(settings.get('flynumber_sip_user') || settings.get('telnyx_sip_user') || '').trim();
   const flyPassword = String(settings.get('flynumber_sip_password') || settings.get('telnyx_sip_password') || '').trim();
   const flyDid = telephony.normalizePhone(settings.get('flynumber_did') || settings.get('caller_id') || telephony.COPENHAGEN_DEFAULT_DID);
+  const transport = sipTransport();
+  const configuredPort = portOf(settings.get('flynumber_sip_server'));
+  // A trunk switched to TLS but left on the UDP default (5060) means the operator did not spell out
+  // the port; 5061 is the only sane reading. An explicit non-5060 port always wins.
+  const port = configuredPort && !(transport === 'tls' && configuredPort === 5060)
+    ? configuredPort
+    : (transport === 'tls' ? 5061 : 5060);
   return {
     carrier: 'flynumber',
     carrierName: 'FlyNumber',
     domain: flyHost,
-    port: portOf(settings.get('flynumber_sip_server')) || 5060,
-    transport: 'udp',
+    port,
+    transport,
     user: flyUser,
     password: flyPassword,
     // The DID is the number the carrier expects in From; fall back to the rotating pool so a

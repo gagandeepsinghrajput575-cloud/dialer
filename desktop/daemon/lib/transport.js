@@ -9,8 +9,9 @@
 const dgram = require('dgram');
 const dns = require('dns');
 const os = require('os');
+const tls = require('tls');
 const { EventEmitter } = require('events');
-const { parse, addressOf, parseCSeq } = require('./sipMessage');
+const { parse, addressOf, parseCSeq, buildUri } = require('./sipMessage');
 
 // The transaction key a serialized request belongs to. Re-parsing our own bytes would work but
 // costs a parse per retransmit; the builder already knows both values, so it passes them.
@@ -20,6 +21,26 @@ function keyOf({ buf, branch: explicitBranch, method: explicitMethod }) {
   const branch = explicitBranch || /branch=([^;]+)/.exec(String(msg?.first('via') || ''))?.[1] || '';
   const method = explicitMethod || (msg?.kind === 'request' ? msg.method : parseCSeq(msg).method);
   return `${branch}|${String(method).toUpperCase()}`;
+}
+
+/**
+ * `Via` for a request, from any transport-shaped object.
+ *
+ * These two helpers keep the message builders ignorant of which channel they are talking to, and
+ * keep the hand-rolled transport doubles in the test suite (written before the TLS work) working:
+ * anything without `via()`/`contactUri()` is treated as the UDP transport it was written as.
+ */
+function viaOf(transport, branch) {
+  if (transport && typeof transport.via === 'function') return transport.via(branch);
+  return `SIP/2.0/UDP ${transport.host}:${transport.port};rport;branch=${branch}`;
+}
+
+/** `<Contact>` plus its header params (`;alias` over TLS), from any transport-shaped object. */
+function contactOf(transport, { user, domain, port } = {}) {
+  if (transport && typeof transport.contactUri === 'function') {
+    return `<${transport.contactUri({ user, domain, port })}>${transport.contactParams || ''}`;
+  }
+  return `<${buildUri({ user, host: transport.host, port: transport.port })}>`;
 }
 
 const T1 = 500;                       // RTT estimate
@@ -42,9 +63,15 @@ function defaultLocalAddress() {
 }
 
 class Transport extends EventEmitter {
-  constructor({ localAddress = '', sipPort = 0 } = {}) {
+  /**
+   * @param {object} o
+   * @param {'udp'|'tls'} [o.mode]  UDP behaves exactly as before; TLS is opt-in.
+   * @param {object} [o.tls] extra options for tls.connect (a `ca` bundle, a shorter connect
+   *   timeout). `rejectUnauthorized: false` exists for the test harness, not for production.
+   */
+  constructor({ localAddress = '', sipPort = 0, mode = 'udp', tls: tlsOptions = null } = {}) {
     super();
-    this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: false });
+    this.mode = mode === 'tls' ? 'tls' : 'udp';
     // An explicit '' must not become Node's default (which on a dual-stack host can be IPv6 and
     // then refuses to send to an IPv4 literal). Binding 0.0.0.0 keeps everything IPv4.
     this.localAddress = localAddress || '0.0.0.0';
@@ -55,38 +82,112 @@ class Transport extends EventEmitter {
     this.transactions = new Map();    // branch|method -> client transaction
     this.responseCache = [];          // retransmitted final responses for a repeated request
     this.closed = false;
+    this.bound = false;
 
-    this.socket.on('message', (buf, rinfo) => this.onMessage(buf, rinfo));
-    this.socket.on('error', (err) => this.emit('transport_error', err));
+    // TLS: one long-lived connection, opened lazily on the first send. No per-message NAT mapping
+    // for a SIP ALG to corrupt, which is the entire point of the mode.
+    this.tlsOptions = tlsOptions || {};
+    this.socket = null;               // dgram socket in udp mode, tls socket in tls mode
+    this.connected = false;
+    this.connecting = null;
+    this.buffer = '';                 // stream reassembly, TLS only
+    this.remoteHost = '';
+    this.remotePort = 0;
+    if (this.mode === 'udp') this.initUdp();
+  }
+
+  initUdp() {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: false });
+    this.socket = socket;
+    socket.on('message', (buf, rinfo) => this.onMessage(buf, rinfo));
+    socket.on('error', (err) => this.emit('transport_error', err));
+  }
+
+  /** Switch transport at runtime, before the first REGISTER (credentials arrive after boot). */
+  setMode(mode) {
+    const next = mode === 'tls' ? 'tls' : 'udp';
+    if (next === this.mode) return this.mode;
+    for (const tx of this.transactions.values()) tx.stop();
+    this.transactions.clear();
+    try { this.mode === 'tls' ? this.socket?.destroy() : this.socket?.close(); } catch { /* gone */ }
+    this.socket = null;
+    this.connected = false;
+    this.connecting = null;
+    this.buffer = '';
+    this.bound = false;
+    this.mode = next;
+    if (next === 'udp') this.initUdp();
+    return this.mode;
   }
 
   async open() {
+    if (this.mode === 'tls' || this.bound) return this.address;
     await new Promise((resolve, reject) => {
       const done = (err) => (err ? reject(err) : resolve());
       this.socket.once('error', done);
       this.socket.bind(0, this.localAddress, () => {
         this.socket.removeListener('error', done);
         this.address = this.socket.address();
+        this.bound = true;
         resolve();
       });
     });
     return this.address;
   }
 
+  /** `SIP/2.0/UDP` or `SIP/2.0/TLS`, for every Via we build. */
+  get viaPrefix() { return this.mode === 'tls' ? 'SIP/2.0/TLS' : 'SIP/2.0/UDP'; }
+
   // What goes into Via/Contact/SDP: never the wildcard bind address.
   get host() {
+    if (this.mode === 'tls') return this.remoteHost || this.advertisedAddress;
     const bound = this.address?.address;
     if (bound && bound !== '0.0.0.0' && bound !== '::') return bound;
     return this.advertisedAddress;
   }
 
-  get port() { return this.sipPort || this.address?.port || 5060; }
+  get port() {
+    if (this.mode === 'tls') return this.remotePort || this.sipPort || 5061;
+    return this.sipPort || this.address?.port || 5060;
+  }
+
+  /**
+   * A Via for a request we originate.
+   *
+   * `alias` (RFC 5923) asks the proxy to reuse this connection for everything addressed to us,
+   * which is what lets in-dialog requests reach a client behind NAT.
+   */
+  via(branch) {
+    if (this.mode === 'tls') return `SIP/2.0/TLS ${this.host}:${this.port};rport;branch=${branch};alias`;
+    return `SIP/2.0/UDP ${this.host}:${this.port};rport;branch=${branch}`;
+  }
+
+  /**
+   * Contact for REGISTER/INVITE. Over UDP it stays the LAN address the router forwards to. Over
+   * TLS a private address is meaningless to the carrier, so advertise the trunk's own domain and
+   * let `alias` route the dialog back down this connection.
+   */
+  contactUri({ user, domain, port } = {}) {
+    if (this.mode === 'tls') {
+      return buildUri({ user, host: domain || this.host, port: port || this.port, params: { transport: 'tls' } });
+    }
+    return buildUri({ user, host: this.host, port: this.port });
+  }
+
+  /** `;alias` has to follow the Contact for TLS; empty otherwise. */
+  get contactParams() { return this.mode === 'tls' ? ';alias' : ''; }
 
   close() {
     if (this.closed) return;
     this.closed = true;
     for (const tx of this.transactions.values()) tx.stop();
     this.transactions.clear();
+    if (this.mode === 'tls') {
+      this.connected = false;
+      try { this.socket?.destroy(); } catch { /* already gone */ }
+      this.socket = null;
+      return;
+    }
     try { this.socket.close(); } catch { /* already closed */ }
   }
 
@@ -98,11 +199,113 @@ class Transport extends EventEmitter {
   }
 
   async send(buf, target) {
+    if (this.mode === 'tls') return this.sendTls(buf, target);
+    if (!this.bound) await this.open();
     const ip = await Transport.resolveHost(target.host);
     await new Promise((resolve, reject) => {
       this.socket.send(buf, 0, buf.length, target.port || 5060, ip, (err) => (err ? reject(err) : resolve()));
     });
     return { host: ip, port: target.port || 5060 };
+  }
+
+  async sendTls(buf, target = {}) {
+    await this.ensureConnected(target);
+    await new Promise((resolve, reject) => {
+      this.socket.write(buf, (err) => (err ? reject(err) : resolve()));
+    });
+    // The target is ignored on a connection-oriented transport: the connection *is* the route,
+    // which is exactly why the ALG has nothing to rewrite.
+    return { host: this.remoteHost, port: this.remotePort };
+  }
+
+  async ensureConnected(target = {}) {
+    if (this.socket && this.connected && !this.socket.destroyed) return;
+    if (this.connecting) return this.connecting;
+    const host = target.host || this.remoteHost;
+    const port = Number(target.port) || this.remotePort || this.sipPort || 5061;
+    if (!host) throw new Error('transport: no SIP host to connect yet');
+    this.connecting = (async () => {
+      const ip = await Transport.resolveHost(host);
+      await new Promise((resolve, reject) => {
+        const socket = tls.connect({
+          host: ip,
+          port,
+          // SNI and certificate identity are the domain, never the resolved IP (RFC 6066 forbids
+          // an IP literal here, and the carrier's certificate names the domain anyway).
+          ...(/^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? {} : { servername: host }),
+          rejectUnauthorized: this.tlsOptions.rejectUnauthorized !== false,
+          ...(this.tlsOptions.ca ? { ca: this.tlsOptions.ca } : {}),
+        });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error(`TLS connect to ${host}:${port} timed out`));
+        }, Number(this.tlsOptions.connectTimeoutMs) || 8000);
+        timer.unref?.();
+        const fail = (err) => {
+          clearTimeout(timer);
+          this.connected = false;
+          this.emit('transport_error', err);
+          reject(err);
+        };
+        socket.once('error', fail);
+        socket.once('secureConnect', () => {
+          clearTimeout(timer);
+          socket.removeListener('error', fail);
+          socket.setNoDelay(true);
+          socket.on('data', (chunk) => this.onStream(chunk));
+          socket.on('error', (err) => {
+            this.connected = false;
+            this.emit('transport_error', err);
+          });
+          socket.on('close', () => {
+            // The next send() dials again; registration's retry ladder re-registers.
+            this.connected = false;
+            this.buffer = '';
+            this.emit('transport_closed');
+          });
+          this.socket = socket;
+          this.connected = true;
+          this.remoteHost = host;
+          this.remotePort = port;
+          resolve();
+        });
+      });
+    })().finally(() => { this.connecting = null; });
+    return this.connecting;
+  }
+
+  /**
+   * Reassemble SIP messages from a TCP/TLS byte stream.
+   *
+   * A stream has no message boundaries, so each message is framed by its headers plus the
+   * `Content-Length` inside them. A lone CRLF (or a run of them) is an RFC 5626 keep-alive and is
+   * discarded; a partial message stays buffered until the rest arrives, and several messages in
+   * one chunk are all dispatched.
+   */
+  onStream(chunk) {
+    this.buffer += chunk.toString('utf8');
+    this.buffer = this.buffer.replace(/^(?:\r\n)+/, '');
+    for (;;) {
+      const end = this.buffer.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      const lines = this.buffer.slice(0, end).split('\r\n');
+      const startLine = lines[0] || '';
+      if (!startLine) { this.buffer = this.buffer.slice(end + 4); continue; }
+      let length = 0;
+      for (const line of lines.slice(1)) {
+        const i = line.indexOf(':');
+        if (i <= 0) continue;
+        const name = line.slice(0, i).trim().toLowerCase();
+        if (name === 'content-length' || name === 'l') {
+          length = Number.parseInt(line.slice(i + 1).trim(), 10) || 0;
+        }
+      }
+      const total = end + 4 + length;
+      if (this.buffer.length < total) return;      // wait for the body
+      const raw = this.buffer.slice(0, total);
+      this.buffer = this.buffer.slice(total);
+      this.onMessage(Buffer.from(raw, 'utf8'), { address: this.remoteHost, port: this.remotePort });
+    }
   }
 
   // A malformed datagram or a throwing handler must never take the daemon down: it sits on the
@@ -215,6 +418,9 @@ class Transport extends EventEmitter {
    */
   request({ msg, branch: explicitBranch, method: explicitMethod, target, invite = false, onProvisional, onFinal, onTimeout }) {
     const key = keyOf({ buf: msg, branch: explicitBranch, method: explicitMethod });
+    // RFC 3261 §17.1.1.2: a reliable transport does not retransmit. The connection either
+    // delivers the request or closes, and the registration ladder / preflight handle that.
+    const reliable = this.mode === 'tls';
     const tx = {
       key, onProvisional, onFinal, retransmit: null, timeout: null,
       stopRetransmit() { if (this.retransmit) { clearTimeout(this.retransmit); this.retransmit = null; } },
@@ -235,13 +441,15 @@ class Transport extends EventEmitter {
 
     if (!invite) {
       // Timer E/F: retransmit with capped exponential backoff, then give up.
-      let interval = T1;
-      const retransmit = () => {
-        this.send(msg, target).catch(() => {});
-        interval = Math.min(interval * 2, 4 * T1);
+      if (!reliable) {
+        let interval = T1;
+        const retransmit = () => {
+          this.send(msg, target).catch(() => {});
+          interval = Math.min(interval * 2, 4 * T1);
+          tx.retransmit = setTimeout(retransmit, interval);
+        };
         tx.retransmit = setTimeout(retransmit, interval);
-      };
-      tx.retransmit = setTimeout(retransmit, interval);
+      }
       tx.timeout = setTimeout(() => {
         tx.stop();
         this.transactions.delete(key);
@@ -251,13 +459,15 @@ class Transport extends EventEmitter {
     }
 
     // Timer A: double the interval each time until a provisional arrives; Timer B ends it.
-    let interval = T1;
-    const retransmit = () => {
-      this.send(msg, target).catch(() => {});
-      interval *= 2;
+    if (!reliable) {
+      let interval = T1;
+      const retransmit = () => {
+        this.send(msg, target).catch(() => {});
+        interval *= 2;
+        tx.retransmit = setTimeout(retransmit, interval);
+      };
       tx.retransmit = setTimeout(retransmit, interval);
-    };
-    tx.retransmit = setTimeout(retransmit, interval);
+    }
     tx.timeout = setTimeout(() => {
       tx.stop();
       this.transactions.delete(key);
@@ -273,4 +483,4 @@ class Transport extends EventEmitter {
   }
 }
 
-module.exports = { Transport, keyOf, defaultLocalAddress, T1, TIMER_B, TIMER_F, TIMER_H };
+module.exports = { Transport, keyOf, defaultLocalAddress, viaOf, contactOf, T1, TIMER_B, TIMER_F, TIMER_H };

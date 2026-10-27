@@ -482,3 +482,56 @@ acceptable and SRTP is not required. Work: a TLS transport in `desktop/daemon/li
 - `npm test` → **38/38 groups, 51 checks**
 - live probe against the real carrier: `{"ok":true,"status":"SIP/2.0 200 OK","ms":374}`
 
+
+---
+
+## 15. SIP over TLS Transport — Built (2026-10-28)
+
+### A. What was built
+
+`desktop/daemon/lib/transport.js` now speaks **TLS as well as UDP**:
+
+- one long-lived connection, opened lazily on the first send and reused for every request
+- SIP framed out of the byte stream by `Content-Length` (split writes and several messages per
+  chunk both handled); bare CRLFs are treated as RFC 5626 keep-alives
+- reconnect on loss — the next send dials again and registration's ladder re-registers
+- **no retransmissions** on a reliable transport (RFC 3261 §17.1.1.2); the transaction still has
+  Timer B/F as a safety net
+- certificate verification **on by default**, SNI set to the trunk domain (never the IP)
+- `Via: SIP/2.0/TLS …;alias`; `Contact: <sip:user@domain:5061;transport=tls>;alias` — a private
+  address is never advertised, and `alias` (RFC 5923) asks the proxy to reuse the connection
+- the daemon switches mode from the trunk descriptor (`transport: 'tls'`) **before** the first
+  REGISTER
+
+The preflight learned the difference: over TLS it asks the socket (connected / can connect), because
+a UDP OPTIONS to 5061 would be answered by nobody and would block every dial.
+
+### B. How to switch it on
+
+```bash
+# 1. FlyNumber portal -> SIP account -> TLS Encryption: ON
+# 2. dialer/.env
+echo 'PULSE_SIP_TRANSPORT=tls' >> dialer/.env
+# 3. restart the desktop app (the daemon picks the mode up from the trunk descriptor)
+```
+
+Both halves are required: with TLS enabled, the portal stops accepting plaintext UDP, so the daemon
+must move at the same time. The port follows automatically (5061); an explicit non-5060 port still
+wins.
+
+### C. Verification
+
+| Suite | Result |
+|---|---|
+| `VAL-NET-011` — real `tls.createServer`, self-signed | **14/14**: split-write reassembly, TLS Via/Contact on the wire, keep-alive, reconnect, self-signed cert refused |
+| `VAL-NET-012` — transport/port selection | **6/6**: default udp:5060, `tls` → tls:5061, case-insensitive, unknown → udp |
+| `VAL-NET-010` — preflight | **22/22**, including "over TLS the gate asks the socket" |
+| Unit / integration | **35/35 suites (505 checks)** · **38/38 groups (51 checks)** |
+
+### D. Known risk
+
+Outbound calling should work as soon as the portal is on. **Inbound** depends on FlyNumber honouring
+`alias`/connection reuse, because our Contact is behind NAT and not dialable. If inbound fails while
+outbound works, the next step is RFC 5626 `outbound` (`;ob`, `reg-id`, `+sip.instance`) — which the
+carrier did not advertise in `Supported`, so it may need their support to enable.
+

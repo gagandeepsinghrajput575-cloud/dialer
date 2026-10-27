@@ -6,6 +6,7 @@
 
 const crypto = require('crypto');
 const { buildUri, parseUri, identityOf, parseCSeq, serialize } = require('./sipMessage');
+const { viaOf, contactOf } = require('./transport');
 const sdp = require('./sdp');
 const digest = require('./digest');
 
@@ -81,13 +82,13 @@ class Dialog {
     const fromUri = buildUri({ user: account.user, host: account.domain });
     const fromDisplay = account.callerId || '';
     const headers = {
-      Via: via || `SIP/2.0/UDP ${ua.transport.host}:${ua.transport.port};rport;branch=${branch()}`,
+      Via: via || viaOf(ua.transport, branch()),
       'Max-Forwards': '70',
       From: `${fromDisplay ? `"${fromDisplay}" ` : ''}<${fromUri}>;tag=${this.localTag}`,
       To: toHeader || `<${toUri}>${toTag ? `;tag=${toTag}` : ''}`,
       'Call-ID': this.callId,
       CSeq: `${this.cseq} ${method}`,
-      Contact: `<${buildUri({ user: account.user, host: ua.transport.host, port: ua.transport.port })}>`,
+      Contact: contactOf(ua.transport, { user: account.user, domain: account.domain, port: account.port }),
       'User-Agent': ua.userAgent, Allow: 'INVITE, ACK, CANCEL, BYE, OPTIONS, INFO',
     };
     return Object.assign(headers, extra);   // `extra` wins: the peer's Via/From go out verbatim
@@ -148,7 +149,7 @@ class Dialog {
     const viaBranch = branch();
     const headers = this.baseHeaders({
       method: 'INVITE', toUri, toTag,
-      via: `SIP/2.0/UDP ${this.ua.transport.host}:${this.ua.transport.port};rport;branch=${viaBranch}`,
+      via: viaOf(this.ua.transport, viaBranch),
       extra: { 'Content-Type': 'application/sdp', ...(auth ? { [auth.name]: auth.value } : {}) },
     });
     const msg = serialize({ startLine: `INVITE ${toUri} SIP/2.0`, headers, body });

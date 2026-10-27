@@ -12,6 +12,7 @@ const rtp = require('./rtp');
 const g711 = require('./g711');
 const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
 const srtp = require('./srtp');
+const stun = require('./stun');
 
 const LEVEL_INTERVAL_MS = 120;
 
@@ -40,9 +41,18 @@ function attach(ua) {
     });
     socket.removeAllListeners('error');
     socket.on('error', () => { /* a media socket error ends the call's audio, not the daemon */ });
+    // Behind CGNAT a public IP with our local port is a black hole: the ISP rewrites the source
+    // port per socket, and the carrier sends media exactly where the offer says. Ask STUN from this
+    // socket, so the offer carries the mapping that actually exists.
+    let mapped = null;
+    if (ua.transport?.mode === 'tls') {
+      try { mapped = await stun.discover(socket); } catch { mapped = null; }
+      ua.log('media', mapped ? `STUN mapped ${mapped.ip}:${mapped.port}`
+        : 'STUN discovery failed; the offer will use the configured public IP');
+    }
     const session = rtp.createSession({ payloadType: sdpLib.PT_PCMU });
     const media = {
-      socket, port, session, muted: false,
+      socket, port, session, mapped, muted: false,
       // Where our audio goes. Starts empty and is filled from the peer's SDP; the receive
       // path may then re-latch it onto the address the media actually arrives from.
       target: { host: '', port: 0 },
@@ -76,6 +86,7 @@ function attach(ua) {
       },
     });
     socket.on('message', (buf, rinfo) => {
+      media.stats.wire = (media.stats.wire || 0) + 1;
       if (media.target.host !== rinfo.address || media.target.port !== rinfo.port) {
         media.target = { host: rinfo.address, port: rinfo.port };
       }
@@ -91,7 +102,10 @@ function attach(ua) {
       // A trunk switched to secure media must never fall back to playing ciphertext: a failed tag
       // means the packet is dropped, not decoded.
       packetBuf = media.srtpIn.unprotect(buf);
-      if (!packetBuf) return;
+      if (!packetBuf) {
+        media.stats.authFail = (media.stats.authFail || 0) + 1;
+        return;
+      }
     }
     if (rtp.isRtcp(packetBuf)) return;
     const packet = rtp.parse(packetBuf);
@@ -155,7 +169,17 @@ function attach(ua) {
     const now = Date.now();
     if (now - ua.levels.at < LEVEL_INTERVAL_MS) return;
     ua.levels.at = now;
-    ua.emit('audio_level', { input: ua.levels.input, output: ua.levels.output });
+    // `wire` and `authFail` are diagnostic, not cosmetic: when a secure call has no audio, the
+    // only question that matters is whether packets arrived and were rejected (SRTP/key problem)
+    // or never arrived at all (NAT/address problem).
+    const stats = ua.active?.media?.stats || {};
+    ua.emit('audio_level', {
+      input: ua.levels.input,
+      output: ua.levels.output,
+      wire: stats.wire || 0,
+      received: stats.received || 0,
+      authFail: stats.authFail || 0,
+    });
   };
 
   // Open the sound card, once. CoreAudio's start() refuses to run before open() — it has no

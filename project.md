@@ -265,7 +265,18 @@ During initial setup and live testing, several real-world telecommunication, net
     - *What changed:* `desktop/daemon/lib/transport.js` implemented TLS 5061 alongside UDP — persistent TLS socket, stream framing by `Content-Length`, RFC 5626 CRLF keep-alives, reconnect on loss, certificate validation, and zero UDP retransmits.
     - *SDP Fix:* Fixed `c=` line to use `Transport.localHost` (IP literal) rather than `transport.host` (which was resolving to `sip.flynumber.com`).
     - *Live Verification:* Connected to `138.197.42.26:5061 (ESTABLISHED)` over home Wi-Fi (`192.168.0.100`). Registered cleanly: `{"event":"registered","account":"a2YqM0bsm@sip.flynumber.com","expires":300}`.
-    - *Hotspot Status:* **NO HOTSPOT NEEDED.** Home Wi-Fi works cleanly without router ALG interference.
+16. **RESOLVED (2026-10-28): SRTP (RFC 3711) Mandatory on FlyNumber TLS Legs:**
+    - *Symptom:* Initial TLS outbound call rejected with `488 Not Acceptable Here` (`cause=88 INCOMPATIBLE_DESTINATION`).
+    - *Root Cause:* While FlyNumber accepts unauthenticated TLS registrations without demanding `sec-agree`, its media proxy strictly enforces **SRTP (`RTP/SAVP`) with SDES crypto keys** on any call negotiated over a TLS leg. Plain `RTP/AVP` is rejected with cause 88.
+    - *Fix:* Built genuine RFC 3711 SRTP engine in `desktop/daemon/lib/srtp.js` with `AES_CM_128_HMAC_SHA1_80`:
+      - AES-CM keystream derivation (AES-128 key, salt, and HMAC-SHA1 auth key from SDES master key).
+      - Packet IV calculation: `salt ⊕ SSRC ⊕ 48-bit packet index`.
+      - 32-bit rollover counter (ROC) tracking so calls remain decryptable beyond sequence 65,535.
+      - Outbound RTP payload encryption + 10-byte HMAC-SHA1 authentication tag.
+      - Inbound RTP tag authentication before decryption (invalid packets dropped cleanly to prevent decoded noise).
+      - Offered `RTP/SAVP` with `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:...` on TLS legs.
+      - Wired `PULSE_PUBLIC_IP` through `.env` and trunk descriptor into SDP `c=` lines.
+    - *Verification:* Guarded by `VAL-NET-013` (13 checks, cross-checked against `openssl enc -aes-128-ctr`). All 36 unit suites (519 checks) and 38 integration suites (51 checks) passing.
 
 
 ### B. Brute-Force Restart Runbook
@@ -282,6 +293,7 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
    - Server: `sip.flynumber.com`, Port: `5061`, TLS Encryption: **ON**
    - Username and Password must match `dialer/.env`.
    - `PULSE_SIP_TRANSPORT=tls` in `dialer/.env`.
+   - `PULSE_PUBLIC_IP=<your_current_public_ip>` in `dialer/.env`.
 4. **Start Pulse Dialer:**
    ```bash
    cd dialer
@@ -291,6 +303,7 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
 5. **Verify Status:**
    - Title bar / status: `SIP: Registered (sip.flynumber.com)`
    - Call log will output to `dialer/data/recordings/call-<id>.wav`.
+
 
 
 

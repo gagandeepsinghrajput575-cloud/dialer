@@ -296,7 +296,7 @@ class UserAgent extends EventEmitter {
       // the receive path at it, and answer with the media we actually have.
       if (msg.body) existing.remoteSdp = sdp.parse(msg.body);
       const body = existing.media
-        ? sdp.build({ ip: this.publicIp || this.transport.localHost, port: existing.media.port })
+        ? sdp.build({ ip: existing.media.mapped?.ip || this.publicIp || this.transport.localHost, port: existing.media.mapped?.port || existing.media.port })
         : '';
       const headers = existing.responseHeaders();
       if (body) headers['Content-Type'] = 'application/sdp';

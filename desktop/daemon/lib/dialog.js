@@ -148,8 +148,8 @@ class Dialog {
       this.srtpKey = crypto.randomBytes(30).toString('base64');
     }
     const body = sdp.build({
-      ip: this.ua.publicIp || this.ua.transport.localHost,
-      port: this.media.port,
+      ip: this.media.mapped?.ip || this.ua.publicIp || this.ua.transport.localHost,
+      port: this.media.mapped?.port || this.media.port,
       secure,
       crypto: secure ? `1 AES_CM_128_HMAC_SHA1_80 inline:${this.srtpKey}` : '',
     });
@@ -260,7 +260,7 @@ class Dialog {
   async answer() {
     if (this.ended) return false;
     this.media = await this.ua.openMediaSocket();
-    const body = sdp.build({ ip: this.ua.publicIp || this.ua.transport.localHost, port: this.media.port });
+    const body = sdp.build({ ip: this.media?.mapped?.ip || this.ua.publicIp || this.ua.transport.localHost, port: this.media?.mapped?.port || this.media.port });
     this.localSdp = sdp.parse(body);
     const headers = this.responseHeaders({ extra: { 'Content-Type': 'application/sdp' } });
     const msg = serialize({ startLine: 'SIP/2.0 200 OK', headers, body });

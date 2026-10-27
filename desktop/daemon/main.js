@@ -215,6 +215,7 @@ async function dispatch(action, msg, { ua, opts, chosen }) {
     case 'mute': return ua.setMute(msg.enabled === undefined ? !ua.muted : !!msg.enabled);
     case 'dtmf': return ua.sendDtmf(msg.digit);
     case 'status': return ua.status();
+    case 'reachability': return ua.checkCarrier({ timeoutMs: Number(msg.timeoutMs) || undefined, force: !!msg.force });
     case 'devices': return chosen.backend.devices?.() || { inputs: [], outputs: [] };
     case 'audio': return chosen.backend.describe?.() || { name: chosen.name };
     case 'audio-devices': {

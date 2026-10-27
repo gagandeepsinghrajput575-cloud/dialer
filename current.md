@@ -410,3 +410,67 @@ linear kernel and asserts it *fails* the −55 dB gates — so the test cannot p
 | `test/native/dsp/check_resampler.cpp` | new VAL-AUDIO-009 spectral gate + legacy negative control |
 | `test/native/dsp/{dsp_support.h,check_speaker.cpp,harness.cpp,run.sh}` | Goertzel helpers, steady-state pitch + group-delay assertions, wiring |
 
+
+---
+
+## 14. Wi-Fi / SIP Diagnosis Corrected — and a 1.5 s Preflight (2026-10-28)
+
+### A. What the earlier runbook got wrong
+
+The runbook said the Tenda blackholes port 5060 (100% loss). **Measured on the Tenda LAN, that is
+false:**
+
+| Probe (Tenda, `192.168.0.100`, public `103.192.64.176`) | Result |
+|---|---|
+| UDP `REGISTER` ×3 → 5060 | **3/3 `401 Unauthorized`**, 226–350 ms |
+| UDP `INVITE` (unauthenticated) | **`407`**, 261 ms |
+| TCP `REGISTER` → 5060 | **`401`**, 440 ms |
+| TLS 5061 handshake + `REGISTER` | **valid cert**, **`401`**, 823 ms |
+| Daemon registration at the time | `{"event":"registered","expires":300}` |
+
+### B. What is actually happening
+
+The ALG **rewrites SIP text** rather than dropping packets:
+
+```
+sent:       Via: SIP/2.0/UDP 192.168.0.100:<local port>;rport
+received:   Via: SIP/2.0/UDP 10.180.131.111:26407;...;rport=48209
+```
+
+`10.180.131.111` is a CGNAT address (`traceroute` hop 2 = `10.153.110.1`), and the port the ALG
+invented (`26407`) does not match the real mapping (`rport=48209`). Stateless responses still arrive
+because `rport` sends them to the packet's source — so registration and OPTIONS look healthy. Once a
+**dialog** needs routing, the carrier uses the rewritten Via/Contact, whose port never matches, so
+retransmissions run to **Timer B = 64 × T1 = 32 s** → `{"reason":"timeout"}`. That is the exact
+"sits on Calling… then hangs up" symptom.
+
+It is intermittent because a freshly created mapping sometimes lines up; the 20 s RFC 5626
+keep-alives keep it aligned, which is why it works at all right now.
+
+DMZ / port-forwarding can never fix this: the ISP does CGNAT, so there is no port to forward.
+
+### C. Fix 1 (shipped) — carrier preflight
+
+`desktop/daemon/lib/reachability.js` sends one `OPTIONS` (no credentials, no side effects; FlyNumber
+answers `200 OK` in ~230 ms) before the first INVITE:
+
+- carrier answers → dial proceeds (≈0 ms added; skipped entirely while `registered`)
+- no answer within **1.5 s** → `dial` refuses with `reason: "carrier_unreachable"` and a message
+  telling the operator to switch to a hotspot, instead of a 32 s hang
+- daemon action `reachability` exposes it on demand; `status.carrier` reports the last result
+- guarded by **`VAL-NET-010`** in `test/unit/reachability.test.js` (17 checks, including a silent
+  carrier, a dead port, bad DNS, and the "no dialog is created" assertion)
+
+### D. Fix 2 (next) — SIP over TLS on 5061
+
+TLS is opaque to the ALG, so nothing gets rewritten: the TLS `401` came back with the **unmodified**
+Via and `received=103.192.64.176`, and carried **no `Require: sec-agree`** — so plain G.711 RTP is
+acceptable and SRTP is not required. Work: a TLS transport in `desktop/daemon/lib/transport.js`
+(UDP-only today) plus enabling TLS in the FlyNumber portal.
+
+### E. Verification performed
+
+- `npm run test:unit` → **33/33 suites, 480 checks** (was 463; +17 for the preflight)
+- `npm test` → **38/38 groups, 51 checks**
+- live probe against the real carrier: `{"ok":true,"status":"SIP/2.0 200 OK","ms":374}`
+

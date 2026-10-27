@@ -15,6 +15,7 @@ const { buildUri, serialize, identityOf } = require('./sipMessage');
 const { Dialog } = require('./dialog');
 const registration = require('./register');
 const mediaLayer = require('./media');
+const { probeCarrier } = require('./reachability');
 const sdp = require('./sdp');
 const rtp = require('./rtp');
 const g711 = require('./g711');
@@ -73,11 +74,58 @@ class UserAgent extends EventEmitter {
     return missing;
   }
 
+  /**
+   * Would a dial leave this machine at all?
+   *
+   * A live registration is better evidence than any probe, so while `registered` this answers
+   * instantly and the normal dial path pays nothing. Otherwise one OPTIONS goes out with a bounded
+   * wait: ~200 ms when the network carries SIP, `timeoutMs` when it does not.
+   */
+  async checkCarrier({ timeoutMs = 1500, force = false } = {}) {
+    const domain = this.account?.domain;
+    const port = Number(this.account?.port) || 5060;
+    if (!domain) {
+      return { ok: false, reason: 'no-account', ms: 0, host: '', port, error: 'No SIP account is configured.' };
+    }
+    if (!force && this.registration?.state === 'registered') {
+      return { ok: true, cached: true, ms: 0, host: domain, port };
+    }
+    const result = await probeCarrier({ host: domain, port, timeoutMs });
+    this.carrierProbe = { ...result, at: Date.now() };
+    if (!result.ok) {
+      this.log('sip', `carrier unreachable: ${domain}:${port} (${result.reason}, ${result.ms} ms)`);
+    } else if (result.status) {
+      this.log('sip', `carrier reachable: ${domain}:${port} (${result.status}, ${result.ms} ms)`);
+    }
+    return result;
+  }
+
   // ---- calls ---------------------------------------------------------------------------
   async dial(number, { callId: externalId = null } = {}) {
     if (this.standingCall()) return { ok: false, reason: 'busy', error: 'A call is already in progress.' };
     const clean = String(number || '').trim();
     if (!clean) return { ok: false, reason: 'invalid', error: 'No number to dial.' };
+
+    // The INVITE client transaction waits Timer B = 64 * T1 = 32 s before it gives up, which is
+    // exactly the "stuck on Calling…" the operator sees on a network that swallows SIP. Ask the
+    // carrier first: if it is not answering, fail in ~1.5 s with something actionable.
+    const reach = await this.checkCarrier();
+    if (!reach.ok) {
+      const host = this.account?.domain || 'the carrier';
+      const port = Number(this.account?.port) || 5060;
+      if (reach.reason === 'no-account') {
+        return { ok: false, reason: 'no-account', error: reach.error };
+      }
+      return {
+        ok: false,
+        reason: 'carrier_unreachable',
+        error: `${host}:${port} did not answer in ${Math.round(reach.ms)} ms, so this call could never `
+          + 'connect. The network is not carrying SIP — switch to a mobile hotspot (or a network with '
+          + 'SIP ALG disabled) and dial again.',
+        detail: { host, port, ms: reach.ms, cause: reach.reason, status: reach.status || '' },
+      };
+    }
+
     const dialog = new Dialog({ ua: this, direction: 'outbound', number: clean });
     dialog.externalId = externalId;
     this.dialogs.set(dialog.id, dialog);
@@ -311,6 +359,10 @@ class UserAgent extends EventEmitter {
       audio: this.audio?.describe?.() || { name: 'none' },
       muted: this.muted,
       transport: { host: this.transport.host, port: this.transport.port },
+      carrier: this.carrierProbe
+        ? { ok: this.carrierProbe.ok, ms: this.carrierProbe.ms, at: this.carrierProbe.at,
+            status: this.carrierProbe.status || '', cause: this.carrierProbe.reason || '' }
+        : null,
       call: dialog ? {
         callId: dialog.id, direction: dialog.direction, state: dialog.state,
         number: dialog.callerPhone, codec: dialog.codec, durationSec: dialog.durationSec,

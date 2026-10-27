@@ -252,6 +252,14 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Guard:* `VAL-AUDIO-009` in `test/native/dsp/check_resampler.cpp` asserts the −55 dB gates and includes a negative control that runs the old linear kernel and must fail them. Full detail: `dialer/current.md` §13.
 
 
+14. **CORRECTED (2026-10-28): "The Tenda blackholes port 5060" — measured, it does not:**
+    - *What the earlier entry (item 12) claimed:* the Tenda's SIP ALG drops all inbound 5060 traffic, 100% loss, so calls cannot connect. **That is not what the packets show.**
+    - *Measured on the Tenda LAN (`192.168.0.100`, gw `192.168.0.1`, public `103.192.64.176`):* three UDP `REGISTER`s → **3/3 answered `401 Unauthorized` in 226–350 ms**; an unauthenticated `INVITE` → **`407` in 261 ms**; TCP 5060 `REGISTER` → **`401` in 440 ms**; TLS 5061 → **valid cert for `sip.flynumber.com`, `401` in 823 ms**. The daemon was registered through the same network at the time.
+    - *What is actually wrong:* the ALG **rewrites the SIP text**. The `Via` we send (`192.168.0.100:<port>`) comes back as `10.180.131.111:26407` — a CGNAT address — while the real mapping is `rport=48209`. Stateless responses still arrive because `rport` sends them to the source, which is why registration and OPTIONS work. Dialog routing uses the rewritten Via/Contact, whose port never matches, so retransmissions run to **Timer B = 64 × T1 = 32 s** and the UI reports `timeout`. `traceroute` confirms CGNAT at hop 2 (`10.153.110.1`), so DMZ/port-forwarding can never fix this.
+    - *Fix 1 (shipped):* a **carrier preflight** — `desktop/daemon/lib/reachability.js` sends one `OPTIONS` before the first INVITE and refuses to dial if nothing answers, so the operator gets an actionable message in **~1.5 s** instead of staring at "Calling…" for 32 s. Skipped entirely while `registered` (a live registration is better evidence, and the normal dial path pays 0 ms). New daemon action `reachability`, and `status.carrier` exposes the last result. Guarded by `VAL-NET-010` in `test/unit/reachability.test.js`.
+    - *Fix 2 (next, proven viable):* **SIP over TLS on 5061**. The ALG cannot parse TLS, so no rewriting happens — confirmed by the TLS 401, whose `Via` came back untouched with `received=103.192.64.176` (the real public IP) and **no `Require: sec-agree`**, so plain G.711 RTP can stay (no SRTP work). Requires `transport.js` to gain a TLS transport and TLS enabled in the FlyNumber portal.
+
+
 ### B. Brute-Force Restart Runbook
 
 If launching Pulse Dialer on a new machine or recovering after a system restart:

@@ -18,6 +18,7 @@ const MAX_LINE = 256 * 1024;
 const ACTIONS = new Set([
   'hello', 'ping', 'register', 'unregister', 'dial', 'answer', 'reject', 'hangup',
   'mute', 'dtmf', 'status', 'devices', 'audio', 'audio-devices', 'log-level', 'shutdown',
+  'reachability',
 ]);
 
 class Protocol {

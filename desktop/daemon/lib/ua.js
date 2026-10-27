@@ -87,11 +87,15 @@ class UserAgent extends EventEmitter {
     if (!domain) {
       return { ok: false, reason: 'no-account', ms: 0, host: '', port, error: 'No SIP account is configured.' };
     }
-    if (!force && this.registration?.state === 'registered') {
+    if (!force && !this.carrierSuspect && this.registration?.state === 'registered') {
       return { ok: true, cached: true, ms: 0, host: domain, port };
     }
     const result = await probeCarrier({ host: domain, port, timeoutMs });
     this.carrierProbe = { ...result, at: Date.now() };
+    if (result.ok) {
+      // The path carries SIP again; a registration that looked healthy can be trusted once more.
+      this.carrierSuspect = false;
+    }
     if (!result.ok) {
       this.log('sip', `carrier unreachable: ${domain}:${port} (${result.reason}, ${result.ms} ms)`);
     } else if (result.status) {
@@ -327,6 +331,11 @@ class UserAgent extends EventEmitter {
   }
 
   onDialogEnded(dialog, { reason, status = 0, detail = '' } = {}) {
+    // A dialog that died with no answer at all is the signature of a network that swallowed the
+    // INVITE (Timer B). Registration can still look healthy at that moment — the ALG's rewriting
+    // only breaks dialog routing — so remember it and force a probe before the next dial instead of
+    // walking into another 32 s wait.
+    if (reason === 'timeout') this.carrierSuspect = true;
     if (this.active === dialog) { this.active = null; this.stopPump(); }
     const durationSec = dialog.durationSec;
     this.releaseMedia(dialog);

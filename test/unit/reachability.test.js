@@ -109,7 +109,23 @@ async function fakeCarrier(reply) {
     const cached = await ua.checkCarrier();
     check(cached.ok === true && cached.cached === true && cached.ms === 0,
       'while registered the gate answers instantly and sends nothing');
+
+    // ...unless a call already died on Timer B. Registration can still look fine when the ALG only
+    // breaks dialog routing, so one timeout forces the next dial to probe instead of hanging again.
+    ua.releaseMedia = () => {};
+    ua.onDialogEnded({ id: 'stub', externalId: null, direction: 'outbound', durationSec: 0 },
+      { reason: 'timeout' });
+    check(ua.carrierSuspect === true, 'a Timer B timeout marks the carrier suspect despite registration');
     carrier.socket.close();
+
+    const answering = await fakeCarrier('SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n');
+    ua.account.port = answering.port;
+    const afterSuspect = await ua.checkCarrier();
+    console.log(`  after timeout: ok=${afterSuspect.ok} cached=${!!afterSuspect.cached} in ${afterSuspect.ms} ms`);
+    check(afterSuspect.ok === true && !afterSuspect.cached,
+      'a suspect carrier is probed even while registered');
+    check(ua.carrierSuspect === false, 'a successful probe clears the suspicion');
+    answering.socket.close();
   }
 
   console.log(`\n${failed ? '\u{1F4A5}' : '\u{1F389}'} ${passed}/${passed + failed} checks passed`);

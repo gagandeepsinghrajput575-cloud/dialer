@@ -141,9 +141,17 @@ class Dialog {
   async sendInvite({ toUri, toTag = '', auth = null }) {
     const media = await this.ua.openMediaSocket();
     this.media = this.media || media;
+    // Over TLS the carrier expects secure media; an offer in the clear is refused with 488.
+    const secure = this.ua.transport.mode === 'tls';
+    if (secure && !this.srtpKey) {
+      // RFC 4568 SDES: 16-byte key + 14-byte salt, base64.
+      this.srtpKey = crypto.randomBytes(30).toString('base64');
+    }
     const body = sdp.build({
       ip: this.ua.publicIp || this.ua.transport.localHost,
       port: this.media.port,
+      secure,
+      crypto: secure ? `1 AES_CM_128_HMAC_SHA1_80 inline:${this.srtpKey}` : '',
     });
     this.localSdp = sdp.parse(body);
     const viaBranch = branch();
@@ -180,6 +188,14 @@ class Dialog {
   async onFinalResponse(res, { toUri }) {
     if (this.ended) return;
     if (res.synthetic || res.status === 0) return this.end('failed', { detail: res.reason });
+
+    // A rejected call is the hardest thing to diagnose from the outside: 488 "Not Acceptable Here"
+    // says nothing about *which* part of the offer the carrier refused. Carriers put that in a
+    // Warning or Reason header, so put it in the log where an operator can see it.
+    if (res.status >= 300) {
+      const why = res.first('warning') || res.first('reason') || '';
+      this.ua.log('sip', `<< ${res.status} ${res.reason || ''}${why ? ` — ${why}` : ''}`);
+    }
 
     // Digest challenge: answer it once, with the same Call-ID and a fresh CSeq/branch.
     if ((res.status === 401 || res.status === 407) && !this.triedAuth) {

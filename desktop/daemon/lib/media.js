@@ -11,6 +11,7 @@ const sdpLib = require('./sdp');
 const rtp = require('./rtp');
 const g711 = require('./g711');
 const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
+const srtp = require('./srtp');
 
 const LEVEL_INTERVAL_MS = 120;
 
@@ -53,7 +54,8 @@ function attach(ua) {
         // and a stale closure here means a connected call that sends no audio at all.
         const { host, port } = media.target;
         if (!host || !port) return false;
-        socket.send(buf, port, host, (err) => { if (err) media.stats.sendErrors = (media.stats.sendErrors || 0) + 1; });
+        const wire = media.srtpOut ? media.srtpOut.protect(buf) : buf;
+        socket.send(wire, port, host, (err) => { if (err) media.stats.sendErrors = (media.stats.sendErrors || 0) + 1; });
         media.stats.sent += 1;
         return true;
       },
@@ -84,8 +86,15 @@ function attach(ua) {
   };
 
   ua.onRtp = function onRtp(media, buf) {
-    if (rtp.isRtcp(buf)) return;
-    const packet = rtp.parse(buf);
+    let packetBuf = buf;
+    if (media.srtpIn) {
+      // A trunk switched to secure media must never fall back to playing ciphertext: a failed tag
+      // means the packet is dropped, not decoded.
+      packetBuf = media.srtpIn.unprotect(buf);
+      if (!packetBuf) return;
+    }
+    if (rtp.isRtcp(packetBuf)) return;
+    const packet = rtp.parse(packetBuf);
     if (!packet) return;
     media.stats.received += 1;
     if (media.remoteDtmfPt && packet.payloadType === media.remoteDtmfPt) {
@@ -262,6 +271,20 @@ function attach(ua) {
     dialog.media.remoteDtmfPt = remote.dtmfPt || 0;
     dialog.media.session.payloadType = chosen.pt;
     dialog.codec = chosen.name;
+
+    // Secure media: our key came from the offer, theirs from the answer (SDES is per-direction).
+    if (dialog.srtpKey && remote.crypto) {
+      const theirs = srtp.parseCrypto(remote.crypto);
+      if (theirs) {
+        dialog.media.srtpOut = new srtp.SrtpContext({ key: dialog.srtpKey, suite: theirs.suite });
+        dialog.media.srtpIn = new srtp.SrtpContext({ key: theirs.key, suite: theirs.suite });
+        ua.log('media', `SRTP active (${theirs.suite})`);
+      } else {
+        ua.log('media', `unusable crypto line from the carrier: ${String(remote.crypto).slice(0, 40)}`);
+      }
+    } else if (remote.crypto && !dialog.srtpKey) {
+      ua.log('media', 'carrier offered secure media but this side has no key — audio will not flow');
+    }
 
     // FlyNumber Symmetric RTP NAT Latching: transmit 3 consecutive silent G.711 RTP packets immediately
     const silentPackets = rtp.createSilentNatPackets(dialog.media.session, 3, chosen.pt);

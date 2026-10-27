@@ -78,6 +78,10 @@ function activeAccount() {
     // multi-DID install still shows the caller ID it would have shown in the browser.
     callerId: flyDid || telephony.nextCallerId().callerId || '',
     did: flyDid || '',
+    // The media address in SDP. Behind NAT this must be the address the carrier can reach, and
+    // since TLS hides the SDP from the router's ALG (which used to rewrite it for us), the operator
+    // has to supply it. The daemon falls back to the LAN address when this is empty.
+    publicIp: String(process.env.PULSE_PUBLIC_IP || '').trim(),
   };
 }
 

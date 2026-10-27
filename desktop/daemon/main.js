@@ -157,6 +157,10 @@ function applyAccount(ua, creds, inline = {}) {
   // The socket must be in the right mode before the first REGISTER, and credentials arrive after
   // boot, so this is where the switch actually happens.
   ua.transport.setMode?.(transport);
+  // Media address for SDP: the carrier cannot reach a LAN address, and with TLS the router's ALG
+  // no longer rewrites it, so the trunk descriptor has to say what the outside world sees.
+  const publicIp = inline.publicIp || creds.publicIp || '';
+  if (publicIp) ua.publicIp = publicIp;
   const requested = Number(inline.port || creds.port || 0);
   const port = transport === 'tls'
     ? (requested && requested !== 5060 ? requested : 5061)

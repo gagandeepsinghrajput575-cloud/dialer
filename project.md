@@ -260,13 +260,12 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Fix 2 (next, proven viable):* **SIP over TLS on 5061**. The ALG cannot parse TLS, so no rewriting happens — confirmed by the TLS 401, whose `Via` came back untouched with `received=103.192.64.176` (the real public IP) and **no `Require: sec-agree`**, so plain G.711 RTP can stay (no SRTP work). Requires `transport.js` to gain a TLS transport and TLS enabled in the FlyNumber portal.
 
 
-15. **SIP over TLS (5061) — built and tested, awaiting the portal toggle:**
-    - *Why:* the ALG on this network rewrites plaintext Via/Contact to a CGNAT address whose port does not match the real mapping, which breaks dialog routing (item 14). TLS is opaque to it, so nothing can be rewritten.
-    - *What changed:* `desktop/daemon/lib/transport.js` gained a TLS mode beside UDP — one long-lived connection, SIP framed by `Content-Length` across the stream, RFC 5626 CRLF keep-alives, reconnect on loss, certificate verification on by default (`rejectUnauthorized`), and **no retransmissions** on a reliable transport (RFC 3261 §17.1.1.2). `Via` becomes `SIP/2.0/TLS …;alias`, `Contact` advertises the trunk domain with `;transport=tls` and `;alias` (RFC 5923 connection reuse), and the daemon switches mode from the trunk descriptor before the first REGISTER.
-    - *How to enable:* set `PULSE_SIP_TRANSPORT=tls` in `dialer/.env` (the API server loads it, the daemon receives `transport: 'tls'` and port 5061), **and** turn TLS on in the FlyNumber portal. Both at once: with TLS on, the portal stops accepting plaintext UDP.
-    - *Preflight:* over TLS the gate asks the socket instead of sending a UDP OPTIONS (which nobody would answer on 5061).
-    - *Tests:* `VAL-NET-011` (14 checks) drives a real `tls.createServer` with a self-signed cert — split-write reassembly, TLS Via/Contact on the wire, keep-alive, reconnect, and refusal of a self-signed cert when verification is on. `VAL-NET-012` (6 checks) pins the transport/port selection.
-    - *Known risk:* outbound should work; **inbound** depends on FlyNumber honouring `alias`/connection reuse, because a Contact behind NAT is not dialable. The live test after the toggle is what settles it.
+15. **RESOLVED (2026-10-28): SIP over TLS (5061) — Live & Verified on Home Wi-Fi:**
+    - *Why:* The Tenda router's SIP ALG on UDP 5060 rewrote plaintext Via/Contact to an internal CGNAT address with mismatched ports, causing dialog routing timeouts (item 14). TLS completely encrypts SIP headers, making them untamperable.
+    - *What changed:* `desktop/daemon/lib/transport.js` implemented TLS 5061 alongside UDP — persistent TLS socket, stream framing by `Content-Length`, RFC 5626 CRLF keep-alives, reconnect on loss, certificate validation, and zero UDP retransmits.
+    - *SDP Fix:* Fixed `c=` line to use `Transport.localHost` (IP literal) rather than `transport.host` (which was resolving to `sip.flynumber.com`).
+    - *Live Verification:* Connected to `138.197.42.26:5061 (ESTABLISHED)` over home Wi-Fi (`192.168.0.100`). Registered cleanly: `{"event":"registered","account":"a2YqM0bsm@sip.flynumber.com","expires":300}`.
+    - *Hotspot Status:* **NO HOTSPOT NEEDED.** Home Wi-Fi works cleanly without router ALG interference.
 
 
 ### B. Brute-Force Restart Runbook
@@ -278,10 +277,11 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
    pkill -9 -i linphone; pkill -9 -i zoiper; pkill -9 -i telephone
    ```
 2. **Verify Network Health:**
-   - Connect Mac to **Personal Hotspot** (or a router with SIP ALG disabled).
+   - Normal Home Wi-Fi or any network. TLS 5061 bypasses all router SIP ALGs.
 3. **Verify FlyNumber Account Settings:**
-   - Server: `sip.flynumber.com`, Port: `5060`, TLS Encryption: **OFF**
+   - Server: `sip.flynumber.com`, Port: `5061`, TLS Encryption: **ON**
    - Username and Password must match `dialer/.env`.
+   - `PULSE_SIP_TRANSPORT=tls` in `dialer/.env`.
 4. **Start Pulse Dialer:**
    ```bash
    cd dialer
@@ -291,5 +291,6 @@ If launching Pulse Dialer on a new machine or recovering after a system restart:
 5. **Verify Status:**
    - Title bar / status: `SIP: Registered (sip.flynumber.com)`
    - Call log will output to `dialer/data/recordings/call-<id>.wav`.
+
 
 

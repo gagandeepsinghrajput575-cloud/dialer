@@ -22,16 +22,21 @@ const DTMF_EVENTS = '0-16';
  * Build our offer/answer body.
  * @param {object} o { ip, port, sessionId, payloadTypes }
  */
-function build({ ip, port, sessionId, payloadTypes = [PT_PCMU, PT_PCMA] }) {
+function build({ ip, port, sessionId, payloadTypes = [PT_PCMU, PT_PCMA], secure = false, crypto = '' }) {
   const id = sessionId || Math.floor(Date.now() / 1000);
   const audioPts = payloadTypes.filter((pt) => pt !== PT_DTMF);
+  // A TLS leg is frequently paired with mandatory secure media: offering RTP/AVP there is answered
+  // with 488 "Not Acceptable Here" / Q.850 cause=88 (incompatible destination), which says nothing
+  // about SRTP being the reason. RTP/SAVP + an SDES crypto line is how you ask for it.
+  const profile = secure ? 'RTP/SAVP' : 'RTP/AVP';
   const lines = [
     'v=0',
     `o=pulse-sip ${id} ${id} IN IP4 ${ip}`,
     's=Pulse Dialer',
     `c=IN IP4 ${ip}`,
     't=0 0',
-    `m=audio ${port} RTP/AVP ${[...audioPts, PT_DTMF].join(' ')}`,
+    `m=audio ${port} ${profile} ${[...audioPts, PT_DTMF].join(' ')}`,
+    ...(secure && crypto ? [`a=crypto:${crypto}`] : []),
     ...audioPts.map((pt) => `a=rtpmap:${pt} ${nameOf(pt)}/${RATE}`),
     `a=rtpmap:${PT_DTMF} telephone-event/${RATE}`,
     `a=fmtp:${PT_DTMF} ${DTMF_EVENTS}`,
@@ -83,6 +88,7 @@ function parse(body) {
         if (m[2].toUpperCase() === 'TELEPHONE-EVENT') out.dtmfPt = pt;
       }
       if (/^(sendrecv|sendonly|recvonly|inactive)$/.test(value)) out.direction = value;
+      if (/^crypto:/i.test(value)) out.crypto = value;
     }
   }
   if (!out.dtmfPt && out.payloadTypes.includes(PT_DTMF)) out.dtmfPt = PT_DTMF;

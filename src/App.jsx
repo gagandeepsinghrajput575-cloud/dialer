@@ -40,8 +40,9 @@ export default function App() {
 }
 
 function Shell() {
-  const { view, setView, settings, stats, prospects } = useStore();
-  const { audioRef } = useSoftphone();
+  const { view, setView, settings, stats, prospects, activeCall } = useStore();
+  const softphone = useSoftphone();
+  const { audioRef } = softphone;
   const [collapsed, setCollapsed] = React.useState(() => {
     try { return localStorage.getItem('pulse_sidebar_collapsed') === '1'; } catch { return false; }
   });
@@ -60,6 +61,14 @@ function Shell() {
   const Page = Object.hasOwn(PAGES, view) ? PAGES[view] : Dashboard;
   const dry = settings?.dry_run === '1';
   const today = stats?.today;
+
+  // Active call presence across the app
+  const hasActiveCall = Boolean(
+    activeCall?.phase === 'active' ||
+    activeCall?.phase === 'dialing' ||
+    softphone?.active ||
+    (softphone?.busy && softphone?.state === 'active')
+  );
 
   return (
     <div className={`shell ${collapsed ? 'collapsed-sidebar' : ''}`}>
@@ -112,6 +121,9 @@ function Shell() {
                 <Icon size={18} />
                 {!collapsed && <span>{n.label}</span>}
                 {n.id === 'prospects' && <em className="count">{prospects.length}</em>}
+                {n.id === 'dialer' && hasActiveCall && (
+                  <span className="dot" style={{ width: 8, height: 8, borderRadius: '50%', background: '#34d399', marginLeft: 'auto', boxShadow: '0 0 8px #34d399' }} />
+                )}
               </button>
             );
           })}
@@ -141,6 +153,35 @@ function Shell() {
           </motion.div>
         </AnimatePresence>
       </main>
+
+      {/* Floating Active Call Strip across other views (Recordings, Recents, Prospects, etc.) */}
+      {hasActiveCall && view !== 'dialer' && (
+        <div
+          className="global-active-callbar"
+          onClick={() => setView('dialer')}
+          title="Return to active call cockpit"
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setView('dialer')}
+        >
+          <div className="global-active-callbar-badge">
+            <span className="dot" />
+            <span>{activeCall?.phase === 'dialing' ? 'Dialing…' : 'Call in progress'}</span>
+          </div>
+          <div className="global-active-callbar-info">
+            <span className="global-active-callbar-name">
+              {activeCall?.prospectName || activeCall?.phone || softphone?.target || 'Active Line'}
+            </span>
+            <span className="global-active-callbar-sub">
+              Click to return to dialer cockpit
+            </span>
+          </div>
+          <button type="button" className="global-active-callbar-btn">
+            <PhoneCall size={13} />
+            <span>View Call</span>
+          </button>
+        </div>
+      )}
 
       <Drawer />
       {/* Root-level so Settings, the composer and the "captured" toast can all open it. */}

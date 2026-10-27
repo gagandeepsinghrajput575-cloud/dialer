@@ -10,7 +10,7 @@ export function StoreProvider({ children }) {
   const [loaded, setLoaded] = useState(false);
   const [stats, setStats] = useState(null);
   const [settings, setSettings] = useState(null);
-  const [view, setViewState] = useState(() => (location.hash.replace('#', '') || 'dashboard'));
+  const [view, setViewState] = useState(() => (location.hash.replace('#', '') || 'dialer'));
   const [activeId, setActiveId] = useState(null); // prospect in dialer
   const [drawerId, setDrawerId] = useState(null); // prospect in side drawer
   const [toasts, setToasts] = useState([]);
@@ -88,7 +88,7 @@ export function StoreProvider({ children }) {
   // Follow the URL: the browser back/forward buttons now move between pages, and a shared
   // link opens the page it points at. Unknown hashes fall back to Dashboard in App.jsx.
   useEffect(() => {
-    const onHash = () => setViewState(location.hash.replace('#', '') || 'dashboard');
+    const onHash = () => setViewState(location.hash.replace('#', '') || 'dialer');
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -213,6 +213,21 @@ export function StoreProvider({ children }) {
     }
   }, [refreshProspects, refreshStats, toast]);
 
+  // ---- persistent active call state across navigation ----------------
+  // When a call is placed or answered, the session lives in store so navigating
+  // to Recordings, Recents, or Settings never wipes or loses the in-call cockpit.
+  const [activeCall, setActiveCallState] = useState(null);
+  const activeCallRef = useRef(null);
+  activeCallRef.current = activeCall;
+
+  const setActiveCall = useCallback((call) => {
+    setActiveCallState(call);
+  }, []);
+
+  const clearActiveCall = useCallback(() => {
+    setActiveCallState(null);
+  }, []);
+
   const value = useMemo(() => ({
     prospects, loaded, stats, settings, view, setView, activeId, setActiveId, drawerId, setDrawerId,
     toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect,
@@ -220,7 +235,8 @@ export function StoreProvider({ children }) {
     onProspectSaved, onProspectDeleted,
     outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismissToast: dismiss,
     inbound, setInbound, inboundRef, inboundEnded, setInboundEnded, findProspectByPhone,
-  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss, inbound, inboundEnded, findProspectByPhone]);
+    activeCall, setActiveCall, clearActiveCall, activeCallRef,
+  }), [prospects, loaded, stats, settings, view, setView, activeId, drawerId, toast, toasts, refreshProspects, refreshStats, refreshSettings, updateProspect, patchLocal, openInDialer, deleteProspect, bulkStageProspects, bulkMarkDnc, bulkDeleteProspects, onProspectSaved, onProspectDeleted, outboxOpen, outboxFocusId, openOutbox, closeOutbox, dismiss, inbound, inboundEnded, findProspectByPhone, activeCall, setActiveCall, clearActiveCall]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

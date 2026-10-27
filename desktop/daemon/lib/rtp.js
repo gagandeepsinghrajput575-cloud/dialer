@@ -102,15 +102,44 @@ const DTMF_CODES = {
   '*': 10, '#': 11, A: 12, B: 13, C: 14, D: 15,
 };
 
+const DTMF_FREQUENCIES = {
+  1: [697, 1209], 2: [697, 1336], 3: [697, 1477],
+  4: [770, 1209], 5: [770, 1336], 6: [770, 1477],
+  7: [852, 1209], 8: [852, 1336], 9: [852, 1477],
+  '*': [941, 1209], 0: [941, 1336], '#': [941, 1477],
+  A: [697, 1633], B: [770, 1633], C: [852, 1633], D: [941, 1633],
+};
+
+/**
+ * Generate standard dual-tone multi-frequency PCM audio (mono, 8 kHz, 16-bit).
+ * Used to stream in-band touch tones alongside out-of-band RFC 2833 packets
+ * so IVR menus, PBXs, and carrier gateways reliably recognize every key press.
+ */
+function generateDtmfPcm(digit, durationMs = 160) {
+  const code = String(digit).toUpperCase();
+  const freqs = DTMF_FREQUENCIES[code];
+  if (!freqs) return null;
+  const numSamples = Math.round((durationMs / 1000) * 8000); // 8 kHz
+  const pcm = new Int16Array(numSamples);
+  const [f1, f2] = freqs;
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / 8000;
+    const s = 0.45 * Math.sin(2 * Math.PI * f1 * t) + 0.45 * Math.sin(2 * Math.PI * f2 * t);
+    pcm[i] = Math.round(s * 16384);
+  }
+  return pcm;
+}
+
 /**
  * The three/four packets an RFC 2833 digit needs: same timestamp, growing duration, and the
  * last one flagged E-bit and repeated so a single loss does not eat the tone.
- * @param {object} o { session, digit, durationMs, volume }
+ * @param {object} o { session, digit, durationMs, volume, payloadType }
  * @returns {Buffer[]}
  */
-function dtmfPackets({ session, digit, durationMs = 160, volume = 10 }) {
+function dtmfPackets({ session, digit, durationMs = 160, volume = 10, payloadType = PT_DTMF }) {
   const code = DTMF_CODES[String(digit).toUpperCase()];
   if (code === undefined || !session) return [];
+  const pt = payloadType || PT_DTMF;
   const stamp = session.timestamp;
   const total = Math.max(80, Math.round(durationMs / 10) * 80); // duration is in 8 kHz units
   const body = (dur, end) => {
@@ -124,10 +153,10 @@ function dtmfPackets({ session, digit, durationMs = 160, volume = 10 }) {
   };
   const out = [];
   const steps = [Math.round(total * 0.3), Math.round(total * 0.6), total];
-  for (const dur of steps) out.push(rawPacket(session, PT_DTMF, stamp, body(dur, false), false));
+  for (const dur of steps) out.push(rawPacket(session, pt, stamp, body(dur, false), false));
   // The end packet three times: RFC 2833 §2.5.1.4 requires retransmission until the receiver
   // acknowledges by timestamp, and UDP gives us nothing else to rely on.
-  for (let i = 0; i < 3; i++) out.push(rawPacket(session, PT_DTMF, stamp, body(total, true), false));
+  for (let i = 0; i < 3; i++) out.push(rawPacket(session, pt, stamp, body(total, true), false));
   session.advance(stamp, total);
   return out;
 }
@@ -144,7 +173,123 @@ function rawPacket(session, pt, timestamp, payload, marker) {
   return buf;
 }
 
+/**
+ * Transmit consecutive silent G.711 RTP packets for NAT latching (RFC 3550).
+ * 160 bytes of 0xD5 (PCMA) or 0xFF (PCMU) per 20ms frame.
+ * Each packet increments sequenceNumber by +1 and timestamp by +160.
+ */
+function createSilentNatPackets(session, count = 3, payloadType = session?.payloadType ?? 0) {
+  if (!session) return [];
+  const pt = payloadType !== undefined ? payloadType : (session.payloadType || 0);
+  const silentByte = pt === 8 ? 0xd5 : 0xff; // 8=PCMA (0xD5), 0=PCMU (0xFF)
+  const payload = Buffer.alloc(SAMPLES_PER_PACKET, silentByte);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(session.packet(payload, i === 0));
+  }
+  return out;
+}
+
+/**
+ * Bounded RTP sequence reorder buffer (4 to 8 packets window).
+ * Correctly accounts for uint16 wrap-around (65535 -> 0), duplicate suppression,
+ * immediate pass-through for in-order arrivals, gap holding, and capacity/timeout flushes.
+ */
+class ReorderBuffer {
+  constructor({ capacity = 8, onPacket, maxHoldMs = 60 } = {}) {
+    this.capacity = capacity;
+    this.onPacket = typeof onPacket === 'function' ? onPacket : () => {};
+    this.maxHoldMs = maxHoldMs;
+    this.queue = [];
+    this.lastSeq = null;
+    this.flushTimer = null;
+  }
+
+  static seqDiff(a, b) {
+    let diff = (a - b) & 0xffff;
+    if (diff > 0x8000) diff -= 0x10000;
+    return diff;
+  }
+
+  push(packet) {
+    if (!packet || packet.seq === undefined) return;
+    const seq = packet.seq & 0xffff;
+
+    if (this.lastSeq === null) {
+      this.lastSeq = seq;
+      this.onPacket(packet);
+      return;
+    }
+
+    const diff = ReorderBuffer.seqDiff(seq, this.lastSeq);
+    // Duplicate or old packet that already passed
+    if (diff <= 0) return;
+
+    if (diff === 1) {
+      // In-order immediate pass-through
+      this.lastSeq = seq;
+      this.onPacket(packet);
+      this.drainContiguous();
+      return;
+    }
+
+    // Gap detected (e.g. lastSeq 100, received 102): hold for missing 101
+    if (this.queue.some((p) => p.seq === seq)) return; // duplicate in buffer
+
+    this.queue.push(packet);
+    this.queue.sort((a, b) => ReorderBuffer.seqDiff(a.seq, b.seq));
+
+    if (this.queue.length > this.capacity) {
+      this.flushOldest();
+    } else if (!this.flushTimer && this.maxHoldMs > 0) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flushOldest();
+      }, this.maxHoldMs);
+    }
+  }
+
+  drainContiguous() {
+    while (this.queue.length > 0) {
+      const next = this.queue[0];
+      const diff = ReorderBuffer.seqDiff(next.seq, this.lastSeq);
+      if (diff === 1) {
+        this.queue.shift();
+        this.lastSeq = next.seq;
+        this.onPacket(next);
+      } else if (diff <= 0) {
+        this.queue.shift();
+      } else {
+        break;
+      }
+    }
+    if (this.queue.length === 0 && this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  flushOldest() {
+    if (this.queue.length === 0) return;
+    const oldest = this.queue.shift();
+    this.lastSeq = oldest.seq;
+    this.onPacket(oldest);
+    this.drainContiguous();
+  }
+
+  clear() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.queue = [];
+    this.lastSeq = null;
+  }
+}
+
 module.exports = {
   createSession, parse, isRtcp, dtmfPackets, rawPacket,
+  generateDtmfPcm, DTMF_FREQUENCIES,
+  createSilentNatPackets, ReorderBuffer,
   HEADER_LEN, SAMPLES_PER_PACKET, PT_DTMF, DTMF_CODES,
 };

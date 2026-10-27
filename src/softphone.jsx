@@ -11,6 +11,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api } from './api';
 import { useStore } from './store.jsx';
 import useWebRtc from './useWebRtc.js';
+import { playSoothingChime } from './utils/tones.js';
 
 const Ctx = createContext(null);
 export const useSoftphone = () => useContext(Ctx);
@@ -21,7 +22,7 @@ export function SoftphoneProvider({ children }) {
     findProspectByPhone, refreshProspects, refreshStats, prospects,
   } = useStore();
 
-  const enabled = settings?.telephony_mode === 'webrtc';
+  const enabled = settings?.telephony_mode === 'webrtc' || (typeof window !== 'undefined' && !!window.pulseNativeSip);
   const dryRun = settings?.dry_run === '1';
   const countryCode = settings?.default_country_code || '';
 
@@ -87,6 +88,7 @@ export function SoftphoneProvider({ children }) {
 
   // ---- a call became real --------------------------------------------------------------
   const onActive = useCallback((direction) => {
+    playSoothingChime('pickup');
     if (direction === 'inbound') {
       const rec = inboundRef.current;
       setInbound(rec ? { ...rec, answered: true } : null);
@@ -105,6 +107,7 @@ export function SoftphoneProvider({ children }) {
   }, [inboundRef, refreshStats, setActiveId, setInbound, setView]);
 
   const onEnded = useCallback((direction) => {
+    playSoothingChime('hangup');
     if (direction === 'inbound') {
       const rec = inboundRef.current;
       // Hand the finished call to the dialer, which owns the 1-8 disposition modal. The call

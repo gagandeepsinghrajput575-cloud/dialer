@@ -13,13 +13,43 @@ const digest = require('./digest');
 const REGISTER_EXPIRES = 300;
 const REFRESH_MARGIN = 0.8;              // refresh at 80% of the granted lifetime
 const RETRY_MS = [5000, 10000, 20000, 45000];
+const KEEPALIVE_MS = 20000;              // RFC 5626 NAT keep-alive interval (20s) to beat 30s router timeouts
 
 /**
  * Attach registration behaviour to a user agent.
  * @param {object} ua needs { transport, account, cseq, emit, log, userAgent }
  */
 function attach(ua) {
-  ua.registration = ua.registration || { state: 'unregistered', attempt: 0, timer: null, expires: REGISTER_EXPIRES, account: '' };
+  ua.registration = ua.registration || {
+    state: 'unregistered', attempt: 0, timer: null, keepaliveTimer: null,
+    expires: REGISTER_EXPIRES, account: '',
+  };
+
+  ua.sendKeepalive = function sendKeepalive() {
+    if (!ua.account?.domain || !ua.account?.port || ua.transport?.closed) return;
+    try {
+      ua.transport.send(Buffer.from('\r\n\r\n'), { host: ua.account.domain, port: ua.account.port }).catch(() => {});
+    } catch { /* best-effort NAT keepalive */ }
+  };
+
+  ua.startKeepalive = function startKeepalive() {
+    if (ua.registration.keepaliveTimer) return;
+    ua.registration.keepaliveTimer = setInterval(() => {
+      if (ua.account?.domain && (ua.registration.state === 'registered' || ua.registration.state === 'registering')) {
+        ua.sendKeepalive();
+      }
+    }, KEEPALIVE_MS);
+    if (ua.registration.keepaliveTimer?.unref) {
+      ua.registration.keepaliveTimer.unref();
+    }
+  };
+
+  ua.stopKeepalive = function stopKeepalive() {
+    if (ua.registration.keepaliveTimer) {
+      clearInterval(ua.registration.keepaliveTimer);
+      ua.registration.keepaliveTimer = null;
+    }
+  };
 
   ua.registerHeaders = function registerHeaders(uri, expires, viaBranch = branch()) {
     const aor = buildUri({ user: ua.account.user, host: ua.account.domain });
@@ -90,6 +120,7 @@ function attach(ua) {
       ua.registration.expires = granted;
       ua.emit('registered', { account: ua.registration.account, expires: granted });
       ua.scheduleRefresh(granted);
+      ua.startKeepalive();
       onComplete?.(res);
       return;
     }
@@ -153,12 +184,14 @@ function attach(ua) {
     // A human pressing "register" starts fresh; an automatic retry keeps climbing the ladder.
     // Success is the only other place attempt is zeroed (onRegisterResponse).
     if (resetBackoff) ua.registration.attempt = 0;
+    ua.startKeepalive();
     ua.sendRegister(expires, null);
     return { ok: true, account: ua.registration.account };
   };
 
   ua.unregister = function unregister() {
     ua.stopRegistrationTimer();
+    ua.stopKeepalive();
     if (!ua.account.domain || !ua.account.user) {
       ua.registration.state = 'unregistered';
       ua.emit('unregistered', { account: ua.registration.account });

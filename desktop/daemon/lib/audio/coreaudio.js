@@ -36,6 +36,29 @@ function create() {
       ? `coreaudio: ${addon.error}`
       : addon ? '' : `coreaudio: addon not built — ${BUILD_HINT}`;
   let unit = null;
+  let warmupSamplesRemaining = 160;
+  let jitterQueue = [];
+  let isPrimed = false;
+  let lastWriteTime = 0;
+  const JITTER_PRE_ROLL = 2; // 2 frames (40 ms) jitter cushion to eliminate starvation buzz
+
+  function sanitizeAndWarmup(frame) {
+    if (!frame || !frame.length) return frame;
+    for (let i = 0; i < frame.length; i++) {
+      const v = frame[i];
+      if (Number.isNaN(v) || !Number.isFinite(v)) {
+        frame[i] = 0;
+      }
+    }
+    if (warmupSamplesRemaining > 0) {
+      const count = Math.min(frame.length, warmupSamplesRemaining);
+      for (let i = 0; i < count; i++) {
+        frame[i] = 0;
+      }
+      warmupSamplesRemaining -= count;
+    }
+    return frame;
+  }
 
   return {
     name: 'coreaudio',
@@ -56,14 +79,58 @@ function create() {
     },
     start(onInput) {
       if (!unit) throw new Error('coreaudio: open() first');
-      addon.start(unit, (frame) => { try { onInput?.(frame); } catch { /* never stop the pump */ } });
+      warmupSamplesRemaining = 160; // 20 ms warmup at 8 kHz
+      addon.start(unit, (rawFrame) => {
+        try {
+          const frame = rawFrame instanceof Int16Array
+            ? rawFrame
+            : (Buffer.isBuffer(rawFrame)
+              ? new Int16Array(rawFrame.buffer, rawFrame.byteOffset, Math.floor(rawFrame.byteLength / 2))
+              : rawFrame);
+          sanitizeAndWarmup(frame);
+          onInput?.(frame);
+        } catch { /* never stop the pump */ }
+      });
     },
     write(int16) {
       if (!unit) return false;
-      try { addon.write(unit, int16); return true; } catch { return false; }
+      try {
+        const now = Date.now();
+        // If no audio arrived for > 150 ms (silence/pause), re-prime on the next burst
+        if (now - lastWriteTime > 150) {
+          isPrimed = false;
+          jitterQueue = [];
+        }
+        lastWriteTime = now;
+
+        if (!isPrimed) {
+          jitterQueue.push(int16);
+          if (jitterQueue.length >= JITTER_PRE_ROLL) {
+            isPrimed = true;
+            for (const chunk of jitterQueue) {
+              addon.write(unit, chunk);
+            }
+            jitterQueue = [];
+          }
+          return true;
+        }
+
+        const ok = addon.write(unit, int16);
+        return ok !== false;
+      } catch {
+        return false;
+      }
     },
-    stop() { if (unit) { try { addon.stop(unit); } catch { /* already stopped */ } } },
-    close() { this.stop(); if (unit) { try { addon.close(unit); } catch { /* already closed */ } unit = null; } },
+    stop() {
+      warmupSamplesRemaining = 160;
+      isPrimed = false;
+      jitterQueue = [];
+      if (unit) { try { addon.stop(unit); } catch { /* already stopped */ } }
+    },
+    close() {
+      this.stop();
+      if (unit) { try { addon.close(unit); } catch { /* already closed */ } unit = null; }
+    },
     devices() {
       if (!this.available()) return { inputs: [], outputs: [] };
       try { return addon.devices(); } catch { return { inputs: [], outputs: [] }; }

@@ -36,7 +36,7 @@ import { createRinger } from './utils/ringer.js';
 // engine (nativeSip.js), which has no peer connection but gives the same audible feedback.
 import {
   DTMF_KEYS, DTMF_TONES, audioContextCtor, createTonePlayer as tonePlayer, listAudioDevices,
-  mediaSupported, mediaUnavailableReason,
+  mediaSupported, mediaUnavailableReason, playSoothingChime,
 } from './utils/tones.js';
 // The other in-app engine: the headless SIP daemon the desktop app supervises. Same contract,
 // no microphone here — see nativeSip.js for why it exists and what it cannot do.
@@ -290,6 +290,7 @@ export default function useWebRtc({
     try { sipRef.current?.stop?.(); } catch { /* already gone */ }
     sipRef.current = null;
     releaseMedia();
+    playSoothingChime('hangup');
     setStateSafe('ended');
     setDirection(null);
     callbacksRef.current.onEnded?.(dir);
@@ -667,13 +668,14 @@ export default function useWebRtc({
     recordingCallIdRef.current = callId || null;
 
     if (callDryRun) {
-      // Test mode never touches the microphone. It plays a ringback, then pretends to connect.
-      playTone([440, 480], 900);
+      // 1 single soothing bell at dial, silence while waiting, then uplifting chime when connected.
+      playSoothingChime('dial');
       startSimulatedLevel();
       const dial = setTimeout(() => setStateSafe('dialing'), 120);
       const ring = setTimeout(() => setStateSafe('ringing'), 420);
       const live = setTimeout(() => {
         setStateSafe('active');
+        playSoothingChime('pickup');
         callbacksRef.current.onActive?.('outbound');
       }, 1400);
       tonesRef.current.push({ stop: () => { clearTimeout(dial); clearTimeout(ring); clearTimeout(live); } });
@@ -761,12 +763,11 @@ export default function useWebRtc({
     try {
       const PC = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
       if (PC) {
-        // Telnyx's STUN first; a public fallback second, so a network that blocks the
-        // carrier's STUN still gathers a candidate set instead of failing to connect.
+        // Public STUN servers for NAT candidate discovery
         const pc = new PC({
           iceServers: [
-            { urls: 'stun:stun.telnyx.com:3478' },
             { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
           ],
         });
         for (const track of stream.getTracks()) pc.addTrack(track, stream);
@@ -889,7 +890,7 @@ export default function useWebRtc({
 
     // The native engine's reply is the only evidence a digit was sent. Do not put it in the
     // "tones sent" log or return success until the daemon accepts it.
-    if (nativeRef.current?.live) {
+    if (nativeRef.current && (nativeRef.current.live || nativeRef.current.state === 'active' || nativeRef.current.state === 'ringing' || nativeRef.current.state === 'dialing')) {
       return Promise.resolve()
         .then(() => nativeRef.current.sendDtmf(key))
         .then((sent) => {

@@ -57,7 +57,10 @@ function start(prospectId, { tzOffset = null } = {}) {
 
   const dry = settings.getBool('dry_run');
   const proto = telephony.protocol();
-  const callMode = telephony.mode();
+  const rawMode = telephony.mode();
+  const native = softphoneSession.resolve();
+  const useNative = softphoneSession.isNative(native);
+  const callMode = useNative ? 'webrtc' : rawMode;
   const webrtc = callMode === 'webrtc';
   // A browser call is addressed to the SIP server over the WebSocket gateway; a softphone
   // call is an OS protocol URI. Keeping them distinct means the client can tell, from the
@@ -92,11 +95,6 @@ function start(prospectId, { tzOffset = null } = {}) {
   }
 
   const readiness = webrtc ? telephony.webrtcReadiness() : null;
-  // While the desktop supervisor holds a live native SIP daemon the call is placed by that
-  // daemon over UDP SIP, so the response carries the address it will actually dial. Call
-  // history keeps the gateway URI: that row describes the number, not the engine of the moment.
-  const native = webrtc ? softphoneSession.resolve() : null;
-  const useNative = softphoneSession.isNative(native);
 
   return {
     callId: call.id,
@@ -128,7 +126,7 @@ function start(prospectId, { tzOffset = null } = {}) {
       ? (readiness.configured ? null
         : `The in-browser softphone is missing: ${readiness.missing.join(', ')}. Add it in Settings → Telephony.`)
       : (!dry && !telephony.sipConfigured()
-        ? 'The Telnyx SIP account is not saved in Settings yet. Make sure Zoiper is registered before dialing.'
+        ? 'The FlyNumber SIP account is not saved in Settings yet. Make sure your softphone or native daemon is registered before dialing.'
         : null),
   };
 }

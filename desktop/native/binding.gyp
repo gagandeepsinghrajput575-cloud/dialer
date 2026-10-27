@@ -29,7 +29,7 @@
         ],
         [
           "target_arch=='arm64' and OS=='mac'",
-          { "xcode_settings": { "ARCHS": "arm64" } }
+          { "xcode_settings": { "ARCHS": [ "arm64" ] } }
         ]
       ]
     }

@@ -46,7 +46,8 @@ async function ensureServer(apiBase, repo) {
   }
 
   const entry = path.join(repo, 'server', 'index.js');
-  const child = spawn(process.execPath, [entry], {
+  const nodeBin = process.env.NODE_BINARY || '/Users/gaganrajput11/.nvm/versions/node/v24.16.0/bin/node';
+  const child = spawn(nodeBin, [entry], {
     cwd: repo,
     // Node mode: this file runs inside Electron, which is not a Node binary by default.
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },

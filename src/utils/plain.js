@@ -103,6 +103,8 @@ export function formatCallerNumber(raw, countryCode = '') {
 // on an unknown scheme never navigates the page away.
 export function dispatchDialUri(uri) {
   if (!uri || typeof document === 'undefined') return false;
+  // If the internal native SIP daemon is active, do not pop open external OS apps (e.g. Linphone)
+  if (typeof window !== 'undefined' && window.pulseNativeSip) return false;
   try {
     const a = document.createElement('a');
     a.href = uri;

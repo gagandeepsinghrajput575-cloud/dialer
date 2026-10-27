@@ -38,6 +38,8 @@ function parseArgs(argv) {
     if (!arg.startsWith('--')) continue;
     const eq = arg.indexOf('=');
     const name = (eq < 0 ? arg : arg.slice(0, eq)).slice(2);
+    if (name === 'keep-alive') { out.exitOnEof = false; continue; }
+    if (name === 'help') { out.help = true; continue; }
     const value = eq >= 0 ? arg.slice(eq + 1) : String(argv[++i] ?? '');
     switch (name) {
       case 'api-base': out.apiBase = value; break;
@@ -46,8 +48,6 @@ function parseArgs(argv) {
       case 'log-level': out.logLevel = value; break;
       case 'sip-port': out.sipPort = parseInt(value, 10) || 0; break;
       case 'public-ip': out.publicIp = value; break;
-      case 'keep-alive': out.exitOnEof = false; break;
-      case 'help': out.help = true; break;
       default: {
         const key = alias[name];
         if (key) out.account[key] = key === 'port' ? parseInt(value, 10) || 5060 : value;
@@ -80,6 +80,7 @@ async function main(argv = process.argv.slice(2)) {
     audio: chosen.backend,
     account: { transport: 'udp', ...opts.account },
     publicIp: opts.publicIp,
+    apiBase: opts.apiBase,
     log: (scope, message) => protocol.log('debug', `[${scope}] ${message}`),
   });
 
@@ -89,7 +90,7 @@ async function main(argv = process.argv.slice(2)) {
   // instead of reaching the screen.
   const forward = ['registered', 'unregistered', 'registering', 'registration_failed', 'incoming',
     'ringing', 'dialing', 'provisional', 'connected', 'ended', 'mute', 'dtmf', 'audio_level',
-    'state', 'rejected_incoming', 'error', 'media_timeout'];
+    'state', 'rejected_incoming', 'error', 'media_timeout', 'recording'];
   for (const name of forward) ua.on(name, (data) => protocol.emit(name, data || {}));
 
   protocol.start();
@@ -165,6 +166,10 @@ function applyAccount(ua, creds, inline = {}) {
 async function hydrate(opts, ua, protocol) {
   const { credentials: creds } = await credentials.load(opts.apiBase);
   const account = applyAccount(ua, creds, opts.account);
+  ua.audioDevices = {
+    inputDevice: creds.micDevice || opts.inputDevice || '',
+    outputDevice: creds.speakerDevice || opts.outputDevice || '',
+  };
   protocol.emit('account', { carrier: creds.carrier, account: `${account.user}@${account.domain}`, callerId: account.callerId });
   ua.register();
   return account;
@@ -175,20 +180,36 @@ async function dispatch(action, msg, { ua, opts, chosen }) {
     case 'hello': return { version: VERSION, audio: chosen.name, actions: [...require('./lib/protocol').ACTIONS] };
     case 'register': {
       if (msg.domain || msg.user || msg.password) {
-        ua.setAccount({
-          domain: msg.domain, port: Number(msg.port) || 5060, user: msg.user, password: msg.password,
-          callerId: msg.callerId || ua.account.callerId, transport: msg.transport || 'udp',
-          expires: Number(msg.expires) || 300,
-        });
-      } else if (opts.apiBase) {
-        const { credentials: creds } = await credentials.load(opts.apiBase);
-        applyAccount(ua, creds, {});
+        const patch = {
+          domain: msg.domain || ua.account.domain,
+          port: Number(msg.port) || ua.account.port || 5060,
+          user: msg.user || ua.account.user,
+          callerId: msg.callerId || ua.account.callerId,
+          transport: msg.transport || ua.account.transport || 'udp',
+          expires: Number(msg.expires) || ua.account.expires || 300,
+        };
+        if (msg.password) patch.password = msg.password;
+        ua.setAccount(patch);
+      }
+      if (!ua.account.password && opts.apiBase) {
+        try {
+          const { credentials: creds } = await credentials.load(opts.apiBase);
+          applyAccount(ua, creds, {});
+          if (creds.micDevice || creds.speakerDevice) {
+            ua.audioDevices = {
+              inputDevice: creds.micDevice || ua.audioDevices?.inputDevice || '',
+              outputDevice: creds.speakerDevice || ua.audioDevices?.outputDevice || '',
+            };
+          }
+        } catch (e) {
+          protocol.log('warn', `hydrate in register: ${e.message}`);
+        }
       }
       return ua.register({ expires: Number(msg.expires) || undefined });
     }
     case 'unregister': return ua.unregister();
     case 'dial': return ua.dial(msg.number, { callId: msg.callId ?? null });
-    case 'answer': return ua.answer(msg.callId);
+    case 'answer': return ua.answer(msg.callId, msg.externalId ?? null);
     case 'reject': return ua.reject(msg.callId, Number(msg.code) || 486);
     case 'hangup': return ua.hangup(msg.callId);
     case 'mute': return ua.setMute(msg.enabled === undefined ? !ua.muted : !!msg.enabled);
@@ -196,6 +217,16 @@ async function dispatch(action, msg, { ua, opts, chosen }) {
     case 'status': return ua.status();
     case 'devices': return chosen.backend.devices?.() || { inputs: [], outputs: [] };
     case 'audio': return chosen.backend.describe?.() || { name: chosen.name };
+    case 'audio-devices': {
+      if (msg.inputDevice !== undefined || msg.outputDevice !== undefined) {
+        ua.audioDevices = {
+          inputDevice: msg.inputDevice !== undefined ? msg.inputDevice : (ua.audioDevices?.inputDevice || ''),
+          outputDevice: msg.outputDevice !== undefined ? msg.outputDevice : (ua.audioDevices?.outputDevice || ''),
+        };
+        ua.audioOpened = false; // re-open with new devices on next call
+      }
+      return { ok: true, audioDevices: ua.audioDevices || {} };
+    }
     case 'log-level': return { level: msg.level };
     case 'shutdown': process.kill(process.pid, 'SIGTERM'); return { ok: true };
     default: return { ok: false, error: `Unknown action "${action}"` };

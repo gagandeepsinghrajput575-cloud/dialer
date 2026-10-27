@@ -14,8 +14,8 @@ import { dispatchDialUri, softphoneLabel } from '../utils.js';
 import { listAudioDevices } from '../useWebRtc.js';
 
 const MODES = [
-  { id: 'softphone', label: 'Desktop softphone', hint: 'Zoiper · Linphone · Telephone — Pulse hands the number to your OS softphone.' },
-  { id: 'webrtc', label: 'In-browser WebRTC softphone', hint: 'The call stays inside Pulse — no Zoiper, no OS app, nothing to install.' },
+  { id: 'webrtc', label: 'Built-in Pulse Dialer (In-App)', hint: 'Direct in-app dialing via FlyNumber — no Linphone, no external apps. Audio & controls stay 100% inside Pulse.' },
+  { id: 'softphone', label: 'External OS softphone', hint: 'Dispatches calls to Linphone or Zoiper via OS protocol handler.' },
 ];
 const PROTOCOLS = [
   { id: 'sip', label: 'sip:', hint: 'sip:+4520123456 — Zoiper registers the sip: scheme when you install it.' },
@@ -189,10 +189,9 @@ export default function SettingsPage() {
   const cc = String(f.default_country_code || '45').replace(/\D/g, '');
   const proto = f.softphone_protocol === 'tel' ? 'tel' : 'sip';
   const inBrowser = f.telephony_mode === 'webrtc';
-  const sipServer = f.telnyx_sip_server || 'sip.telnyx.com';
-  // Telnyx's WebRTC gateway is a single fixed endpoint, not a port/path derived from the SIP
-  // domain, so the placeholder states it outright instead of synthesising a URL.
-  const wsGateway = f.webrtc_ws_url || 'wss://rtc.telnyx.com';
+  const sipServer = f.flynumber_sip_server || f.telnyx_sip_server || 'sip.flynumber.com';
+  // WebSocket gateway placeholder
+  const wsGateway = f.webrtc_ws_url || 'wss://sip.flynumber.com:7443';
   // The two modes hand out completely different URIs, so the sample must not lie about which
   // one Pulse will actually dial.
   const sampleUri = inBrowser ? `sip:+${cc}20123456@${sipServer};transport=ws` : `${proto}:+${cc}20123456`;
@@ -231,7 +230,7 @@ export default function SettingsPage() {
       setResult({
         ok: true,
         msg: launched
-          ? `Launched ${r.dialUri} — ${softphoneLabel(r.telephonyMode)} should be dialing it now.${r.configured ? '' : ' (No Telnyx SIP connection saved yet — register it in your softphone first.)'}`
+          ? `Launched ${r.dialUri} — ${softphoneLabel(r.telephonyMode)} should be dialing it now.${r.configured ? '' : ' (No FlyNumber SIP connection saved yet — register it in your softphone first.)'}`
           : r.message,
       });
     } catch (e) { setResult({ ok: false, msg: e.message }); }
@@ -269,7 +268,7 @@ export default function SettingsPage() {
   return (
     <div className="settings">
       <header className="page-head">
-        <div><h1>Settings</h1><p>Point Pulse at your Telnyx SIP connection, pick your softphone, and set your daily targets.</p></div>
+        <div><h1>Settings</h1><p>Point Pulse at your FlyNumber SIP connection, pick your softphone or native daemon, and set your daily targets.</p></div>
         <button className="btn primary glow" onClick={save} disabled={saving}>{saving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} Save changes</button>
       </header>
 
@@ -280,14 +279,14 @@ export default function SettingsPage() {
             <h3>Test mode {f.dry_run ? 'is ON' : 'is OFF'}</h3>
             <p>{f.dry_run
               ? 'Nothing is dialed. Pulse simulates the call in the browser so you can try the flow safely.'
-              : `Calls are REAL: ${softphone} dials straight out over Telnyx and every second is billed.`}</p>
+              : `Calls are REAL: ${softphone} dials straight out over FlyNumber and every second is billed.`}</p>
           </div>
           <Switch checked={f.dry_run} onChange={(v) => setF({ ...f, dry_run: v })} />
         </div>
       </motion.section>
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.06 }}>
-        <div className="panel-title"><PhoneCall size={16} /> Telephony &amp; Telnyx (Denmark +45) <em>direct dialing</em></div>
+        <div className="panel-title"><PhoneCall size={16} /> Telephony &amp; FlyNumber (Denmark +45) <em>direct dialing</em></div>
 
         <div className="picker-grid">
           {MODES.map((m) => (
@@ -320,27 +319,22 @@ export default function SettingsPage() {
         </div>
 
         <div className="form two">
-          <label>Outbound caller ID (Danish number)<input value={f.caller_id} onChange={set('caller_id')} placeholder="+45 20 12 34 56" /></label>
+          <label>Outbound caller ID (Danish number)<input value={f.caller_id} onChange={set('caller_id')} placeholder="+45 32 33 16 10" /></label>
           <label>Default country code (numbers without +)<input value={f.default_country_code} onChange={set('default_country_code')} placeholder="45" /></label>
         </div>
 
-        <div className="panel-title sub"><KeyRound size={15} /> Telnyx SIP connection <em>Credential Auth</em></div>
-        {settings.has_password && <div className="banner ok"><ShieldCheck size={15} /> A SIP password is stored locally. Leave the field blank to keep it.</div>}
+        <div className="panel-title sub"><KeyRound size={15} /> FlyNumber Wholesale SIP Connection <em>UDP &amp; Native Daemon</em></div>
+        {(settings.has_flynumber_password || settings.has_password) && <div className="banner ok"><ShieldCheck size={15} /> A FlyNumber SIP password is stored locally. Leave the field blank to keep it.</div>}
         <div className="form two">
-          <label>SIP domain (FQDN)<input value={f.telnyx_sip_server} onChange={set('telnyx_sip_server')} placeholder="sip.telnyx.com" autoComplete="off" /></label>
-          <label>SIP username<input value={f.telnyx_sip_user} onChange={set('telnyx_sip_user')} placeholder="From the SIP Connection" autoComplete="off" /></label>
-          <label>SIP password<input type="password" value={f.telnyx_sip_password} onChange={set('telnyx_sip_password')} placeholder={settings.has_password ? '•••••••• (saved, leave blank to keep)' : 'Your SIP connection secret'} autoComplete="new-password" /></label>
+          <label>SIP domain (FQDN)<input value={f.flynumber_sip_server || f.telnyx_sip_server || ''} onChange={(e) => setF({ ...f, flynumber_sip_server: e.target.value, telnyx_sip_server: e.target.value })} placeholder="sip.flynumber.com" autoComplete="off" /></label>
+          <label>SIP username<input value={f.flynumber_sip_user || f.telnyx_sip_user || ''} onChange={(e) => setF({ ...f, flynumber_sip_user: e.target.value, telnyx_sip_user: e.target.value })} placeholder="FlyNumber Account SIP User (e.g. a2YqM0bsm)" autoComplete="off" /></label>
+          <label>SIP password<input type="password" value={f.flynumber_sip_password || f.telnyx_sip_password || ''} onChange={(e) => setF({ ...f, flynumber_sip_password: e.target.value, telnyx_sip_password: e.target.value })} placeholder={(settings.has_flynumber_password || settings.has_password) ? '•••••••• (saved, leave blank to keep)' : 'Your FlyNumber SIP password'} autoComplete="new-password" /></label>
           <label>Sample dial URI Pulse will dispatch<input readOnly value={sampleUri} className="mono" /></label>
-        </div>
-        <div className="panel-title sub"><KeyRound size={15} /> Telnyx API access <em>optional</em></div>
-        <div className="form two">
-          <label>API key<input type="password" value={f.telnyx_api_key} onChange={set('telnyx_api_key')} placeholder={settings.has_api_key ? '•••••••• (saved, leave blank to keep)' : 'KEY… (Mission Control → API Keys)'} autoComplete="new-password" /></label>
-          <label>SIP Connection ID<input value={f.telnyx_connection_id} onChange={set('telnyx_connection_id')} placeholder="Optional — for carrier automation" autoComplete="off" /></label>
         </div>
         <p className="muted small">
           {inBrowser
-            ? 'Your credential stays in this computer’s local database. Pulse releases it to the in-browser softphone only when you switch the handoff on below, and never to any other site.'
-            : 'Register the same Telnyx SIP connection in Zoiper. When you hit Call in Pulse Dialer, Zoiper places the call instantly with zero callback lag. The SIP secret stays in this computer’s local database and is never sent to the browser.'}
+            ? 'Your credential stays in this computer’s local database. Pulse releases it to the softphone or native daemon, and never exposes it to third-party sites.'
+            : 'Register the FlyNumber SIP connection in the native daemon or your softphone. When you hit Call in Pulse Dialer, calls place instantly with zero callback lag. The SIP secret stays in this computer’s local database.'}
         </p>
         <div className="row gap">
           <button className="btn" onClick={testSoftphone} disabled={testing}>
@@ -361,18 +355,42 @@ export default function SettingsPage() {
           <div className="form two">
             <label>
               WebSocket signalling URL
-              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder="wss://sip.telnyx.com:7443" className="mono" />
+              <input value={f.webrtc_ws_url} onChange={set('webrtc_ws_url')} placeholder="wss://sip.flynumber.com:7443" className="mono" />
             </label>
             <label>
               Microphone
-              <select value={f.webrtc_mic_device || ''} onChange={(e) => setF({ ...f, webrtc_mic_device: e.target.value })} disabled={!devices.inputs.length}>
+              <select
+                value={f.webrtc_mic_device || ''}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  const item = devices.inputs.find((d) => d.id === val);
+                  setF({
+                    ...f,
+                    webrtc_mic_device: val,
+                    webrtc_mic_name: item ? item.label : '',
+                  });
+                }}
+                disabled={!devices.inputs.length}
+              >
                 <option value="">System default</option>
                 {devices.inputs.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
               </select>
             </label>
             <label>
               Speaker
-              <select value={f.webrtc_speaker_device || ''} onChange={(e) => setF({ ...f, webrtc_speaker_device: e.target.value })} disabled={!devices.outputs.length}>
+              <select
+                value={f.webrtc_speaker_device || ''}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  const item = devices.outputs.find((d) => d.id === val);
+                  setF({
+                    ...f,
+                    webrtc_speaker_device: val,
+                    webrtc_speaker_name: item ? item.label : '',
+                  });
+                }}
+                disabled={!devices.outputs.length}
+              >
                 <option value="">System default</option>
                 {devices.outputs.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
               </select>
@@ -443,45 +461,37 @@ export default function SettingsPage() {
       )}
 
       <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.12 }}>
-        <div className="panel-title"><Headphones size={16} /> Telnyx setup <em>once, then it just dials</em></div>
+        <div className="panel-title"><Headphones size={16} /> FlyNumber setup <em>once, then it just dials</em></div>
         <ol className="setup-steps">
           <li>
-            In <b>Telnyx Mission Control</b>, create a <b>SIP Connection</b> with
-            <b> Credential Auth</b> (Connections → SIP). Copy its <b>username</b> and <b>secret</b>
-            into the fields above — the domain stays <b>sip.telnyx.com</b>.
+            In <b>FlyNumber Console</b>, obtain your <b>SIP Credentials</b> (server <b>sip.flynumber.com</b>,
+            port <b>5060</b>, username, and password). Enter them in the fields above.
           </li>
           <li>
-            Buy or port your Danish <b>+45</b> numbers, then assign them to that SIP Connection
-            (Numbers → your number → Connection).
+            Your Danish Copenhagen <b>+45 32 33 16 10</b> DID is configured for outbound dials and free unlimited inbound routing.
           </li>
           <li>
-            Set the connection's <b>outbound caller ID</b> to the Danish DID you want to present,
-            and paste the same number(s) into <b>Outbound caller ID</b> / the DID pool below so
-            Pulse rotates them.
+            Set the outbound caller ID to <b>+45 32 33 16 10</b> so outbound dials present your verified Danish business identity.
           </li>
           {inBrowser ? (
             <>
               <li>
-                In-browser mode needs no softphone: leave the gateway blank to use Telnyx's
-                <b> wss://sip.telnyx.com:7443</b>, then switch <b>SIP credential handoff</b> on and
-                press <b>Test microphone</b>.
+                In-app mode uses the native <b>pulse-sip-daemon</b> over UDP CoreAudio via the Electron desktop app, or the in-browser SIP softphone.
               </li>
               <li>
-                Press <kbd>C</kbd> in the Dialer: the call connects in this tab. <kbd>M</kbd> mutes,
-                <kbd>D</kbd> opens the touch-tone pad, <kbd>H</kbd> hangs up into classification —
-                and the microphone is released the moment you do.
+                Press <kbd>C</kbd> in the Dialer: the call connects instantly. <kbd>M</kbd> mutes,
+                <kbd>D</kbd> opens the touch-tone pad, <kbd>H</kbd> hangs up into classification.
               </li>
             </>
           ) : (
             <>
               <li>
-                Install <b>Zoiper 5</b> (or Linphone) and add a SIP account: domain{' '}
-                <b>{sipServer}</b>, plus the username and secret from your Telnyx SIP Connection.
-                Wait for the green <b>Registered</b> badge.
+                Add a SIP account in <b>Zoiper</b> or <b>Linphone</b>: domain{' '}
+                <b>{sipServer}</b>, plus your FlyNumber SIP username and secret.
               </li>
               <li>
-                Make Zoiper the default app for <b>{proto}:</b> links (Zoiper does this on install),
-                then turn <b>Test mode OFF</b> and press <kbd>C</kbd> in the Dialer — Zoiper dials
+                Make your softphone the default app for <b>{proto}:</b> links,
+                then turn <b>Test mode OFF</b> and press <kbd>C</kbd> in the Dialer — the softphone dials
                 the prospect instantly while your notes, timer and 1–8 shortcuts stay live.
               </li>
             </>
@@ -489,10 +499,12 @@ export default function SettingsPage() {
         </ol>
       </motion.section>
 
-      {/* FLYNUMBER COPENHAGEN INBOUND DID & HYBRID ARCHITECTURE HUB */}
+      {/* FLYNUMBER COPENHAGEN INBOUND DID & WHOLESALE SIP HUB */}
       {(() => {
         const isWebRtcInbound = (f.inbound_routing_mode || 'webrtc') === 'webrtc' || f.telephony_mode === 'webrtc';
-        const telnyxForwardingUri = f.telnyx_sip_user ? `sip:${f.telnyx_sip_user}@${f.telnyx_sip_server || 'sip.telnyx.com'}` : '';
+        const flyForwardingUri = f.flynumber_sip_user
+          ? `sip:${f.flynumber_sip_user}@${f.flynumber_sip_server || 'sip.flynumber.com'}`
+          : (f.telnyx_sip_user ? `sip:${f.telnyx_sip_user}@${f.flynumber_sip_server || 'sip.flynumber.com'}` : '');
 
         return (
           <motion.section className="glass pad-lg" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
@@ -510,11 +522,11 @@ export default function SettingsPage() {
                   </span>
                   <span className="cph-pill clean">180.dk Clean</span>
                   <span className="cph-pill" style={{ background: 'rgba(99, 102, 241, 0.12)', borderColor: 'rgba(99, 102, 241, 0.3)', color: '#818cf8' }}>
-                    {isWebRtcInbound ? '🎧 In-Browser Ringing' : '🖥️ Linphone Desktop'}
+                    {isWebRtcInbound ? '🎧 In-App Native SIP' : '🖥️ Linphone Desktop'}
                   </span>
                 </div>
                 <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
-                  Copenhagen business landline DID ($2.95/mo). Outbound dials via Telnyx wholesale; all prospect return calls route for free ($0.00/min) directly into {isWebRtcInbound ? 'this browser tab' : 'Linphone'}.
+                  Copenhagen business landline DID ($2.95/mo). Outbound dials via FlyNumber wholesale SIP; all prospect return calls route for free ($0.00/min) directly into {isWebRtcInbound ? 'this app' : 'Linphone'}.
                 </p>
               </div>
               <div className="flynumber-badges">
@@ -542,7 +554,7 @@ export default function SettingsPage() {
                   className={`btn sm ${isWebRtcInbound ? 'primary' : ''}`}
                   onClick={() => setF({ ...f, inbound_routing_mode: 'webrtc', telephony_mode: 'webrtc' })}
                 >
-                  <Globe size={13} /> Built-in Browser App (WebRTC)
+                  <Globe size={13} /> Built-in App (Native SIP / WebRTC)
                 </button>
                 <button
                   type="button"
@@ -559,10 +571,10 @@ export default function SettingsPage() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
                   <div>
                     <b style={{ color: '#38bdf8', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Globe size={16} /> 100% In-Browser Inbound Enabled (Zero Extra Apps)
+                      <Globe size={16} /> In-App Inbound Enabled (Zero Extra Apps)
                     </b>
                     <p className="muted small" style={{ margin: '6px 0 0 0' }}>
-                      FlyNumber forwards return calls to your Telnyx SIP connection. Telnyx streams incoming audio via WebRTC straight into this browser tab at <b>$0.00/min</b>.
+                      FlyNumber forwards return calls to your FlyNumber SIP account. The native SIP daemon streams incoming audio directly at <b>$0.00/min</b>.
                     </p>
                   </div>
                   <button
@@ -572,13 +584,13 @@ export default function SettingsPage() {
                     onClick={() => {
                       if (softphoneEngine?.simulateIncomingCall) {
                         softphoneEngine.simulateIncomingCall('+45 32 33 16 10');
-                        toast('In-browser ringer triggered! Press Enter to answer.');
+                        toast('In-app ringer triggered! Press Enter to answer.');
                       } else {
-                        toast('Softphone ringer is ready in WebRTC mode.');
+                        toast('Softphone ringer is ready in in-app mode.');
                       }
                     }}
                   >
-                    <Bell size={13} /> Test In-Browser Ringer
+                    <Bell size={13} /> Test In-App Ringer
                   </button>
                 </div>
 
@@ -587,16 +599,16 @@ export default function SettingsPage() {
                     FlyNumber Call Forwarding Destination (SIP URI)
                   </label>
                   <div className="linphone-quick-box" style={{ display: 'flex', alignItems: 'center', background: 'rgba(15, 23, 42, 0.7)', borderRadius: 8, padding: '8px 12px', border: '1px solid rgba(255, 255, 255, 0.1)' }}>
-                    <span style={{ fontFamily: 'monospace', fontSize: 13, color: f.telnyx_sip_user ? '#f8fafc' : '#fbbf24', flex: 1 }}>
-                      {f.telnyx_sip_user ? telnyxForwardingUri : '⚠️ Enter your Telnyx SIP username above to generate your forwarding address'}
+                    <span style={{ fontFamily: 'monospace', fontSize: 13, color: (f.flynumber_sip_user || f.telnyx_sip_user) ? '#f8fafc' : '#fbbf24', flex: 1 }}>
+                      {(f.flynumber_sip_user || f.telnyx_sip_user) ? flyForwardingUri : '⚠️ Enter your FlyNumber SIP username above to generate your forwarding address'}
                     </span>
                     <button
                       type="button"
                       className="btn sm primary"
-                      disabled={!f.telnyx_sip_user}
+                      disabled={!f.flynumber_sip_user && !f.telnyx_sip_user}
                       style={{ padding: '4px 12px', fontSize: 12 }}
                       onClick={() => {
-                        navigator.clipboard?.writeText(telnyxForwardingUri);
+                        navigator.clipboard?.writeText(flyForwardingUri);
                         toast('Copied FlyNumber Forwarding SIP URI');
                       }}
                     >
@@ -611,7 +623,7 @@ export default function SettingsPage() {
             ) : (
               <>
                 <div className="panel-title sub"><KeyRound size={15} /> FlyNumber Inbound SIP Credentials <em>sip.flynumber.com</em></div>
-                {settings.has_flynumber_password && (
+                {(settings.has_flynumber_password || settings.has_password) && (
                   <div className="banner ok"><ShieldCheck size={15} /> FlyNumber SIP secret is saved locally. Leave blank to keep it.</div>
                 )}
                 <div className="form two">
@@ -640,7 +652,7 @@ export default function SettingsPage() {
               </>
             )}
 
-            <div className="panel-title sub" style={{ marginTop: 18 }}><Headphones size={15} /> The Bridge: 4 Steps to Free Inbound &amp; Verified Outbound</div>
+            <div className="panel-title sub" style={{ marginTop: 18 }}><Headphones size={15} /> FlyNumber Setup: 4 Steps to Free Inbound &amp; Verified Outbound</div>
             <div className="bridge-wizard">
               <div className={`bridge-step-card ${f.flynumber_status === 'active' ? 'completed' : ''}`}>
                 <div className="bridge-step-num">1</div>
@@ -668,42 +680,42 @@ export default function SettingsPage() {
                 <div className="bridge-step-num">2</div>
                 <div className="bridge-step-body">
                   <div className="bridge-step-title">
-                    <span>{isWebRtcInbound ? '2. Route FlyNumber to Built-in App' : '2. Connect Linphone Softphone'}</span>
+                    <span>{isWebRtcInbound ? '2. Route FlyNumber to Built-in App' : '2. Connect Softphone'}</span>
                     <button
                       type="button"
                       className={`btn sm ${f.flynumber_linphone_configured === '1' ? 'ok' : ''}`}
                       onClick={() => setF({ ...f, flynumber_linphone_configured: f.flynumber_linphone_configured === '1' ? '0' : '1' })}
                     >
-                      {f.flynumber_linphone_configured === '1' ? (isWebRtcInbound ? '✓ Forwarding Active' : '✓ Linphone Logged In') : (isWebRtcInbound ? 'Mark as Forwarded' : 'Mark as Connected')}
+                      {f.flynumber_linphone_configured === '1' ? (isWebRtcInbound ? '✓ Forwarding Active' : '✓ Softphone Logged In') : (isWebRtcInbound ? 'Mark as Forwarded' : 'Mark as Connected')}
                     </button>
                   </div>
                   <div className="bridge-step-desc">
                     {isWebRtcInbound
-                      ? `In FlyNumber portal, set Call Forwarding on +45 32 33 16 10 to SIP URI: ${telnyxForwardingUri || 'sip:<telnyx_user>@sip.telnyx.com'}. Return calls will ring inside this browser tab.`
-                      : `Add SIP account in Linphone with domain ${f.flynumber_sip_server || 'sip.flynumber.com'}, username, and secret. Confirm registration is green.`
+                      ? `In FlyNumber portal, set Call Forwarding on +45 32 33 16 10 to SIP URI: ${flyForwardingUri || 'sip:<user>@sip.flynumber.com'}. Return calls will ring inside this app.`
+                      : `Add SIP account in your softphone with domain ${f.flynumber_sip_server || 'sip.flynumber.com'}, username, and secret. Confirm registration is green.`
                     }
                   </div>
                 </div>
               </div>
 
-              <div className={`bridge-step-card ${f.telnyx_caller_id_verified === '1' ? 'completed' : ''}`}>
+              <div className={`bridge-step-card ${f.telnyx_caller_id_verified === '1' || f.flynumber_caller_id_verified === '1' ? 'completed' : ''}`}>
                 <div className="bridge-step-num">3</div>
                 <div className="bridge-step-body">
                   <div className="bridge-step-title">
-                    <span>3. Trigger Telnyx Verification Call</span>
+                    <span>3. Verify Copenhagen Line</span>
                     <button
                       type="button"
-                      className={`btn sm ${f.telnyx_caller_id_verified === '1' ? 'ok' : ''}`}
-                      onClick={() => setF({ ...f, telnyx_caller_id_verified: f.telnyx_caller_id_verified === '1' ? '0' : '1' })}
+                      className={`btn sm ${(f.telnyx_caller_id_verified === '1' || f.flynumber_caller_id_verified === '1') ? 'ok' : ''}`}
+                      onClick={() => {
+                        const next = (f.telnyx_caller_id_verified === '1' || f.flynumber_caller_id_verified === '1') ? '0' : '1';
+                        setF({ ...f, telnyx_caller_id_verified: next, flynumber_caller_id_verified: next });
+                      }}
                     >
-                      {f.telnyx_caller_id_verified === '1' ? '✓ PIN Verified' : 'Confirm 6-Digit PIN'}
+                      {(f.telnyx_caller_id_verified === '1' || f.flynumber_caller_id_verified === '1') ? '✓ Line Verified' : 'Confirm Verification'}
                     </button>
                   </div>
                   <div className="bridge-step-desc">
-                    {isWebRtcInbound
-                      ? 'In Telnyx Portal, click "Verify via Call" on +45 32 33 16 10. This browser tab will ring immediately for free! Click Answer, note the 6-digit PIN, and enter into Telnyx.'
-                      : 'In Telnyx Portal, click "Verify via Call" on +45 32 33 16 10. Linphone rings for free over FlyNumber SIP. Answer call, note 6-digit PIN, and enter into Telnyx.'
-                    }
+                    FlyNumber verification test confirms two-way audio reachability on +45 32 33 16 10.
                   </div>
                 </div>
               </div>
@@ -725,7 +737,7 @@ export default function SettingsPage() {
                     </button>
                   </div>
                   <div className="bridge-step-desc">
-                    With ownership verified, Telnyx stamps every outbound dial with your clean Copenhagen office number (+45 32 33 16 10).
+                    With ownership verified, FlyNumber stamps every outbound dial with your clean Copenhagen office number (+45 32 33 16 10).
                   </div>
                 </div>
               </div>

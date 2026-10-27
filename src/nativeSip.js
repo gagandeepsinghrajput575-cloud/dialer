@@ -1,7 +1,7 @@
 // Native SIP adapter: maps daemon IPC/events to useWebRtc's state contract. Recording is unsupported.
 import { audioIssueMessage, formatCallerNumber, holdCrossTabLock } from './utils/plain.js';
 import { createRinger } from './utils/ringer.js';
-import { createTonePlayer, DTMF_TONES, BUSY_TONE, RINGBACK_TONE } from './utils/tones.js';
+import { createTonePlayer, DTMF_TONES, BUSY_TONE, RINGBACK_TONE, playSoothingChime } from './utils/tones.js';
 
 /** The bridge `desktop/preload.js` exposes. Absent in a plain browser tab. */
 const bridge = () => (typeof window !== 'undefined' ? window.pulseNativeSip || null : null);
@@ -40,6 +40,8 @@ export function createNativeEngine(opts) {
   let tones = [];
   let ringer = null;
   let registrationPromise = null;
+  let activeCallId = null;
+  let lastCallId = null;
 
   const tone = createTonePlayer({ get current() { return tones; }, set current(v) { tones = v; } });
   const go = (next) => { if (!disposed) { state = next; setState(next); } };
@@ -121,14 +123,16 @@ export function createNativeEngine(opts) {
     const ringing = entry;
     if (!ringing) return { ok: false, reason: 'no-incoming' };
     const dialogId = ringing.dialogId;
+    const crmCallId = ringing.callId || null;
+    if (crmCallId) lastCallId = crmCallId;
     const res = await send('answer', { callId: dialogId });
     if (!res?.ok) { setError(res?.error || 'The daemon could not answer that call.'); return res; }
     stopRinger();
     // Either event/reply order must avoid resurrecting a canceled ring or reporting twice.
-    if (live && String(live.callId) === String(dialogId)) return res;
+    if (live && (String(live.callId) === String(crmCallId || dialogId) || String(live.callId) === String(dialogId) || String(live.dialogId) === String(dialogId))) return res;
     if (entry !== ringing) return { ok: false, reason: 'ring-ended' };
     ringing.answered = true;
-    live = { callId: dialogId, direction: 'inbound' };
+    live = { callId: crmCallId || dialogId, dialogId, direction: 'inbound' };
     entry = null;
     setIncomingCall(null);
     setDirection('inbound');
@@ -170,8 +174,12 @@ export function createNativeEngine(opts) {
     setTarget(target);
     setError('');
     go('dialing');
+    playSoothingChime('dial');
+    activeCallId = callId;
+    if (callId) lastCallId = callId;
     const res = await send('dial', { number: target, callId });
     if (!res?.ok) {
+      activeCallId = null;
       setError(res?.error || 'The daemon refused that dial.');
       go('error');
       return res;
@@ -228,7 +236,7 @@ export function createNativeEngine(opts) {
         beginRing(msg);
         break;
       case 'ringing':
-        if (live?.direction === 'outbound') tone(RINGBACK_TONE, 1600);
+        // 1 soothing bell already played on dial; no repeating beep-beep ringing
         if (state === 'dialing') go('ringing');
         break;
       case 'dialing':
@@ -240,11 +248,14 @@ export function createNativeEngine(opts) {
       case 'connected': {
         stopRinger();
         stopTones();
-        const callId = msg.callId ?? entry?.dialogId ?? live?.callId ?? null;
-        const alreadyLive = live && String(live.callId) === String(callId);
+        playSoothingChime('pickup');
+        const dialogId = msg.callId ?? entry?.dialogId ?? null;
+        const callId = msg.externalId ?? activeCallId ?? (entry && entry.callId !== entry.dialogId ? entry.callId : null) ?? msg.callId ?? live?.callId ?? null;
+        if (callId) lastCallId = callId;
+        const alreadyLive = live && (String(live.callId) === String(callId) || (dialogId && String(live.dialogId) === String(dialogId)));
         const direction = alreadyLive ? live.direction : entry ? 'inbound' : 'outbound';
         if (!alreadyLive) {
-          live = { callId, direction };
+          live = { callId, dialogId: dialogId || callId, direction };
           if (entry) entry.answered = true;
           entry = null;
           setIncomingCall(null);
@@ -265,6 +276,7 @@ export function createNativeEngine(opts) {
         const direction = live?.direction || (entry ? 'inbound' : 'outbound');
         const wasLive = !!live;
         const reason = msg.reason || 'normal';
+        playSoothingChime('hangup');
         if (entry && !wasLive) { entry.endReason = reason; endRing(reason); }
         else {
           teardown();
@@ -272,13 +284,26 @@ export function createNativeEngine(opts) {
           cb().onEnded?.(direction);
           setTimeout(() => { if (!disposed && state === 'ended') go('standby'); }, 400);
         }
-        if (reason === 'busy' && !wasLive) tone(BUSY_TONE, 900);
         if (msg.detail && !wasLive) setError('');
         break;
       }
       case 'rejected_incoming':
         endRing(msg.reason || 'rejected');
         break;
+      case 'recording': {
+        const recCallId = msg.externalId || msg.callId || live?.callId || activeCallId || lastCallId;
+        let blob = null;
+        if (msg.wavBase64 && typeof atob === 'function') {
+          try {
+            const bin = atob(msg.wavBase64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            blob = new Blob([arr], { type: 'audio/wav' });
+          } catch { /* ignore base64 decode failures */ }
+        }
+        cb().onRecordingReady?.({ blob, durationSec: msg.durationSec || 0, callId: recCallId });
+        break;
+      }
       case 'ready':
         audioIssue = audioIssueMessage(msg);
         if (registered) badge(audioIssue ? 'unavailable' : 'ready', audioIssue);
@@ -291,6 +316,25 @@ export function createNativeEngine(opts) {
         badge('unavailable', `The SIP daemon stopped (${msg.reason || 'unknown reason'}).`);
         if (live || entry) { const d = live?.direction || 'inbound'; teardown(); go('error'); cb().onEnded?.(d); }
         break;
+      case 'supervisor':
+        if (msg.restarting) {
+          registered = false;
+          activeCallId = null;
+          lastCallId = null;
+          const restartReason = `SIP daemon restarting (attempt ${msg.attempt || 1})…`;
+          badge('unavailable', restartReason);
+          setError(msg.error || msg.reason || msg.message || restartReason);
+          const hadCall = live || entry || state === 'dialing' || state === 'ringing' || state === 'incoming' || state === 'active';
+          if (hadCall) {
+            const d = live?.direction || (entry ? 'inbound' : 'outbound');
+            teardown();
+            go('error');
+            cb().onEnded?.(d);
+          }
+        } else if (msg.error) {
+          setError(msg.error);
+        }
+        break;
       default: break; // 'log', 'state', 'dtmf': useful in the log, nothing to render
     }
   };
@@ -299,7 +343,11 @@ export function createNativeEngine(opts) {
 
   /** Register once; the standby effect and a fast outbound dial may race each other. */
   async function start() {
-    if (!b) { badge('unavailable', 'This browser has no native SIP bridge.'); return { ok: false }; }
+    if (!b) {
+      const msg = 'This browser tab has no native SIP bridge. Please use the Pulse Desktop app (npm run desktop) or an external softphone.';
+      badge('unavailable', msg);
+      return { ok: false, error: msg };
+    }
     if (registrationPromise) return registrationPromise;
     registrationPromise = (async () => {
       try {

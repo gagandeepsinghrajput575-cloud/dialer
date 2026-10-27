@@ -46,6 +46,113 @@ export function mediaUnavailableReason() {
 }
 
 /**
+ * Soothing call cues — gentle harmonic bells replacing anxiety-inducing repetitive telephony beepers.
+ *
+ * - 'dial': 1 single calming bell (E5 + harmonic) that rings once and fades to peaceful silence.
+ * - 'pickup': an uplifting ascending 2-bell chime (C5 -> G5) to signal they answered.
+ * - 'hangup': a gentle descending 2-bell chime (E5 -> B4) to signal call closure without harsh busy-beeps.
+ */
+let lastChime = { type: '', at: 0 };
+
+export function playSoothingChime(type = 'dial', sink = null) {
+  const nowMs = Date.now();
+  if (lastChime.type === type && nowMs - lastChime.at < 350) return;
+  lastChime = { type, at: nowMs };
+
+  const Ctx = audioContextCtor();
+  if (!Ctx) return;
+  let ctx = null;
+  const activeNodes = [];
+
+  try {
+    ctx = new Ctx();
+    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+      try { ctx.resume()?.catch?.(() => {}); } catch {}
+    }
+
+    const now = ctx.currentTime || 0;
+
+    const ringBell = (freq, startTime, duration = 1.3, peakGain = 0.07) => {
+      const harmonicFreqs = [freq, freq * 2.0];
+      const harmonicGains = [peakGain, peakGain * 0.32];
+
+      harmonicFreqs.forEach((f, idx) => {
+        try {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          if (osc.frequency && typeof osc.frequency.setValueAtTime === 'function') {
+            osc.frequency.setValueAtTime(f, startTime);
+          } else if (osc.frequency) {
+            osc.frequency.value = f;
+          }
+
+          const gMax = harmonicGains[idx];
+          if (gain.gain && typeof gain.gain.setValueAtTime === 'function') {
+            gain.gain.setValueAtTime(0.0001, startTime);
+            if (typeof gain.gain.exponentialRampToValueAtTime === 'function') {
+              gain.gain.exponentialRampToValueAtTime(gMax, startTime + 0.02);
+              gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+            } else if (typeof gain.gain.linearRampToValueAtTime === 'function') {
+              gain.gain.linearRampToValueAtTime(gMax, startTime + 0.02);
+              gain.gain.linearRampToValueAtTime(0, startTime + duration);
+            } else {
+              gain.gain.setValueAtTime(gMax, startTime);
+              gain.gain.setValueAtTime(0, startTime + duration);
+            }
+          }
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          if (typeof osc.start === 'function') osc.start(startTime);
+          if (typeof osc.stop === 'function') osc.stop(startTime + duration);
+          activeNodes.push(osc, gain);
+        } catch {}
+      });
+    };
+
+    let totalDuration = 1.4;
+    if (type === 'dial') {
+      // 1 single soothing warm bell (E5)
+      ringBell(659.25, now, 1.4, 0.07);
+      totalDuration = 1.5;
+    } else if (type === 'pickup') {
+      // Uplifting ascending chime: C5 (523.25 Hz) -> G5 (783.99 Hz)
+      ringBell(523.25, now, 0.55, 0.06);
+      ringBell(783.99, now + 0.12, 0.9, 0.08);
+      totalDuration = 1.2;
+    } else if (type === 'hangup') {
+      // Gentle descending closure chime: E5 (659.25 Hz) -> B4 (493.88 Hz)
+      ringBell(659.25, now, 0.45, 0.05);
+      ringBell(493.88, now + 0.12, 0.7, 0.06);
+      totalDuration = 1.0;
+    }
+
+    const entry = {
+      ctx,
+      stop: () => {
+        for (const n of activeNodes) {
+          try { if (typeof n.stop === 'function') n.stop(); n.disconnect?.(); } catch {}
+        }
+        try { if (ctx && ctx.state !== 'closed' && typeof ctx.close === 'function') ctx.close(); } catch {}
+      },
+    };
+
+    if (sink && Array.isArray(sink.current)) sink.current.push(entry);
+
+    setTimeout(() => {
+      try { entry.stop(); } catch {}
+      if (sink && Array.isArray(sink.current)) {
+        sink.current = sink.current.filter((e) => e !== entry);
+      }
+    }, Math.round(totalDuration * 1000) + 150);
+  } catch {
+    try { if (ctx && ctx.state !== 'closed' && typeof ctx.close === 'function') ctx.close(); } catch {}
+  }
+}
+
+/**
  * Build the local tone player.
  *
  * @param {{current: Array}} sink - a ref-like object holding the live tones, so the caller can
@@ -53,7 +160,18 @@ export function mediaUnavailableReason() {
  * @returns {(freqs: number[], ms: number) => void}
  */
 export function createTonePlayer(sink) {
-  return (freqs, ms) => {
+  const tone = (freqs, ms) => {
+    // Intercept repetitive US ringback [440, 480] and play the single soothing bell instead!
+    if (Array.isArray(freqs) && freqs.length === 2 && freqs[0] === 440 && freqs[1] === 480) {
+      playSoothingChime('dial', sink);
+      return;
+    }
+    // Intercept harsh busy signal [480, 620] and play the gentle hangup chime instead!
+    if (Array.isArray(freqs) && freqs.length === 2 && freqs[0] === 480 && freqs[1] === 620) {
+      playSoothingChime('hangup', sink);
+      return;
+    }
+
     const Ctx = audioContextCtor();
     if (!Ctx) return;
     let ctx, gain, oscs = [];
@@ -75,10 +193,12 @@ export function createTonePlayer(sink) {
         try { gain.disconnect(); } catch {}
         try { if (ctx.state !== 'closed') ctx.close(); } catch {}
       }};
-      sink.current.push(entry);
+      if (sink && Array.isArray(sink.current)) sink.current.push(entry);
       setTimeout(() => {
         try { entry.stop(); } catch {}
-        sink.current = sink.current.filter((e) => e !== entry);
+        if (sink && Array.isArray(sink.current)) {
+          sink.current = sink.current.filter((e) => e !== entry);
+        }
       }, ms);
     } catch {
       // Ensure partial context is closed on failure
@@ -86,6 +206,9 @@ export function createTonePlayer(sink) {
       try { if (ctx && ctx.state !== 'closed') ctx.close(); } catch {}
     }
   };
+
+  tone.chime = (type) => playSoothingChime(type, sink);
+  return tone;
 }
 
 /**

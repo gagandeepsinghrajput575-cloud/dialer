@@ -82,14 +82,14 @@ ok('Step 4 (Caller ID Override) completes when Copenhagen DID is stamped as acti
 // 7. In-Browser WebRTC Forwarding URI
 settingsRepo.set('telephony_mode', 'webrtc');
 settingsRepo.set('inbound_routing_mode', 'webrtc');
-settingsRepo.set('telnyx_sip_user', 'telnyx_cph_agent');
+settingsRepo.set('flynumber_sip_user', 'fly_cph_agent');
 const webrtcCfg = telephony.flynumberConfig();
 assert.strictEqual(webrtcCfg.isWebRtcMode, true);
-assert.strictEqual(webrtcCfg.webrtcForwardingUri, 'sip:telnyx_cph_agent@sip.telnyx.com');
+assert.strictEqual(webrtcCfg.webrtcForwardingUri, 'sip:fly_cph_agent@sip.flynumber.com');
 assert.strictEqual(webrtcCfg.bridgeSteps[1].id, 'forwarding');
 assert.strictEqual(webrtcCfg.bridgeSteps[1].title, 'Route FlyNumber to Built-in App');
-assert.ok(webrtcCfg.bridgeSteps[1].description.includes('sip:telnyx_cph_agent@sip.telnyx.com'));
-ok('In-Browser WebRTC mode generates correct Telnyx forwarding URI and dynamic bridge steps');
+assert.ok(webrtcCfg.bridgeSteps[1].description.includes('sip:fly_cph_agent@sip.flynumber.com'));
+ok('In-Browser WebRTC mode generates correct FlyNumber forwarding URI and dynamic bridge steps');
 
 // Clean up
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }

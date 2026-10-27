@@ -21,7 +21,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Telnyx & Softphone-powered dialer + mini CRM (layered Express backend, Danish cold-calling superpowers)",
+  "description": "FlyNumber & Native Softphone-powered dialer + mini CRM (layered Express backend, Danish cold-calling superpowers)",
   "dependencies": {
     "better-sqlite3": "^12.11.1",
     "cors": "^2.8.6",
@@ -38,6 +38,7 @@
     "@dnd-kit/core": "^6.3.1",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^9.2.4",
+    "electron": "^33.4.11",
     "framer-motion": "^13.5.0",
     "jsdom": "^30.1.2",
     "lucide-react": "^1.49.0",

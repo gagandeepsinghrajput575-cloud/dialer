@@ -29,4 +29,9 @@ router.post('/prospects/:id/follow-up-email', validate(s.emailRender), c.followU
 router.get('/flynumber', c.flynumber);
 router.post('/flynumber', c.updateFlynumber);
 
+// Azure Neural Speech Synthesis with SSML prosody, breaks, and channel formatting
+router.post('/tts/synthesize', c.synthesizeTts);
+router.get('/tts/synthesize', c.synthesizeTts);
+router.post('/tts/generate-greeting', c.generateGreetingTts);
+
 module.exports = router;

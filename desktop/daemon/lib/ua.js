@@ -16,15 +16,18 @@ const { Dialog } = require('./dialog');
 const registration = require('./register');
 const mediaLayer = require('./media');
 const sdp = require('./sdp');
+const rtp = require('./rtp');
+const g711 = require('./g711');
 
 class UserAgent extends EventEmitter {
-  constructor({ transport, audio, account, userAgent = 'PulseSIP/1.0', publicIp = '', log = () => {} }) {
+  constructor({ transport, audio, account, userAgent = 'PulseSIP/1.0', publicIp = '', apiBase = '', log = () => {} }) {
     super();
     this.transport = transport;
     this.audio = audio;
     this.account = { port: 5060, transport: 'udp', expires: registration.REGISTER_EXPIRES, ...(account || {}) };
     this.userAgent = userAgent;
     this.publicIp = publicIp;
+    this.apiBase = apiBase;
     this.logFn = log;
     this.dialogs = new Map();
     this.active = null;
@@ -49,7 +52,11 @@ class UserAgent extends EventEmitter {
     // the refresh at 80% of the expiry could no longer authenticate: the phone went deaf to
     // inbound calls a few minutes into a shift, which reads as "the app stops working randomly".
     const patch = {};
-    for (const [k, v] of Object.entries(account || {})) if (v !== undefined) patch[k] = v;
+    for (const [k, v] of Object.entries(account || {})) {
+      if (v === undefined) continue;
+      if (k === 'password' && !v && this.account.password) continue;
+      patch[k] = v;
+    }
     const next = { ...this.account, ...patch };
     const changed = ['domain', 'user', 'password', 'port', 'callerId']
       .some((k) => String(this.account?.[k] ?? '') !== String(next[k] ?? ''));
@@ -84,12 +91,13 @@ class UserAgent extends EventEmitter {
     return { ok: true, callId: dialog.id, number: clean };
   }
 
-  async answer(callId) {
+  async answer(callId, externalId = null) {
     const dialog = this.find(callId);
     if (!dialog) return { ok: false, error: 'No such call.' };
+    if (externalId) dialog.externalId = externalId;
     if (this.active && this.active !== dialog) return { ok: false, error: 'Another call is already live.' };
     const ok = await dialog.answer();
-    return { ok, callId: dialog.id };
+    return { ok, callId: dialog.id, externalId: dialog.externalId };
   }
 
   async reject(callId, code = 486) {
@@ -138,10 +146,22 @@ class UserAgent extends EventEmitter {
   }
 
   async sendDtmf(digit) {
-    const dialog = this.active;
+    const dialog = this.active || this.standingCall();
     if (!dialog?.media) return { ok: false, error: 'No live call to send tones on.' };
     const packets = dialog.media.dtmf(digit);
     for (const packet of packets) dialog.media.send(packet);
+
+    // Stream in-band dual-tone PCM audio over G.711 alongside RFC 2833 packets
+    // so automated IVRs, PBXs, and carrier gateways hear the tone in both formats
+    const pcm = rtp.generateDtmfPcm(digit, 160);
+    if (pcm && dialog.media.session) {
+      const frameLen = 160;
+      for (let offset = 0; offset < pcm.length; offset += frameLen) {
+        const framePcm = pcm.subarray(offset, offset + frameLen);
+        const encoded = g711.encode(framePcm, dialog.media.codec);
+        dialog.media.send(dialog.media.session.packet(encoded, false));
+      }
+    }
     return { ok: true, digit: String(digit), packets: packets.length };
   }
 
@@ -255,7 +275,7 @@ class UserAgent extends EventEmitter {
     if (!this.applyRemoteSdp(dialog)) this.log('media', 'no usable remote SDP — audio will not flow');
     this.startPump(dialog);
     if (this.muted) dialog.media?.setMuted(true);
-    this.emit('connected', { callId: dialog.id, direction: dialog.direction, codec: dialog.codec || 'PCMU' });
+    this.emit('connected', { callId: dialog.id, externalId: dialog.externalId, direction: dialog.direction, codec: dialog.codec || 'PCMU' });
   }
 
   onDialogEnded(dialog, { reason, status = 0, detail = '' } = {}) {
@@ -265,6 +285,7 @@ class UserAgent extends EventEmitter {
     this.dialogs.delete(dialog.id);
     this.emit('ended', {
       callId: dialog.id,
+      externalId: dialog.externalId,
       direction: dialog.direction,
       // `remote-ended` is a normal hang-up to the app: the customer said goodbye.
       reason: reason === 'remote-ended' ? 'normal' : reason,
@@ -300,6 +321,7 @@ class UserAgent extends EventEmitter {
 
   close() {
     this.stopRegistrationTimer();
+    this.stopKeepalive?.();
     for (const dialog of [...this.dialogs.values()]) {
       if (dialog.state === 'confirmed') dialog.bye().catch(() => {});
       dialog.end('failed', { detail: 'daemon shutting down' });

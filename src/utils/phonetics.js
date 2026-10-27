@@ -327,7 +327,9 @@ export async function speakPronunciation(name, pronunciation) {
         utterance.text = cleanPhonetic || cleanName;
         utterance.lang = 'en-US';
       }
-      utterance.rate = 0.88;
+      // Conversational pacing: slightly lower rate (-4%) and pitch (-2%) removes mechanical timbre
+      utterance.rate = 0.96;
+      utterance.pitch = 0.98;
       window.speechSynthesis.speak(utterance);
     } catch {
       // Graceful silence if audio permissions or speech synthesis unsupported

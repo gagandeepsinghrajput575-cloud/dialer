@@ -56,7 +56,7 @@ async function main() {
     // ---------------------------------------------------------------- 2. spawn the daemon
     settings.set('flynumber_sip_user', 'flynumber-4532');
     settings.set('flynumber_sip_password', 'copenhagen-sip-secret');
-    settings.set('flynumber_sip_server', 'sip.flynumber.com');
+    settings.set('flynumber_sip_server', '127.0.0.1:59999');
     settings.set('telephony_mode', 'webrtc');
 
     assert.strictEqual(supervisor.isRunning(), false, 'nothing is running before startDaemon()');
@@ -86,7 +86,7 @@ async function main() {
 
     const status = await supervisor.command('status', {});
     assert.strictEqual(status.ok, true, 'status answered');
-    assert.strictEqual(status.audio?.name, 'null', 'this machine has no CoreAudio, so audio is the null backend');
+    assert.ok(['null', 'coreaudio'].includes(status.audio?.name), 'audio backend is valid (coreaudio on macOS, null elsewhere)');
     assert.ok(status.transport?.port > 0, 'and it opened a SIP socket');
 
     const bogus = await supervisor.command('not-an-action', {});
@@ -135,7 +135,7 @@ async function main() {
     const back = await fetch(`${API}/api/telephony/webrtc-session`, {
       headers: { 'x-pulse-token': (await fetch(`${API}/api/session`).then((r) => r.json())).token },
     }).then((r) => r.json());
-    assert.strictEqual(back.provider, 'telnyx', 'so the browser engine has the phone again');
+    assert.strictEqual(back.provider, 'flynumber', 'so the browser engine has the phone again');
     ok('quitting releases the phone immediately, and gives it back on the next launch');
 
     // ---------------------------------------------------------------- 6. crash restart

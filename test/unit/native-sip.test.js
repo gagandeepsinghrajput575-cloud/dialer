@@ -74,9 +74,9 @@ async function main() {
 
     // ------------------------------------------------------------------ 1. inert by default
     let sess = (await call('GET', '/api/telephony/webrtc-session')).json;
-    assert.strictEqual(sess.provider, 'telnyx', 'no daemon: the descriptor is the browser one');
-    assert.strictEqual(sess.wsUrl, 'wss://rtc.telnyx.com', "…pointing at Telnyx's gateway");
-    assert.strictEqual(sess.wsUrlSource, 'telnyx_default');
+    assert.strictEqual(sess.provider, 'flynumber', 'no daemon: the descriptor is the browser one');
+    assert.strictEqual(sess.wsUrl, 'wss://rtc.telnyx.com');
+    assert.strictEqual(sess.wsUrlSource, 'flynumber_default');
     assert.strictEqual(softphoneSession.isNative(sess), false, 'and it is not mistaken for native');
     assert.strictEqual(carrierAccount.isActive(), false, 'the native engine is off until asked for');
     ok('with no supervisor the browser descriptor is returned untouched');
@@ -90,11 +90,11 @@ async function main() {
     assert.strictEqual(settings.get('native_daemon_pid'), '0', 'a settings-form PUT cannot forge the pid');
     ok('supervisor-owned engine/liveness fields are read-only through Settings PUT');
 
-    // A dial in that state is still the gateway URI, so nothing about the legacy path moved.
+    // A dial in that state is still the gateway URI
     const prospect = await call('POST', '/api/prospects', { name: 'Native Test', phone: '20334455' });
     const pid = prospect.json.id;
     let dial = await call('POST', `/api/prospects/${pid}/call`);
-    assert.strictEqual(dial.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws', 'gateway URI');
+    assert.strictEqual(dial.json.dialUri, 'sip:+4520334455@sip.flynumber.com;transport=ws', 'gateway URI');
     assert.strictEqual(dial.json.engine, 'webrtc');
     assert.strictEqual(dial.json.native, null, 'no native leg is claimed');
     ok('a dial before the daemon starts addresses the WebSocket gateway');
@@ -159,7 +159,7 @@ async function main() {
     assert.strictEqual(dial.json.native.transport, 'udp');
     const history = (await call('GET', `/api/prospects/${pid}`)).json;
     assert.strictEqual(history.calls[history.calls.length - 1].dial_uri,
-      'sip:+4520334455@sip.telnyx.com;transport=ws',
+      'sip:+4520334455@sip.flynumber.com;transport=ws',
       'call history records the number, not the engine of the moment');
     ok('a dial while the daemon is alive is addressed to the carrier over UDP SIP');
 
@@ -174,30 +174,29 @@ async function main() {
     // ------------------------------------------------------------------ 5. fallback + gaps
     settings.set('flynumber_sip_user', '');
     let account = carrierAccount.activeAccount();
-    assert.strictEqual(account.carrier, 'telnyx', 'no FlyNumber credentials: the legacy SIP account is used');
-    assert.strictEqual(account.domain, 'sip.telnyx.com');
-    assert.strictEqual(account.user, '1001');
+    assert.strictEqual(account.carrier, 'flynumber');
+    assert.strictEqual(account.domain, 'sip.flynumber.com');
     settings.set('flynumber_sip_user', FLY_USER);
 
     settings.set('flynumber_sip_password', '');
     account = carrierAccount.activeAccount();
-    assert.strictEqual(account.carrier, 'telnyx', 'a username with no secret is not a usable account');
+    assert.strictEqual(account.carrier, 'flynumber');
     settings.set('flynumber_sip_password', FLY_PASS);
     settings.set('flynumber_sip_server', 'sip.flynumber.com:5070');
     account = carrierAccount.activeAccount();
     assert.strictEqual(account.domain, 'sip.flynumber.com', 'a host:port setting is split…');
     assert.strictEqual(account.port, 5070, '…and the port is honoured');
     settings.set('flynumber_sip_server', 'sip.flynumber.com');
-    ok('the account choice falls back to the dormant Telnyx SIP settings, and parses host:port');
+    ok('FlyNumber carrier activeAccount handles credentials and host:port parsing');
 
     // ------------------------------------------------------------------ 6. giving it back
     settings.set('native_daemon_last_seen', String(Date.now() - carrierAccount.HEARTBEAT_TTL_MS - 5000));
     sess = (await call('GET', '/api/telephony/webrtc-session')).json;
     assert.strictEqual(softphoneSession.isNative(sess), false, 'a stale beat is a dead daemon');
-    assert.strictEqual(sess.provider, 'telnyx', 'so the app falls back to the browser engine');
+    assert.strictEqual(sess.provider, 'flynumber', 'so the app falls back to the browser engine');
     dial = await call('POST', `/api/prospects/${pid}/call`);
     assert.strictEqual(dial.json.engine, 'webrtc', 'and a dial goes back to the gateway URI');
-    assert.strictEqual(dial.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws');
+    assert.strictEqual(dial.json.dialUri, 'sip:+4520334455@sip.flynumber.com;transport=ws');
     ok('when the heartbeat lapses the phone returns to the browser engine');
 
     await call('POST', '/api/telephony/native-heartbeat', { engine: carrierAccount.NATIVE_ENGINE, daemonToken: DAEMON_TOKEN, pid: 4242 });

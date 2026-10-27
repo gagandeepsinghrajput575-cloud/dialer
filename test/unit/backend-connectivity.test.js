@@ -79,26 +79,13 @@ async function runTests() {
   // =========================================================================
   console.log('\n[2/5] Carrier & Network Endpoint Reachability');
 
-  // DNS lookup for Telnyx SIP domain
+  // DNS lookup for FlyNumber SIP domain
   try {
-    const telnyxSip = await dns.lookup('sip.telnyx.com');
-    assert.ok(telnyxSip.address, 'sip.telnyx.com must resolve to an IP address');
-    ok(`Telnyx SIP domain resolved successfully (sip.telnyx.com -> ${telnyxSip.address})`);
+    const flynumberSip = await dns.lookup('sip.flynumber.com');
+    assert.ok(flynumberSip.address, 'sip.flynumber.com must resolve to an IP address');
+    ok(`FlyNumber SIP domain resolved successfully (sip.flynumber.com -> ${flynumberSip.address})`);
   } catch (err) {
-    console.warn(`  ⚠️ DNS warning for sip.telnyx.com: ${err.message}`);
-  }
-
-  // DNS lookup for Telnyx WebRTC WSS domain
-  try {
-    const telnyxRtc = await dns.lookup('rtc.telnyx.com');
-    assert.ok(telnyxRtc.address, 'rtc.telnyx.com must resolve to an IP address');
-    ok(`Telnyx WebRTC domain resolved successfully (rtc.telnyx.com -> ${telnyxRtc.address})`);
-
-    // TCP connectivity probe to WebRTC gateway port 443
-    await checkTcpSocket('rtc.telnyx.com', 443, 5000);
-    ok('Telnyx WebRTC WSS gateway socket connectable (rtc.telnyx.com:443 reachable)');
-  } catch (err) {
-    console.warn(`  ⚠️ WebRTC gateway network probe: ${err.message}`);
+    console.warn(`  ⚠️ DNS warning for sip.flynumber.com: ${err.message}`);
   }
 
   // DNS lookup for Google Generative AI (Gemini) endpoint
@@ -186,12 +173,17 @@ async function runTests() {
   const webrtcSessionRes = await fetch(`${BASE}/api/telephony/webrtc-session`, { headers: authHeaders });
   assert.strictEqual(webrtcSessionRes.status, 200, 'WebRTC session must return 200');
   const webrtcSessionData = await webrtcSessionRes.json();
-  assert.strictEqual(webrtcSessionData.provider, 'telnyx', 'Provider must be telnyx');
   assert.ok(
-    webrtcSessionData.wsUrl === 'wss://sip.telnyx.com:7443' || webrtcSessionData.wsUrl === 'wss://rtc.telnyx.com',
-    'WebRTC wsUrl must be a valid Telnyx gateway'
+    webrtcSessionData.provider === 'telnyx' || webrtcSessionData.provider === 'flynumber',
+    `Provider must be telnyx or flynumber (got ${webrtcSessionData.provider})`
   );
-  ok(`WebRTC session descriptor contract verified (${webrtcSessionData.wsUrl}, Telnyx provider)`);
+  if (webrtcSessionData.provider === 'telnyx') {
+    assert.ok(
+      webrtcSessionData.wsUrl === 'wss://sip.telnyx.com:7443' || webrtcSessionData.wsUrl === 'wss://rtc.telnyx.com',
+      'WebRTC wsUrl must be a valid Telnyx gateway'
+    );
+  }
+  ok(`WebRTC session descriptor contract verified (${webrtcSessionData.engine || 'webrtc'}, ${webrtcSessionData.provider} provider)`);
 
   const businessHoursRes = await fetch(`${BASE}/api/telephony/business-hours`, { headers: authHeaders });
   assert.strictEqual(businessHoursRes.status, 200, 'Business hours must return 200');

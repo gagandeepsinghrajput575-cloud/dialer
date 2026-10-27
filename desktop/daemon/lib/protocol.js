@@ -17,7 +17,7 @@ const MAX_LINE = 256 * 1024;
 // unimplemented action that silently does nothing is how a UI ends up waiting forever.
 const ACTIONS = new Set([
   'hello', 'ping', 'register', 'unregister', 'dial', 'answer', 'reject', 'hangup',
-  'mute', 'dtmf', 'status', 'devices', 'audio', 'log-level', 'shutdown',
+  'mute', 'dtmf', 'status', 'devices', 'audio', 'audio-devices', 'log-level', 'shutdown',
 ]);
 
 class Protocol {

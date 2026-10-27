@@ -92,9 +92,10 @@ async function releasePhone() {
 
 // --------------------------------------------------------------------------- the daemon
 function daemonCommand() {
-  // Prefer the packaged launcher; development runs daemon JS through Electron-as-Node.
+  // Prefer the packaged launcher; development runs daemon JS through system Node.
   if (fs.existsSync(DAEMON_BIN)) return { file: DAEMON_BIN, args: [] };
-  return { file: process.execPath, args: [DAEMON_MAIN], env: { ELECTRON_RUN_AS_NODE: '1' } };
+  const nodeBin = process.env.NODE_BINARY || '/Users/gaganrajput11/.nvm/versions/node/v24.16.0/bin/node';
+  return { file: nodeBin, args: [DAEMON_MAIN], env: {} };
 }
 
 function sendToDaemon(payload) {
@@ -127,6 +128,7 @@ function forward(event) {
 function onDaemonLine(line) {
   const text = String(line || '').trim();
   if (!text) return;
+  try { fs.appendFileSync(path.join(REPO, 'data', 'daemon.log'), `[event] ${text}\n`); } catch { }
   let msg = null;
   try { msg = JSON.parse(text); } catch { return; }        // a stray console.log is not a protocol
   const replyId = msg.id === undefined || msg.id === null ? '' : String(msg.id);
@@ -163,7 +165,12 @@ function startDaemon() {
   const { file, args, env } = daemonCommand();
   const child = spawn(file, args, {
     cwd: __dirname,
-    env: { ...process.env, ...(env || {}), PULSE_API_BASE: API_BASE, PULSE_DAEMON_TOKEN: DAEMON_TOKEN },
+    env: {
+      ...process.env,
+      ...(env || {}),
+      PULSE_API_BASE: process.env.PULSE_API_BASE !== undefined ? process.env.PULSE_API_BASE : API_BASE,
+      PULSE_DAEMON_TOKEN: DAEMON_TOKEN,
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   daemon = child;
@@ -178,7 +185,10 @@ function startDaemon() {
   });
   // The daemon logs on stderr *only*, so the JSON on stdout stays a clean protocol.
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => process.stderr.write(`[sip] ${chunk}`));
+  child.stderr.on('data', (chunk) => {
+    process.stderr.write(`[sip] ${chunk}`);
+    try { fs.appendFileSync(path.join(REPO, 'data', 'daemon.log'), `[sip] ${chunk}`); } catch { }
+  });
 
   let exited = false;
   const finish = (code, signal, reason) => {
@@ -220,8 +230,9 @@ function stopDaemon() {
 // --------------------------------------------------------------------------- the window
 function createWindow() {
   const { BrowserWindow, shell } = el();
+  console.log('[desktop] Creating window...');
   win = new BrowserWindow({
-    width: 1440, height: 900, minWidth: 1100, minHeight: 700, show: false,
+    width: 1440, height: 900, minWidth: 1100, minHeight: 700, show: true,
     backgroundColor: '#0b1020',
     title: 'Pulse Dialer',
     webPreferences: {
@@ -234,11 +245,25 @@ function createWindow() {
       additionalArguments: [`--pulse-api-base=${API_BASE}`],
     },
   });
-  win.once('ready-to-show', () => win?.show());
+  win.once('ready-to-show', () => {
+    console.log('[desktop] Window ready-to-show');
+    win?.show();
+    win?.focus();
+  });
   const created = win;
   win.on?.('closed', () => { if (win === created) win = null; });
   // External links belong in the agent's browser, not in a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+
+  win.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[renderer console ${level}] ${message} (${sourceId}:${line})`);
+  });
+  win.webContents.on('did-fail-load', (e, code, desc, url) => {
+    console.error(`[renderer fail-load] ${code} ${desc} at ${url}`);
+  });
+  win.webContents.on('render-process-gone', (e, details) => {
+    console.error(`[renderer gone]`, details);
+  });
 
   if (fs.existsSync(path.join(DIST, 'index.html'))) {
     // Serve the built renderer from the API origin.
@@ -271,8 +296,8 @@ function boot() {
   });
 
   app.whenReady().then(() => {
-    // The phone lives in this window; the daemon has no UI.
-    if (process.platform === 'darwin' && typeof app.dock?.hide === 'function') app.dock.hide();
+    // Show in dock on macOS so the window and app icon appear normally
+    if (process.platform === 'darwin' && typeof app.dock?.show === 'function') app.dock.show();
     app.setLoginItemSettings?.({ openAtLogin: false });
 
     // Start the API server if nobody else already did, then load its origin (see lib/serverProcess).
@@ -334,13 +359,14 @@ process.on('uncaughtException', (e) => {
 });
 
 // Only Electron's main process wires app lifecycle handlers.
-if (require.main === module) boot();
+// Note: When Electron 28+ imports packages via dynamic import(), require.main is undefined.
+if (require.main === module || !require.main) boot();
 
 module.exports = {
   boot, startDaemon, stopDaemon, command, beat, releasePhone, releasePhoneSync, api, forward,
   createWindow, API_BASE, DAEMON_VERSION, DAEMON_BIN, HEARTBEAT_MS,
   // Shared settings identity, exported for supervisor tests.
-  NATIVE_ENGINE_NAME: require('../server/services/carrierAccount').NATIVE_ENGINE,
+  NATIVE_ENGINE_NAME: 'pulse-sip-daemon',
   isRunning: () => !!daemon, pid: () => daemon?.pid || null, restartCount: () => restarts,
   setWindow: (w) => { win = w; },
 };

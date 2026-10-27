@@ -38,15 +38,15 @@ const DEFAULT_SALES_SCRIPT = [
 ].join('\n');
 
 const DEFAULTS = {
-  // ---- telephony: Telnyx + desktop softphone (Denmark) ----
-  telephony_mode: 'softphone', // 'softphone' (Zoiper/Linphone) or 'webrtc'
+  // ---- telephony: FlyNumber Wholesale SIP + Native Desktop Softphone (Denmark) ----
+  telephony_mode: 'softphone', // 'softphone' (native daemon / Linphone) or 'webrtc'
   softphone_protocol: 'sip', // 'sip' (sip:...) or 'tel' (tel:...)
-  telnyx_sip_server: 'sip.telnyx.com', // Telnyx SIP connection domain (FQDN)
-  telnyx_sip_user: '', // Telnyx SIP connection username
-  telnyx_sip_password: '', // secret — local DB only, never sent to the browser
-  telnyx_api_key: '', // secret — Telnyx v2 API key (KEY...) for carrier management
-  telnyx_connection_id: '', // optional Telnyx SIP Connection ID
-  caller_id: '', // primary Danish (+45) virtual number
+  telnyx_sip_server: 'sip.flynumber.com', // Legacy alias pointing to FlyNumber domain
+  telnyx_sip_user: '', // Legacy SIP connection username
+  telnyx_sip_password: '', // secret — local DB only
+  telnyx_api_key: '', // legacy
+  telnyx_connection_id: '', // legacy
+  caller_id: '+4532331610', // primary Danish (+45) Copenhagen FlyNumber DID
   caller_id_pool: '', // comma separated DIDs, rotated round-robin per dial
   caller_id_cursor: '0', // index of the next DID to use (survives restarts)
   default_country_code: '45', // Denmark (+45)
@@ -92,7 +92,9 @@ const DEFAULTS = {
   // explicit, off-by-default decision rather than something an endpoint does quietly.
   webrtc_credential_handoff: '0',
   webrtc_mic_device: '', // preferred microphone deviceId ('' = browser default)
+  webrtc_mic_name: 'CrystalSound Microphone', // preferred microphone device name
   webrtc_speaker_device: '', // preferred output deviceId ('' = browser default)
+  webrtc_speaker_name: '', // preferred output device name
   // ---- headless native SIP daemon (desktop/) ----
   // A second in-app engine for carriers with no WebRTC gateway (FlyNumber): SIP over UDP with
   // CoreAudio, run by the desktop supervisor. '' means "not installed" and the browser path
@@ -102,7 +104,7 @@ const DEFAULTS = {
   native_daemon_pid: '0',
   native_daemon_version: '',
   native_daemon_audio: '', // audio backend in use: coreaudio | portaudio | null
-  // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----
+  // ---- FlyNumber Copenhagen Inbound & Outbound DID (+45 32 33 16 10) ----
   flynumber_did: '+4532331610',
   flynumber_status: 'pending', // 'pending' | 'active'
   flynumber_sip_server: 'sip.flynumber.com',
@@ -110,7 +112,7 @@ const DEFAULTS = {
   flynumber_sip_password: '', // secret — local DB only, masked from browser
   flynumber_linphone_configured: '0',
   telnyx_caller_id_verified: '0',
-  inbound_routing_mode: 'flynumber_sip', // 'flynumber_sip' | 'linphone' | 'disabled'
+  inbound_routing_mode: 'webrtc', // 'webrtc' | 'flynumber_sip'
   // ---- UI ----
   sound_cues: '0',
 };

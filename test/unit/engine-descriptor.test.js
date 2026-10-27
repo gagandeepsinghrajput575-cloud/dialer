@@ -60,8 +60,8 @@ const BROWSER_KEYS = [
   ok(`browser descriptor key set unchanged (${BROWSER_KEYS.length} keys)`);
 
   assert.strictEqual(s.mode, 'webrtc', 'browser descriptor mode');
-  assert.strictEqual(s.provider, 'telnyx', 'browser descriptor provider stays the dormant Telnyx legacy');
-  assert.strictEqual(s.wsUrlSource, 'telnyx_default', 'browser descriptor gateway source');
+  assert.strictEqual(s.provider, 'flynumber', 'browser descriptor provider is flynumber');
+  assert.strictEqual(s.wsUrlSource, 'flynumber_default', 'browser descriptor gateway source');
   assert.strictEqual(s.engine, undefined, 'browser descriptor must not grow an `engine` field');
   assert.strictEqual(s.transport, undefined, 'browser descriptor must not grow a `transport` field');
   ok('browser descriptor carries neither `engine` nor `transport`, so no witness can fire on it');

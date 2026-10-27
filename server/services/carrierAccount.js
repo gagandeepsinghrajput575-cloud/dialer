@@ -38,43 +38,25 @@ const hostOf = (raw) => String(raw || '').trim().replace(/^sips?:\/?\/?/i, '').r
 const portOf = (raw) => parseInt(String(raw || '').match(/:(\d+)$/)?.[1] || '', 10) || 0;
 
 /**
- * Which trunk the daemon should register. FlyNumber wins whenever its SIP user and password are
- * saved — that is the account this feature exists for. The legacy Telnyx SIP settings are kept
- * (never deleted, still dormant for the browser path) and reused here only as a fallback, so a
- * Telnyx-only install gets a native phone too instead of an empty dialog.
+ * The wholesale SIP trunk the daemon registers with. FlyNumber is the sole carrier Pulse uses.
  */
 function activeAccount() {
   const flyHost = hostOf(settings.get('flynumber_sip_server')) || telephony.FLYNUMBER_SIP_DEFAULT;
-  const flyUser = String(settings.get('flynumber_sip_user') || '').trim();
-  const flyPassword = String(settings.get('flynumber_sip_password') || '').trim();
-  const flyDid = telephony.normalizePhone(settings.get('flynumber_did') || telephony.COPENHAGEN_DEFAULT_DID);
-  if (flyUser && flyPassword) {
-    return {
-      carrier: 'flynumber',
-      carrierName: 'FlyNumber',
-      domain: flyHost,
-      port: portOf(settings.get('flynumber_sip_server')) || 5060,
-      transport: 'udp',
-      user: flyUser,
-      password: flyPassword,
-      // The DID is the number the carrier expects in From; fall back to the rotating pool so a
-      // multi-DID install still shows the caller ID it would have shown in the browser.
-      callerId: flyDid || telephony.nextCallerId().callerId || '',
-      did: flyDid || '',
-    };
-  }
-
-  const telUser = String(settings.get('telnyx_sip_user') || '').trim();
+  const flyUser = String(settings.get('flynumber_sip_user') || settings.get('telnyx_sip_user') || '').trim();
+  const flyPassword = String(settings.get('flynumber_sip_password') || settings.get('telnyx_sip_password') || '').trim();
+  const flyDid = telephony.normalizePhone(settings.get('flynumber_did') || settings.get('caller_id') || telephony.COPENHAGEN_DEFAULT_DID);
   return {
-    carrier: 'telnyx',
-    carrierName: 'Telnyx',
-    domain: hostOf(telephony.sipServer()) || telephony.TELNYX_SIP_DOMAIN,
-    port: portOf(telephony.sipServer()) || 5060,
+    carrier: 'flynumber',
+    carrierName: 'FlyNumber',
+    domain: flyHost,
+    port: portOf(settings.get('flynumber_sip_server')) || 5060,
     transport: 'udp',
-    user: telUser,
-    password: String(settings.get('telnyx_sip_password') || '').trim(),
-    callerId: telephony.normalizePhone(settings.get('caller_id')) || telephony.nextCallerId().callerId || '',
-    did: telephony.normalizePhone(settings.get('caller_id')) || '',
+    user: flyUser,
+    password: flyPassword,
+    // The DID is the number the carrier expects in From; fall back to the rotating pool so a
+    // multi-DID install still shows the caller ID it would have shown in the browser.
+    callerId: flyDid || telephony.nextCallerId().callerId || '',
+    did: flyDid || '',
   };
 }
 
@@ -141,7 +123,7 @@ function webrtcSession() {
     domain: r.domain,
     port: r.port,
     // Reported so an existing UI that prints the gateway shows the real endpoint instead of a
-    // stale Telnyx URL. The browser gateway stays in `webrtcWsUrl` for when the app runs in a
+    // stale gateway URL. The browser gateway stays in `webrtcWsUrl` for when the app runs in a
     // plain tab with no supervisor.
     wsUrl: `sip:${r.domain}:${r.port}`,
     wsUrlSource: 'native_daemon',
@@ -157,8 +139,8 @@ function webrtcSession() {
     // register, which is exactly what the browser engine could not do without one.
     canRegister: r.configured,
     daemon: r.daemon,
-    micDevice: String(settings.get('webrtc_mic_device') || ''),
-    speakerDevice: String(settings.get('webrtc_speaker_device') || ''),
+    micDevice: String(settings.get('webrtc_mic_name') || settings.get('webrtc_mic_device') || ''),
+    speakerDevice: String(settings.get('webrtc_speaker_name') || settings.get('webrtc_speaker_device') || ''),
     credentialsUrl: '/api/telephony/carrier-credentials',
     hint: hintText(r),
   };
@@ -206,6 +188,8 @@ function credentials({ includeSecret = true } = {}) {
     missing: r.missing,
     expires: 300,
     daemon: r.daemon,
+    micDevice: String(settings.get('webrtc_mic_name') || settings.get('webrtc_mic_device') || ''),
+    speakerDevice: String(settings.get('webrtc_speaker_name') || settings.get('webrtc_speaker_device') || ''),
   };
   if (includeSecret) out.password = r.password;
   else out.hasPassword = r.hasPassword;

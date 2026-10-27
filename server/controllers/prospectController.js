@@ -3,6 +3,7 @@ const prospectService = require('../services/prospectService');
 const csvService = require('../services/csvService');
 const telephony = require('../services/telephonyService');
 const followUpService = require('../services/followUpService');
+const azureSpeech = require('../services/azureSpeechService');
 const { asyncHandler } = require('../middleware/errorHandler');
 
 const list = asyncHandler(async (req, res) => res.json(prospectService.list()));
@@ -61,7 +62,7 @@ const speak = asyncHandler(async (req, res) => {
 
   try {
     const url = `${kokoroUrl}/?text=${encodeURIComponent(text)}${voice ? `&voice=${encodeURIComponent(voice)}` : ''}`;
-    const upstream = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    const upstream = await fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!upstream.ok) throw new Error(`Kokoro status ${upstream.status}`);
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.setHeader('Content-Type', 'audio/wav');
@@ -69,6 +70,19 @@ const speak = asyncHandler(async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=86400');
     return res.end(buf);
   } catch (err) {
+    try {
+      const azureResult = await azureSpeech.synthesizeSpeech(text, {
+        voice: voice || 'da-DK-ChristelNeural',
+        lang: 'da-DK',
+        channel: 'web',
+      });
+      if (azureResult && azureResult.audioBuffer && azureResult.audioBuffer.length > 0 && !azureResult.mock) {
+        res.setHeader('Content-Type', azureResult.contentType);
+        res.setHeader('Content-Length', azureResult.audioBuffer.length);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.end(azureResult.audioBuffer);
+      }
+    } catch {}
     return res.status(502).json({ error: 'Kokoro speaker offline', details: err.message });
   }
 });

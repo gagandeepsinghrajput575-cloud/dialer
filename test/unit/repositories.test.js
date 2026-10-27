@@ -236,33 +236,33 @@ async function run() {
   const cases = [
     ['20123456', '+4520123456'], ['20 12 34 56', '+4520123456'], ['+45 20 12 34 56', '+4520123456'],
     ['004520123456', '+4520123456'], ['4520123456', '+4520123456'], ['0045 20 12 34 56', '+4520123456'],
-    ['1234', ''], ['', ''], ['mette@sip.telnyx.com', 'mette@sip.telnyx.com'],
+    ['1234', ''], ['', ''], ['mette@sip.flynumber.com', 'mette@sip.flynumber.com'],
   ];
   for (const [input, expected] of cases) {
     assert.strictEqual(telephony.normalizePhone(input), expected, `normalizePhone(${JSON.stringify(input)})`);
   }
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'sip'), 'sip:+4520123456');
   assert.strictEqual(telephony.buildDialUri('+4520123456', 'tel'), 'tel:+4520123456');
-  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.telnyx.com');
-  assert.strictEqual(telephony.sipServer(), 'sip.telnyx.com', 'the Telnyx FQDN is the default floor');
+  assert.strictEqual(telephony.buildDialUriFull('+4520123456'), 'sip:+4520123456@sip.flynumber.com');
+  assert.strictEqual(telephony.sipServer(), 'sip.flynumber.com', 'the FlyNumber FQDN is the default floor');
   ok('normalization table (9 cases) + dial URI builders');
 
   // ---- in-browser softphone session (WebRTC) ----
   // The browser leg is addressed over the provider's WebSocket gateway, and the SIP secret
   // only leaves the server when the operator explicitly turned the handoff on.
-  settings.set('telnyx_sip_server', 'sip.telnyx.com');
-  settings.set('telnyx_sip_user', '1001');
-  settings.set('telnyx_sip_password', 'super-secret');
+  settings.set('flynumber_sip_server', 'sip.flynumber.com');
+  settings.set('flynumber_sip_user', '1001');
+  settings.set('flynumber_sip_password', 'super-secret');
   settings.set('webrtc_ws_url', '');
   settings.set('webrtc_credential_handoff', '0');
-  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.telnyx.com;transport=ws');
-  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.telnyx.com', "an empty gateway means Telnyx's own gateway");
-  assert.strictEqual(telephony.webrtcSession().provider, 'telnyx');
+  assert.strictEqual(telephony.buildWebRtcUri('+4520123456'), 'sip:+4520123456@sip.flynumber.com;transport=ws');
+  assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.telnyx.com', "an empty gateway means default gateway");
+  assert.strictEqual(telephony.webrtcSession().provider, 'flynumber');
   const handoffOff = telephony.webrtcSession();
   assert.strictEqual(handoffOff.password, '', 'the password must not be in the descriptor while the handoff is off');
   assert.strictEqual(handoffOff.hasPassword, true);
   assert.strictEqual(handoffOff.canRegister, false, 'a browser cannot register without the secret');
-  assert.strictEqual(handoffOff.wsUrlSource, 'telnyx_default');
+  assert.strictEqual(handoffOff.wsUrlSource, 'flynumber_default');
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('webrtc_credential_handoff', '1');
   const handoffOn = telephony.webrtcSession();
@@ -273,11 +273,12 @@ async function run() {
   assert.strictEqual(telephony.webrtcWsUrl(), 'wss://rtc.eu.telnyx.com', 'an explicit gateway wins (regional edge)');
   assert.strictEqual(telephony.webrtcSession().wsUrlSource, 'settings');
   settings.set('webrtc_ws_url', '');
+  settings.set('flynumber_sip_password', '');
   settings.set('telnyx_sip_password', '');
   const unconfigured = telephony.webrtcSession();
   assert.deepStrictEqual(unconfigured.missing, ['password']);
   assert.strictEqual(unconfigured.configured, false);
-  ok('webrtc session: Telnyx gateway default, credential handoff gate, readiness reasons');
+  ok('webrtc session: FlyNumber gateway default, credential handoff gate, readiness reasons');
 
   settings.set('caller_id', '+45 20 12 34 56');
   settings.set('caller_id_pool', '+4520987654, 31 45 67 89');

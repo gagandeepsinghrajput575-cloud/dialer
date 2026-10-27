@@ -7,6 +7,7 @@ const telephony = require('../services/telephonyService');
 const followUpService = require('../services/followUpService');
 const carrierAccount = require('../services/carrierAccount');
 const softphoneSession = require('../services/softphoneSession');
+const azureSpeech = require('../services/azureSpeechService');
 const { audioDir } = require('../config/env');
 const { ApiError, asyncHandler } = require('../middleware/errorHandler');
 
@@ -117,8 +118,8 @@ const updateFlynumber = asyncHandler(async (req, res) => {
   if (body.flynumber_linphone_configured !== undefined) {
     settings.set('flynumber_linphone_configured', body.flynumber_linphone_configured ? '1' : '0');
   }
-  if (body.telnyx_caller_id_verified !== undefined) {
-    const verified = body.telnyx_caller_id_verified ? '1' : '0';
+  if (body.telnyx_caller_id_verified !== undefined || body.flynumber_caller_id_verified !== undefined) {
+    const verified = (body.flynumber_caller_id_verified ?? body.telnyx_caller_id_verified) ? '1' : '0';
     settings.set('telnyx_caller_id_verified', verified);
     if (verified === '1') {
       const did = telephony.normalizePhone(settings.get('flynumber_did') || '+4532331610');
@@ -133,8 +134,42 @@ const updateFlynumber = asyncHandler(async (req, res) => {
   res.json({ ok: true, config: telephony.flynumberConfig() });
 });
 
+// POST /api/telephony/tts/synthesize
+const synthesizeTts = asyncHandler(async (req, res) => {
+  const text = String(req.body?.text || req.query?.text || '').trim();
+  if (!text) throw ApiError.badRequest('Text is required for speech synthesis');
+  const channel = String(req.body?.channel || req.query?.channel || 'web');
+  const lang = String(req.body?.lang || req.query?.lang || 'da-DK');
+  const voice = req.body?.voice || req.query?.voice;
+  const rate = req.body?.rate || '-4%';
+  const pitch = req.body?.pitch || '-2%';
+
+  const result = await azureSpeech.synthesizeSpeech(text, { channel, lang, voice, rate, pitch });
+  res.setHeader('Content-Type', result.contentType);
+  res.setHeader('X-Speech-Format', result.format);
+  if (result.mock) res.setHeader('X-Speech-Mock', '1');
+  return res.send(result.audioBuffer);
+});
+
+// POST /api/telephony/tts/generate-greeting
+const generateGreetingTts = asyncHandler(async (req, res) => {
+  const greetingText = req.body?.text ? String(req.body.text).trim() : null;
+  const voice = req.body?.voice || 'da-DK-ChristelNeural';
+  const channel = req.body?.channel || 'web';
+  const outPath = path.join(audioDir, 'vm_danish.mp3');
+
+  const result = await azureSpeech.generateVoicemailGreeting(greetingText, outPath, { voice, channel });
+  settings.set('vm_greeting', 'vm_danish.mp3');
+  res.json({
+    ok: true,
+    message: 'Voicemail greeting synthesized with natural prosody and saved',
+    details: result,
+    greeting: telephony.voicemailGreeting(),
+  });
+});
+
 module.exports = {
   businessHours, webrtcSession, callerIds, greetingMeta, uploadGreeting,
   greetingFile, followUpEmail, scheduleFollowUp, flynumber, updateFlynumber,
-  carrierCredentials, nativeHeartbeat,
+  carrierCredentials, nativeHeartbeat, synthesizeTts, generateGreetingTts,
 };

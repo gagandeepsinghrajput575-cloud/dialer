@@ -90,7 +90,7 @@ function freePort() {
     srv.on('error', reject);
     srv.listen(0, '127.0.0.1', () => {
       const { port } = srv.address();
-      srv.close(() => resolve(port));
+      srv.close(() => setTimeout(() => resolve(port), 250));
     });
   });
 }
@@ -198,7 +198,7 @@ async function run() {
     'smtp_secure', 'smtp_user', 'softphone_protocol', 'sound_cues', 'telephony_mode',
     'telnyx_api_key', 'telnyx_caller_id_verified', 'telnyx_connection_id', 'telnyx_sip_password', 'telnyx_sip_server', 'telnyx_sip_user',
     'vm_auto_advance', 'vm_greeting',
-    'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_speaker_device', 'webrtc_ws_url',
+    'webrtc_credential_handoff', 'webrtc_mic_device', 'webrtc_mic_name', 'webrtc_speaker_device', 'webrtc_speaker_name', 'webrtc_ws_url',
   ]);
   assert.strictEqual(s.native_sip_engine, '', 'the native SIP engine is opt-in: nothing claims it by default');
   assert.strictEqual(s.native_daemon_last_seen, '0', 'and no daemon has ever beaten');
@@ -338,7 +338,7 @@ async function run() {
   assert.strictEqual(callRes.json.dryRun, true);
   assert.strictEqual(callRes.json.protocol, 'sip');
   assert.strictEqual(callRes.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.telnyx.com`);
+  assert.strictEqual(callRes.json.dialUriFull, `sip:${E164}@sip.flynumber.com`);
   assert.strictEqual(callRes.json.telephonyMode, 'softphone');
   const testCallId = callRes.json.callId;
   const afterCall = await req('GET', `/api/prospects/${testId}`);
@@ -353,7 +353,7 @@ async function run() {
   assert.strictEqual(live.status, 200);
   assert.strictEqual(live.json.dryRun, false);
   assert.strictEqual(live.json.dialUri, `tel:${E164}`);
-  assert.strictEqual(live.json.warning, null, 'the Telnyx SIP account is configured, so no warning');
+  assert.strictEqual(live.json.warning, null, 'the FlyNumber SIP account is configured, so no warning');
   const liveClassified = await req('PATCH', `/api/calls/${live.json.callId}`, { outcome: 'conversation', duration_sec: 41 });
   assert.strictEqual(liveClassified.json.prospect.last_outcome, 'conversation');
   await req('PUT', '/api/settings', { dry_run: '1', softphone_protocol: 'sip' });
@@ -367,7 +367,7 @@ async function run() {
   assert.strictEqual(t.json.configured, true);
   assert.strictEqual(t.json.sampleNumber, E164);
   assert.strictEqual(t.json.dialUri, `sip:${E164}`);
-  assert.strictEqual(t.json.sipServer, 'sip.telnyx.com');
+  assert.strictEqual(t.json.sipServer, 'sip.flynumber.com');
   assert.strictEqual(t.json.inBrowser, false, 'a softphone launch is not an in-browser session');
 
   // ------------------------------------------------- in-browser WebRTC session descriptor
@@ -380,10 +380,10 @@ async function run() {
   assert.strictEqual(sess.status, 200);
   assert.strictEqual(sess.json.mode, 'webrtc');
   assert.ok(sess.json.wsUrl.startsWith('wss://'), `the signalling gateway is a wss URL (got ${sess.json.wsUrl})`);
-  assert.strictEqual(sess.json.provider, 'telnyx', 'the descriptor names the carrier it is aiming at');
-  assert.strictEqual(sess.json.server, 'sip.telnyx.com');
+  assert.strictEqual(sess.json.provider, 'flynumber', 'the descriptor names the carrier it is aiming at');
+  assert.strictEqual(sess.json.server, 'sip.flynumber.com');
   assert.strictEqual(sess.json.wsUrl, 'wss://rtc.telnyx.com', "an unset gateway means Telnyx's own");
-  assert.strictEqual(sess.json.username, '1001');
+  assert.strictEqual(sess.json.username, 'cph_agent');
 
   // The SIP secret stays on the server unless the agent explicitly opts into the handoff —
   // a browser cannot register without it, so the descriptor says so instead of omitting it.
@@ -395,7 +395,7 @@ async function run() {
 
   await req('PUT', '/api/settings', { webrtc_credential_handoff: '1' });
   const open = await tokened('GET', '/api/telephony/webrtc-session');
-  assert.strictEqual(open.json.password, 'super-secret', 'an explicit handoff releases the secret to the same-origin tab');
+  assert.strictEqual(open.json.password, 'test_sip_secret', 'an explicit handoff releases the secret to the same-origin tab');
   assert.strictEqual(open.json.canRegister, true);
   assert.strictEqual((await req('GET', '/api/settings')).json.telnyx_sip_password, '',
     'even with the handoff on, /api/settings keeps masking the secret');
@@ -407,7 +407,7 @@ async function run() {
   assert.strictEqual(customGw.json.wsUrl, 'wss://gw.example.dk:7443/sip', 'a configured gateway overrides the Telnyx default');
   assert.strictEqual(customGw.json.wsUrlSource, 'settings');
   await req('PUT', '/api/settings', { webrtc_ws_url: '' });
-  assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'telnyx_default');
+  assert.strictEqual((await tokened('GET', '/api/telephony/webrtc-session')).json.wsUrlSource, 'flynumber_default');
 
   // A webrtc dial addresses the SIP server over the gateway and never degrades to tel:.
   // Its own prospect, so the shared fixture's call counter stays exactly as later groups
@@ -420,19 +420,19 @@ async function run() {
   assert.strictEqual(webCall.json.telephonyMode, 'webrtc');
   assert.strictEqual(webCall.json.inBrowser, true, 'the client is told to open an in-browser session');
   assert.strictEqual(webCall.json.protocol, 'webrtc');
-  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.telnyx.com;transport=ws',
+  assert.strictEqual(webCall.json.dialUri, 'sip:+4520334455@sip.flynumber.com;transport=ws',
     `webrtc dial URI (got ${webCall.json.dialUri})`);
   assert.ok(!/^tel:/.test(webCall.json.dialUri), 'a webrtc dial never degrades to a tel: URI');
   assert.strictEqual(webCall.json.callerId, '+4520123456', 'caller-ID rotation still applies in webrtc mode');
   assert.strictEqual((await req('GET', `/api/prospects/${webrtcProspect.json.id}`)).json.calls[0].dial_uri,
-    'sip:+4520334455@sip.telnyx.com;transport=ws', 'the gateway URI is what lands in call history');
+    'sip:+4520334455@sip.flynumber.com;transport=ws', 'the gateway URI is what lands in call history');
   await req('DELETE', `/api/prospects/${webrtcProspect.json.id}`);
 
   // The test-launch endpoint used to answer "configured: true" for webrtc unconditionally.
   const wt = await req('POST', '/api/settings/test-softphone', { number: SAMPLE });
   assert.strictEqual(wt.json.inBrowser, true);
   assert.strictEqual(wt.json.protocol, 'webrtc');
-  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.telnyx.com;transport=ws`, 'the test launch shows the gateway URI');
+  assert.strictEqual(wt.json.dialUri, `sip:${E164}@sip.flynumber.com;transport=ws`, 'the test launch shows the gateway URI');
   assert.strictEqual(wt.json.configured, false, 'webrtc readiness is not claimed while the handoff is off');
   assert.match(wt.json.message, /handoff|Settings/i);
 
@@ -697,7 +697,7 @@ async function run() {
   assert.ok(jsonRes.headers.get('content-type').includes('application/json'));
   const payload = JSON.parse(jsonRes.text);
   assert.ok(payload.exported_at);
-  assert.strictEqual(payload.telephony.sip_server, 'sip.telnyx.com');
+  assert.strictEqual(payload.telephony.sip_server, 'sip.flynumber.com');
   assert.strictEqual(payload.telephony.protocol, 'sip');
   const exported = payload.prospects.find((p) => p.id === testId);
   assert.ok(exported.calls.length >= 3, `call history included (${exported.calls.length} calls)`);
@@ -959,9 +959,9 @@ async function run() {
   // cannot pass by the whole app simply having gone quiet about telephony.
   for (const file of ['server/config/defaults.js', 'server/services/telephonyService.js', 'src/pages/Settings.jsx']) {
     const body = fs.readFileSync(path.join(REPO, file), 'utf8');
-    assert.match(body, /telnyx/i, `${file} names the Telnyx carrier`);
+    assert.match(body, /flynumber/i, `${file} names the FlyNumber carrier`);
   }
-  ok('no retired provider survives outside the migration and its tests; Telnyx wired end to end');
+  ok('no retired provider survives outside the migration and its tests; FlyNumber wired end to end');
 
   // ---------------------------------------------------------------- cross-site attack surface
   step(32, TOTAL, 'Cross-site attack surface — a website you visit cannot touch the dialer');

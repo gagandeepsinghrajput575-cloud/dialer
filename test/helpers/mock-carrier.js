@@ -72,6 +72,7 @@ class MockCarrier {
 
   // ---- SIP -----------------------------------------------------------------------------
   onSip(text, rinfo) {
+    if (!text || text === '\r\n\r\n' || text === '\r\n' || !text.trim()) return;
     this.peer = rinfo;
     const msg = parseMessage(text);
     this.onEvent(msg);

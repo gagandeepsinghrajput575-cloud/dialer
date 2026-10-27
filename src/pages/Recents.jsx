@@ -251,7 +251,7 @@ export default function Recents() {
         <div className="kpi-card inbound">
           <div className="kpi-label"><PhoneIncoming size={14} /> Inbound Callbacks</div>
           <div className="kpi-value">{summary?.inboundCalls || 0}</div>
-          <div className="kpi-sub">Via FlyNumber / Telnyx WebRTC</div>
+          <div className="kpi-sub">Via FlyNumber Native SIP</div>
         </div>
 
         <div className="kpi-card outbound">

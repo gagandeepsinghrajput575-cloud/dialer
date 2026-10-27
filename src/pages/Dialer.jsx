@@ -77,20 +77,73 @@ function Waveform({ active, level }) {
 // it obvious whether the IVR heard you — silence on a call is otherwise indistinguishable
 // from a dead audio path.
 function DtmfPad({ log, onKey, onClose, muted, onToggleMute }) {
+  const [typedTone, setTypedTone] = useState('');
+  const [feedback, setFeedback] = useState('');
+
+  const handleSend = (seq) => {
+    const raw = String(seq !== undefined ? seq : typedTone || '').trim();
+    if (!raw) return;
+    for (const d of raw) {
+      if (DTMF_KEYS.includes(d)) {
+        onKey(d);
+      }
+    }
+    setFeedback(`Sent tone: ${raw}`);
+    setTypedTone('');
+    setTimeout(() => setFeedback(''), 2000);
+  };
+
+  const handleKeyClick = (d) => {
+    onKey(d);
+    setFeedback(`Sent tone: ${d}`);
+    setTimeout(() => setFeedback(''), 2000);
+  };
+
   return (
     <div role="dialog" aria-label="Touch tones">
       <div className="dtmf-head">
-        <b><Grid3x3 size={15} /> Touch tones</b>
+        <b><Grid3x3 size={15} /> In-Call Touch Tones (IVR)</b>
         <button className="icon-btn" onClick={onClose} title="Close (Esc)"><X size={16} /></button>
       </div>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+        <input
+          type="text"
+          className="incall-tone-input"
+          placeholder="Digit(s) & Enter..."
+          value={typedTone}
+          onChange={(e) => setTypedTone(e.target.value.replace(/[^0-9*#A-Da-d]/g, ''))}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleSend();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              onClose();
+            }
+          }}
+          style={{ flex: 1, height: '36px', fontSize: '15px' }}
+          autoFocus
+        />
+        <button
+          type="button"
+          className="btn primary sm"
+          onClick={() => handleSend()}
+          style={{ height: '36px', padding: '0 14px', fontWeight: 600 }}
+          title="Send tone to line (Enter)"
+        >
+          Enter ↵
+        </button>
+      </div>
+
       <div className="dtmf-grid">
         {DTMF_KEYS.map((d) => (
-          <button key={d} className="dtmf-key" onClick={() => onKey(d)} title={`Send ${d}`}>{d}</button>
+          <button key={d} className="dtmf-key" onClick={() => handleKeyClick(d)} title={`Send tone ${d} immediately`}>{d}</button>
         ))}
       </div>
       <div className="dtmf-foot">
         <span className="dtmf-log" title="Tones sent on this call">
-          {log.length ? log.join(' ') : 'No tones sent yet'}
+          {feedback ? <b style={{ color: '#34d399' }}>{feedback}</b> : log.length ? log.join(' ') : 'No tones sent yet'}
         </span>
         <button className={`btn xs ${muted ? 'danger' : ''}`} onClick={onToggleMute}>
           {muted ? <MicOff size={12} /> : <Mic size={12} />} {muted ? 'Unmute (M)' : 'Mute (M)'}
@@ -475,13 +528,14 @@ export default function Dialer() {
   const {
     prospects, loaded, activeId, setActiveId, refreshProspects, refreshStats, toast, patchLocal, setView, settings, updateProspect, stats,
     inbound, inboundEnded, setInboundEnded,
+    activeCall, setActiveCall, clearActiveCall,
   } = useStore();
   const [tab, setTab] = useState('new');
   const [q, setQ] = useState('');
-  const [phase, setPhase] = useState('idle'); // idle | dialing | active
-  const [callId, setCallId] = useState(null);
-  const [dial, setDial] = useState(null); // { uri, full, protocol, mode, phone } handed to the softphone
-  const [launched, setLaunched] = useState(false); // OS accepted the dial URI
+  const [phase, setPhase] = useState(() => activeCall?.phase || 'idle'); // idle | dialing | active
+  const [callId, setCallId] = useState(() => activeCall?.callId || null);
+  const [dial, setDial] = useState(() => activeCall?.dial || null); // { uri, full, protocol, mode, phone } handed to the softphone
+  const [launched, setLaunched] = useState(() => !!activeCall?.launched); // OS accepted the dial URI
   const [done, setDone] = useState(() => new Set());
   const [autoNext, setAutoNext] = useState(true);
   const [flash, setFlash] = useState(null);
@@ -539,11 +593,17 @@ export default function Dialer() {
   // Synchronous guards. React state updates are asynchronous, so a second keypress landing in
   // the same tick would otherwise sail past every `phase !== 'idle'` check and dial twice
   // (or log the same call twice). Refs are updated immediately, so they close that window.
-  const phaseRef = useRef('idle');
+  const phaseRef = useRef(phase);
   const classifyRef = useRef(null);
   const dialLockRef = useRef(false);
   const logLockRef = useRef(false);
-  const setPhaseSafe = useCallback((next) => { phaseRef.current = next; setPhase(next); }, []);
+  const setPhaseSafe = useCallback((next) => {
+    phaseRef.current = next;
+    setPhase(next);
+    if (next === 'idle') {
+      clearActiveCall();
+    }
+  }, [clearActiveCall]);
   const setClassifySafe = useCallback((next) => { classifyRef.current = next; setClassifyModal(next); }, []);
   const timersRef = useRef(new Set());
   // setTimeout that is always cleaned up, so nothing fires after the dialer unmounts.
@@ -560,7 +620,7 @@ export default function Dialer() {
   // ---- In-browser softphone (telephony_mode = 'webrtc') ---------------------------------
   // Same cockpit, no external app: the microphone, the media path and the hang-up all live in
   // the engine; this component only decides what to show and when to classify.
-  const isWebrtc = settings?.telephony_mode === 'webrtc';
+  const isWebrtc = settings?.telephony_mode === 'webrtc' || (typeof window !== 'undefined' && !!window.pulseNativeSip);
   const isWebrtcRef = useRef(false);
   isWebrtcRef.current = isWebrtc;
   const webrtcRef = useRef(null);
@@ -570,6 +630,22 @@ export default function Dialer() {
   const [dtmfOpen, setDtmfOpen] = useState(false);
   const dtmfRef = useRef(false);
   dtmfRef.current = dtmfOpen;
+  const [inCallTone, setInCallTone] = useState('');
+  const inCallToneRef = useRef('');
+  inCallToneRef.current = inCallTone;
+
+
+  const sendInCallTone = useCallback((seq) => {
+    const raw = String(seq !== undefined ? seq : inCallToneRef.current || '').trim();
+    if (!raw) return;
+    for (const d of raw) {
+      if (DTMF_KEYS.includes(d)) {
+        webrtcRef.current?.sendDtmf(d);
+      }
+    }
+    toast(`Touch tone ${raw} sent to line`, 'info');
+    setInCallTone('');
+  }, [toast]);
   // "Discard without logging" throws away the talk time and anything typed during the call, so
   // it asks first. Confirming is a deliberate second click, never a stray one.
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -661,6 +737,23 @@ export default function Dialer() {
     }
     return items[0] || null;
   }, [items, activeId, pinned, tab]);
+
+  // Update root-level store activeCall state whenever call state changes
+  useEffect(() => {
+    if (phase === 'active' || phase === 'dialing') {
+      setActiveCall?.({
+        phase,
+        callId,
+        dial,
+        launched,
+        prospectId: active?.id || null,
+        prospectName: active ? getProspectDisplayName(active) : (dial?.phone || ''),
+        phone: dial?.phone || active?.phone || '',
+      });
+    } else if (phase === 'idle') {
+      clearActiveCall?.();
+    }
+  }, [phase, callId, dial, launched, active, setActiveCall, clearActiveCall]);
 
   const { detail, reload } = useDetail(active?.id);
   const idx = active ? items.findIndex((p) => p.id === active.id) : -1;
@@ -802,7 +895,7 @@ export default function Dialer() {
       // the simulator has auto-connected), so the timer cannot start on a silent call.
       if (r.inBrowser) {
         const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
-        if (!res.ok) {
+        if (!res?.ok) {
           // Nothing ever left the machine, so the record the server just created is a phantom.
           // Remove it rather than leaving a call in history that no audio ever carried.
           try { await api.discardCall(r.callId); } catch { /* best effort */ }
@@ -810,10 +903,10 @@ export default function Dialer() {
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');
-          return toast(res.reason || 'The in-browser call could not start.', 'error');
+          return toast(res?.reason || res?.error || 'The in-browser call could not start.', 'error');
         }
         if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
-        else toast(`In-browser softphone dialing ${r.phone}…`);
+        else toast(`Pulse softphone dialing ${r.phone}…`);
         return;
       }
 
@@ -839,17 +932,23 @@ export default function Dialer() {
 
   // Re-dispatch the same URI when the OS prompt was dismissed or the softphone was closed.
   const relaunchSoftphone = useCallback(() => {
-    if (!dial?.uri) return;
+    if (!dial?.phone) return;
     const softphone = softphoneLabel(dial.mode, dial.engine);
     if (phaseRef.current === 'idle') return;
     // Test mode must never hand a dial URI to the OS — not even on a re-launch.
     if (settings?.dry_run === '1') {
-      return toast(`Test mode is on: ${dial.uri} stays simulated, nothing is dialed.`);
+      return toast(`Test mode is on: dialing ${dial.phone} stays simulated.`);
     }
-    const ok = dispatchDialUri(dial.uri);
+    if (webrtcRef.current?.start) {
+      webrtcRef.current.start(dial.phone, { dryRun: false, callId });
+      setLaunched(true);
+      toast(`Redialing ${dial.phone}…`);
+      return;
+    }
+    const ok = dial.mode === 'softphone' && dial.uri ? dispatchDialUri(dial.uri) : false;
     setLaunched(ok);
     toast(ok ? `Re-launching ${dial.uri} in ${softphone}` : `Could not launch ${softphone} — open it and dial ${dial.phone} manually`, ok ? 'ok' : 'error');
-  }, [dial, settings, toast]);
+  }, [dial, settings, callId, toast]);
 
   // The second half of a hang-up: everything except silencing the audio, which is over.
   // Split out because the in-browser engine calls it itself once it has released the mic.
@@ -1102,15 +1201,15 @@ export default function Dialer() {
 
       if (r.inBrowser) {
         const res = await webrtcRef.current.start(r.phone, { dryRun: !!r.dryRun, callId: r.callId });
-        if (!res.ok) {
+        if (!res?.ok) {
           try { await api.discardCall(r.callId); } catch { /* best effort */ }
           setCallId(null);
           setDial(null);
           setPhaseSafe('idle');
-          return toast(res.reason || 'The in-browser call could not start.', 'error');
+          return toast(res?.reason || res?.error || 'The in-browser call could not start.', 'error');
         }
         if (r.dryRun) toast(`Test mode: ${r.dialUri} simulated in-browser`);
-        else toast(`In-browser softphone dialing ${r.phone}…`);
+        else toast(`Pulse softphone dialing ${r.phone}…`);
         return;
       }
 
@@ -1244,7 +1343,14 @@ export default function Dialer() {
           e.preventDefault();
           openComposer(active);
         }
-      } else if (/^[1-8]$/.test(k) && phaseRef.current === 'active') {
+      } else if (DTMF_KEYS.includes(k) && isWebrtcRef.current && (phaseRef.current === 'active' || webrtcLiveRef.current)) {
+        // In-call touch tone dialer: when a WebRTC / native call is live (or in early media), digit keys
+        // (0-9, *, #) work directly like a real dialer to navigate IVRs ("press 1 for English, press 2 for Danish")
+        // instead of classifying the call or logging voicemail.
+        e.preventDefault();
+        webrtcRef.current?.sendDtmf(k);
+        toast(`Tone ${k} sent`, 'info');
+      } else if (phaseRef.current === 'active' && /^[1-8]$/.test(k) && !isWebrtcRef.current) {
         logOutcome(OUTCOMES[Number(k) - 1].id);
       }
     };
@@ -1580,11 +1686,11 @@ export default function Dialer() {
               </div>
             )}
 
-            {/* HYBRID VOIP COPENHAGEN ROUTE STRIP */}
-            <div className="standby-strip ready" style={{ margin: '6px 0', border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(15, 23, 42, 0.5)' }} title="Outbound via Telnyx wholesale · Inbound Callbacks via FlyNumber free SIP">
+            {/* FLYNUMBER WHOLESALE SIP COPENHAGEN ROUTE STRIP */}
+            <div className="standby-strip ready" style={{ margin: '6px 0', border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(15, 23, 42, 0.5)' }} title="FlyNumber Wholesale SIP · Copenhagen Line (+45 32 33 16 10) · Native Softphone & Free Inbound">
               <span className="standby-dot" style={{ background: '#38bdf8' }} />
               <span className="standby-txt" style={{ color: '#38bdf8', fontSize: 12 }}>
-                Copenhagen Line ({settings?.flynumber_did || '+45 32 33 16 10'}): Outbound via Telnyx · Inbound via FlyNumber SIP ($0/min)
+                FlyNumber Wholesale SIP · Copenhagen Line ({settings?.flynumber_did || '+45 32 33 16 10'}): Native SIP &amp; Free Inbound ($0/min)
               </span>
             </div>
 
@@ -1703,6 +1809,56 @@ export default function Dialer() {
               </div>
               <Waveform active={phase === 'active'} level={isWebrtc ? webrtc.level : null} />
 
+              {phase === 'active' && isWebrtc && (
+                <div className="incall-dialer-strip">
+                  <span className="incall-dialer-title">
+                    <Grid3x3 size={15} /> Touch Tone (IVR):
+                  </span>
+                  <div className="incall-dialer-keys">
+                    {DTMF_KEYS.map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        className="incall-tone-btn"
+                        onClick={() => webrtcRef.current?.sendDtmf(d)}
+                        title={`Send ${d} immediately`}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="incall-dialer-input-group">
+                    <input
+                      type="text"
+                      className="incall-tone-input"
+                      placeholder="Digit & Enter"
+                      value={inCallTone}
+                      onChange={(e) => setInCallTone(e.target.value.replace(/[^0-9*#A-Da-d]/g, ''))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          sendInCallTone();
+                        }
+                      }}
+                      title="Type digit(s) and press Enter"
+                    />
+                    <button
+                      type="button"
+                      className="btn primary sm incall-enter-btn"
+                      onClick={() => sendInCallTone()}
+                      title="Send digit(s) into call"
+                    >
+                      Enter ↵
+                    </button>
+                  </div>
+                  {webrtc.dtmfLog && (
+                    <span className="incall-dialer-log" title="Last tones sent">
+                      Sent: {webrtc.dtmfLog}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div className="outcome-head">
                 <span>{phase === 'active' ? 'Click Hangup (Red) or pick a result below to classify:' : 'Call results unlock when a call starts'}</span>
                 <label className="auto-next"><span>Auto-next</span><Switch checked={autoNext} onChange={setAutoNext} /></label>
@@ -1712,7 +1868,7 @@ export default function Dialer() {
                   const Icon = ICONS[o.icon] || Circle;
                   return (
                     <motion.button key={o.id} whileTap={{ scale: 0.94 }} disabled={phase !== 'active'} className="outcome" style={{ '--c': o.color }} onClick={() => logOutcome(o.id)}>
-                      <Icon size={17} /><span>{o.label}</span><kbd>{o.key}</kbd>
+                      <Icon size={17} /><span>{o.label}</span>
                     </motion.button>
                   );
                 })}
@@ -1738,7 +1894,7 @@ export default function Dialer() {
               {dry && phase === 'idle' && (
                 <div className="hint-dry">
                   <FlaskConical size={13} /> Test mode is on. Calls are simulated in the browser — nothing is dialed.
-                  Switch to Live mode in Settings once {softphone} is registered with Telnyx.
+                  Switch to Live mode in Settings once {softphone} is registered with FlyNumber.
                 </div>
               )}
               <AnimatePresence>

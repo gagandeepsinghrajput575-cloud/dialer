@@ -42,13 +42,13 @@ async function load(apiBase) {
   // The desktop supervisor publishes its capability in the heartbeat just before spawning us.
   // On a cold start this first request can race that beat; retry only its temporary 401.
   let credentials;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       credentials = await getJson(apiBase, '/api/telephony/carrier-credentials', token, DEFAULT_TIMEOUT_MS, daemonToken);
       break;
     } catch (e) {
-      if (e.status !== 401 || attempt === 9) throw e;
-      await sleep(100);
+      if (e.status !== 401 || attempt === 29) throw e;
+      await sleep(200);
     }
   }
   if (!credentials?.configured) {

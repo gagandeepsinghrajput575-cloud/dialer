@@ -10,6 +10,7 @@ const dgram = require('dgram');
 const sdpLib = require('./sdp');
 const rtp = require('./rtp');
 const g711 = require('./g711');
+const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
 
 const LEVEL_INTERVAL_MS = 120;
 
@@ -18,6 +19,17 @@ function attach(ua) {
   ua.mediaSockets = ua.mediaSockets || [];
   ua.levels = ua.levels || { input: 0, output: 0, at: 0 };
   ua.pump = null;
+
+  ua.dialogForMedia = function dialogForMedia(media) {
+    if (ua.active?.media === media) return ua.active;
+    if (ua.pump?.media === media) return ua.pump;
+    if (ua.dialogs) {
+      for (const d of ua.dialogs.values()) {
+        if (d.media === media) return d;
+      }
+    }
+    return ua.pump || ua.active || null;
+  };
 
   ua.openMediaSocket = async function openMediaSocket() {
     const socket = dgram.createSocket('udp4');
@@ -34,7 +46,8 @@ function attach(ua) {
       // path may then re-latch it onto the address the media actually arrives from.
       target: { host: '', port: 0 },
       codec: sdpLib.PT_PCMU, remotePt: sdpLib.PT_PCMU, remoteDtmfPt: 0,
-      stats: { sent: 0, received: 0, dtmf: 0 },
+      stats: { sent: 0, received: 0, dtmf: 0, writeFailures: 0 },
+      reorder: null,
       send(buf) {
         // Read through `media.target`, never a captured local: SDP replaces the whole object,
         // and a stale closure here means a connected call that sends no audio at all.
@@ -45,9 +58,21 @@ function attach(ua) {
         return true;
       },
       setMuted(m) { media.muted = !!m; },
-      dtmf(digit) { return rtp.dtmfPackets({ session, digit }); },
-      close() { try { socket.close(); } catch { /* already closed */ } },
+      dtmf(digit) { return rtp.dtmfPackets({ session, digit, payloadType: media.remoteDtmfPt || sdpLib.PT_DTMF }); },
+      close() {
+        if (media.reorder) {
+          media.reorder.clear();
+        }
+        try { socket.close(); } catch { /* already closed */ }
+      },
     };
+    media.reorder = new rtp.ReorderBuffer({
+      capacity: 8,
+      maxHoldMs: 25,
+      onPacket: (pkt) => {
+        ua.processRtpPacket(media, pkt);
+      },
+    });
     socket.on('message', (buf, rinfo) => {
       if (media.target.host !== rinfo.address || media.target.port !== rinfo.port) {
         media.target = { host: rinfo.address, port: rinfo.port };
@@ -70,10 +95,50 @@ function attach(ua) {
       if (digit && packet.payload[1] & 0x80) { media.stats.dtmf += 1; ua.emit('dtmf', { digit }); }
       return;
     }
+    if (media.reorder) {
+      media.reorder.push(packet);
+    } else {
+      ua.processRtpPacket(media, packet);
+    }
+  };
+
+  ua.processRtpPacket = function processRtpPacket(media, packet) {
     if (packet.payloadType !== media.remotePt) return;   // a codec we did not agree to
     const pcm = g711.decode(packet.payload, packet.payloadType);
-    try { ua.audio?.write?.(pcm); } catch { /* the speaker died; the call still stands */ }
-    ua.levels.output = g711.level(pcm);
+    const dialog = ua.dialogForMedia(media);
+
+    // Early media suppression: mute incoming audio to local speaker while in early states
+    // (calling, early, proceeding). This silences telecom in-band ringback tones while
+    // instantly passing the prospect's live voice when answered (confirmed).
+    const isEarlyMedia = dialog && (dialog.state === 'early' || dialog.state === 'calling' || dialog.state === 'proceeding');
+    const shouldPlayToSpeaker = !isEarlyMedia;
+
+    let writeOk = true;
+    if (shouldPlayToSpeaker) {
+      try {
+        if (ua.audio?.write) {
+          const res = ua.audio.write(pcm);
+          if (res === false) {
+            writeOk = false;
+          }
+        }
+      } catch {
+        writeOk = false;
+      }
+    }
+    if (!writeOk) {
+      media.stats.writeFailures = (media.stats.writeFailures || 0) + 1;
+      ua.levels.output = 0;
+      ua.emit('error', {
+        message: 'Audio output device write failed',
+        scope: 'media',
+        type: 'audio_write_failure',
+        callId: dialog?.id,
+      });
+      return;
+    }
+    if (dialog?.recorder) dialog.recorder.pushRemote(pcm);
+    ua.levels.output = shouldPlayToSpeaker ? g711.level(pcm) : 0;
     ua.maybeEmitLevels();
   };
 
@@ -94,7 +159,13 @@ function attach(ua) {
   ua.ensureAudioOpen = async function ensureAudioOpen() {
     if (ua.audioOpened) return true;
     if (!ua.audio?.open) { ua.audioOpened = true; return true; }
-    try { await ua.audio.open({}); ua.audioOpened = true; return true; } catch (e) {
+    try {
+      const inputDevice = ua.audioDevices?.inputDevice || '';
+      const outputDevice = ua.audioDevices?.outputDevice || '';
+      await ua.audio.open({ inputDevice, outputDevice });
+      ua.audioOpened = true;
+      return true;
+    } catch (e) {
       ua.log('media', `could not open the audio device: ${e?.message || e}`);
       return false;
     }
@@ -111,11 +182,19 @@ function attach(ua) {
   ua.startPump = function startPump(dialog) {
     ua.stopPump();
     let armed = dialog;
+    if (!dialog.recorder) {
+      dialog.recorder = new CallRecorder({ callId: dialog.id, externalId: dialog.externalId });
+    }
     const onFrame = (frame) => {
       if (!armed) return;
-      const pcm = frame instanceof Int16Array ? frame : g711.toInt16(frame);
+      const pcm = frame instanceof Int16Array
+        ? frame
+        : (Buffer.isBuffer(frame)
+          ? new Int16Array(frame.buffer, frame.byteOffset, Math.floor(frame.byteLength / 2))
+          : (frame instanceof Float32Array ? g711.toInt16(frame) : frame));
       ua.levels.input = g711.level(pcm);
       const media = armed.media;
+      if (armed.recorder) armed.recorder.recordFrame(pcm, !!media?.muted);
       if (!media || media.muted) return;
       media.send(media.session.packet(g711.encode(pcm, media.codec), media.stats.sent === 0));
       ua.maybeEmitLevels();
@@ -166,6 +245,9 @@ function attach(ua) {
   // 183 with SDP: the far end is playing ringback, so wire the receive path early.
   ua.startEarlyMedia = function startEarlyMedia(dialog) {
     ua.applyRemoteSdp(dialog);
+    if (!dialog.recorder) {
+      dialog.recorder = new CallRecorder({ callId: dialog.id, externalId: dialog.externalId });
+    }
     if (dialog.media && !ua.pump) ua.startPump(dialog);
   };
 
@@ -180,10 +262,45 @@ function attach(ua) {
     dialog.media.remoteDtmfPt = remote.dtmfPt || 0;
     dialog.media.session.payloadType = chosen.pt;
     dialog.codec = chosen.name;
+
+    // FlyNumber Symmetric RTP NAT Latching: transmit 3 consecutive silent G.711 RTP packets immediately
+    const silentPackets = rtp.createSilentNatPackets(dialog.media.session, 3, chosen.pt);
+    for (const pkt of silentPackets) {
+      dialog.media.send(pkt);
+    }
+
     return true;
   };
 
   ua.releaseMedia = function releaseMedia(dialog) {
+    if (dialog.recorder) {
+      const rec = dialog.recorder;
+      dialog.recorder = null;
+      try {
+        const final = rec.finalize();
+        if (final.totalSamples > 0) {
+          uploadOrSaveRecording({
+            wavBuffer: final.wavBuffer,
+            durationSec: final.durationSec,
+            callId: final.callId,
+            externalId: dialog.externalId || final.externalId,
+            apiBase: ua.apiBase,
+            log: (scope, msg) => ua.log(scope, msg),
+          }).catch(() => {});
+          ua.emit('recording', {
+            callId: dialog.externalId || final.callId,
+            dialogId: final.callId,
+            externalId: dialog.externalId || final.externalId,
+            durationSec: final.durationSec,
+            sizeBytes: final.sizeBytes,
+            mimeType: 'audio/wav',
+            wavBase64: final.sizeBytes <= 2 * 1024 * 1024 ? final.wavBuffer.toString('base64') : null,
+          });
+        }
+      } catch (e) {
+        ua.log('media', `recorder finalize error: ${e?.message || e}`);
+      }
+    }
     if (!dialog.media) return;
     dialog.media.close();
     ua.mediaSockets = ua.mediaSockets.filter((m) => m !== dialog.media);

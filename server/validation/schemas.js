@@ -165,7 +165,9 @@ const settingsUpdate = z.object({
   webrtc_ws_url: str(300).optional(),
   webrtc_credential_handoff: boolish.optional(),
   webrtc_mic_device: str(200).optional(),
+  webrtc_mic_name: str(200).optional(),
   webrtc_speaker_device: str(200).optional(),
+  webrtc_speaker_name: str(200).optional(),
   // Native daemon liveness/capability fields are read-only: only the no-Origin supervisor beat
   // writes them. Settings updates intentionally strip them even though they appear in DEFAULTS.
   // ---- FlyNumber Copenhagen Inbound DID (+45 32 33 16 10) ----

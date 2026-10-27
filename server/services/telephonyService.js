@@ -73,16 +73,16 @@ const mode = () => {
 // What the OS hands to Zoiper/Linphone/Telephone: sip:+4520123456 or tel:+4520123456
 const buildDialUri = (phone, proto = protocol()) => `${proto}:${phone}`;
 
-// ---- Telnyx ----
-// The carrier is Telnyx (Mission Control Portal): a Credential-Auth SIP Connection dialled
-// either from a desktop softphone (Zoiper/Linphone) over the SIP FQDN, or straight from this
-// browser over Telnyx's WebRTC signalling gateway. Both modes read the same account.
-const TELNYX_SIP_DOMAIN = 'sip.telnyx.com';
+// ---- FlyNumber Wholesale SIP ----
+// Primary carrier: FlyNumber Wholesale SIP (sip.flynumber.com:5060) providing Copenhagen DID
+// (+45 32 33 16 10) and native UDP SIP calling via pulse-sip-daemon on macOS CoreAudio.
+const FLYNUMBER_SIP_DEFAULT = 'sip.flynumber.com';
+const COPENHAGEN_DEFAULT_DID = '+4532331610';
+const TELNYX_SIP_DOMAIN = 'sip.telnyx.com'; // backward compatibility alias for legacy migrations
 const TELNYX_WEBRTC_WS = 'wss://rtc.telnyx.com';
 
-// The SIP FQDN every URI is addressed to. A saved value wins, so pointing Pulse at your own
-// PBX or a Telnyx regional edge still works; the Telnyx domain is the floor, not a guess.
-const sipServer = () => String(settings.get('telnyx_sip_server') || '').trim() || TELNYX_SIP_DOMAIN;
+// The SIP FQDN every URI is addressed to. FlyNumber wins whenever saved.
+const sipServer = () => String(settings.get('flynumber_sip_server') || settings.get('telnyx_sip_server') || '').trim() || FLYNUMBER_SIP_DEFAULT;
 
 // Same number addressed straight at the SIP domain — handy as a manual fallback.
 function buildDialUriFull(phone) {
@@ -91,14 +91,9 @@ function buildDialUriFull(phone) {
   return `sip:${phone}@${server}`;
 }
 
-const sipConfigured = () => !!String(settings.get('telnyx_sip_user') || '').trim();
+const sipConfigured = () => !!String(settings.get('flynumber_sip_user') || settings.get('telnyx_sip_user') || '').trim();
 
 // ---------------------------------------------------------------- in-browser WebRTC softphone
-// Telnyx's WebRTC endpoint is a single fixed gateway (wss://rtc.telnyx.com) rather than a
-// port/path derived from the SIP server, so there is nothing to compute: the setting is an
-// override for a proxy or a different region, and the Telnyx gateway is the documented default.
-// `webrtcSession()` reports which of the two is in play so the UI never has to guess.
-
 const webrtcServer = () => sipServer();
 
 function webrtcWsUrl() {
@@ -118,8 +113,8 @@ function buildWebRtcUri(phone) {
 function webrtcReadiness() {
   const wsUrl = webrtcWsUrl();
   const server = webrtcServer();
-  const user = String(settings.get('telnyx_sip_user') || '').trim();
-  const hasPassword = !!String(settings.get('telnyx_sip_password') || '').trim();
+  const user = String(settings.get('flynumber_sip_user') || settings.get('telnyx_sip_user') || '').trim();
+  const hasPassword = !!String(settings.get('flynumber_sip_password') || settings.get('telnyx_sip_password') || '').trim();
   const missing = [];
   if (!server) missing.push('server');
   if (!user) missing.push('user');
@@ -128,30 +123,25 @@ function webrtcReadiness() {
   return { wsUrl, server, user, hasPassword, missing, configured: missing.length === 0 };
 }
 
-// The descriptor the browser needs to open a session. The SIP password is only included
-// when the agent has explicitly opted into the handoff (Settings → Telephony), because the
-// rest of the app promises this secret never leaves the server; the UI explains the trade-off.
+// The descriptor the browser needs to open a session.
 function webrtcSession() {
   const r = webrtcReadiness();
   const handoff = settings.getBool('webrtc_credential_handoff');
-  const password = String(settings.get('telnyx_sip_password') || '');
+  const password = String(settings.get('flynumber_sip_password') || settings.get('telnyx_sip_password') || '');
   return {
     mode: 'webrtc',
-    provider: 'telnyx',
+    provider: 'flynumber',
     configured: r.configured,
     missing: r.missing,
     wsUrl: r.wsUrl,
-    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : 'telnyx_default',
+    wsUrlSource: String(settings.get('webrtc_ws_url') || '').trim() ? 'settings' : 'flynumber_default',
     server: r.server,
     username: r.user,
-    // Normalized like every other caller ID the app shows or sends: the browser puts this
-    // straight into the SIP From header, so '+45 20 12 34 56' would be a malformed one.
-    callerId: normalizePhone(settings.get('caller_id')) || nextCallerId().callerId || '',
+    // Normalized like every other caller ID the app shows or sends
+    callerId: normalizePhone(settings.get('caller_id')) || normalizePhone(settings.get('flynumber_did')) || nextCallerId().callerId || '',
     password: handoff ? password : '',
     hasPassword: r.hasPassword,
     credentialHandoff: handoff,
-    // A browser cannot register without the secret, so a closed handoff is a blocking
-    // condition the UI must surface rather than an optional nicety.
     canRegister: r.configured && handoff,
     micDevice: String(settings.get('webrtc_mic_device') || ''),
     speakerDevice: String(settings.get('webrtc_speaker_device') || ''),
@@ -352,27 +342,20 @@ function numberKind(phone) {
   return { ...match, national: `${head} ${national.slice(2, 4)} ${national.slice(4, 6)} ${national.slice(6, 8)}` };
 }
 
-// ---- FlyNumber Hybrid VoIP Architecture ----
-// FlyNumber handles inbound callbacks at $0/min via native SIP (sip.flynumber.com)
-// while Telnyx handles outbound dialing stamped with the verified Copenhagen DID.
-const FLYNUMBER_SIP_DEFAULT = 'sip.flynumber.com';
-const COPENHAGEN_DEFAULT_DID = '+4532331610';
-
+// ---- FlyNumber Wholesale VoIP Architecture ----
 function flynumberConfig() {
-  const did = normalizePhone(settings.get('flynumber_did') || COPENHAGEN_DEFAULT_DID) || COPENHAGEN_DEFAULT_DID;
+  const did = normalizePhone(settings.get('flynumber_did') || settings.get('caller_id') || COPENHAGEN_DEFAULT_DID) || COPENHAGEN_DEFAULT_DID;
   const status = String(settings.get('flynumber_status') || 'pending').toLowerCase();
   const sipHost = String(settings.get('flynumber_sip_server') || '').trim() || FLYNUMBER_SIP_DEFAULT;
-  const sipUser = String(settings.get('flynumber_sip_user') || '').trim();
-  const hasPassword = !!String(settings.get('flynumber_sip_password') || '').trim();
+  const sipUser = String(settings.get('flynumber_sip_user') || settings.get('telnyx_sip_user') || '').trim();
+  const hasPassword = !!String(settings.get('flynumber_sip_password') || settings.get('telnyx_sip_password') || '').trim();
   const linphoneConfigured = settings.getBool('flynumber_linphone_configured');
-  const telnyxVerified = settings.getBool('telnyx_caller_id_verified');
+  const callerIdVerified = settings.getBool('telnyx_caller_id_verified');
   const inboundMode = String(settings.get('inbound_routing_mode') || 'webrtc');
   const isWebRtcMode = inboundMode === 'webrtc' || String(settings.get('telephony_mode') || '').toLowerCase() === 'webrtc';
 
-  const telnyxUser = String(settings.get('telnyx_sip_user') || '').trim();
-  const telnyxHost = sipServer();
-  const webrtcForwardingUri = telnyxUser ? `sip:${telnyxUser}@${telnyxHost}` : '';
   const linphoneSipAddress = sipUser ? `sip:${sipUser}@${sipHost}` : '';
+  const webrtcForwardingUri = linphoneSipAddress || (sipUser ? `sip:${sipUser}@${sipHost}` : '');
 
   const bridgeSteps = isWebRtcMode ? [
     {
@@ -389,25 +372,25 @@ function flynumberConfig() {
       title: 'Route FlyNumber to Built-in App',
       description: webrtcForwardingUri
         ? `In FlyNumber, set Call Forwarding on ${did} to SIP URI: ${webrtcForwardingUri}`
-        : `Enter your Telnyx SIP username above to generate your FlyNumber SIP forwarding address`,
-      completed: linphoneConfigured || (!!telnyxUser && !!settings.get('telnyx_sip_password')),
-      status: (linphoneConfigured || (telnyxUser && settings.get('telnyx_sip_password'))) ? 'configured' : 'waiting_credentials',
+        : `Enter your FlyNumber SIP username above to generate your FlyNumber SIP forwarding address`,
+      completed: linphoneConfigured || (!!sipUser && hasPassword),
+      status: (linphoneConfigured || (sipUser && hasPassword)) ? 'configured' : 'waiting_credentials',
     },
     {
       step: 3,
       id: 'telnyx_verify',
-      title: 'Telnyx Verification Call & PIN',
-      description: `Telnyx calls ${did}, rings directly inside this browser tab, automated voice speaks 6-digit PIN`,
-      completed: telnyxVerified,
-      status: telnyxVerified ? 'verified' : 'pending_call',
+      title: 'FlyNumber Copenhagen Line Verification',
+      description: `FlyNumber verification call rings ${did} directly in this app or Linphone`,
+      completed: callerIdVerified,
+      status: callerIdVerified ? 'verified' : 'pending_call',
     },
     {
       step: 4,
       id: 'caller_id_override',
-      title: 'Set Caller ID Override on Telnyx',
+      title: 'Active Caller ID Override',
       description: `Use verified ${did} as outbound caller ID for all Danish cold-calling campaigns`,
-      completed: telnyxVerified && normalizePhone(settings.get('caller_id')) === did,
-      status: (telnyxVerified && normalizePhone(settings.get('caller_id')) === did) ? 'active' : 'pending_override',
+      completed: callerIdVerified && (normalizePhone(settings.get('caller_id')) === did || normalizePhone(settings.get('flynumber_did')) === did),
+      status: (callerIdVerified && (normalizePhone(settings.get('caller_id')) === did || normalizePhone(settings.get('flynumber_did')) === did)) ? 'active' : 'pending_override',
     },
   ] : [
     {
@@ -421,26 +404,26 @@ function flynumberConfig() {
     {
       step: 2,
       id: 'linphone',
-      title: 'Connect Linphone to FlyNumber SIP',
-      description: `Input server (${sipHost}), username, and password into Linphone softphone`,
+      title: 'Connect Softphone to FlyNumber SIP',
+      description: `Input server (${sipHost}), username, and password into Linphone or native daemon`,
       completed: linphoneConfigured && hasPassword,
       status: (linphoneConfigured && hasPassword) ? 'configured' : 'waiting_credentials',
     },
     {
       step: 3,
       id: 'telnyx_verify',
-      title: 'Telnyx Verification Call & PIN',
-      description: `Telnyx calls ${did}, rings your Linphone for free, automated voice speaks 6-digit PIN`,
-      completed: telnyxVerified,
-      status: telnyxVerified ? 'verified' : 'pending_call',
+      title: 'FlyNumber Copenhagen Line Verification',
+      description: `FlyNumber verification call rings ${did} directly in Linphone or native softphone`,
+      completed: callerIdVerified,
+      status: callerIdVerified ? 'verified' : 'pending_call',
     },
     {
       step: 4,
       id: 'caller_id_override',
-      title: 'Set Caller ID Override on Telnyx',
+      title: 'Active Caller ID Override',
       description: `Use verified ${did} as outbound caller ID for all Danish cold-calling campaigns`,
-      completed: telnyxVerified && normalizePhone(settings.get('caller_id')) === did,
-      status: (telnyxVerified && normalizePhone(settings.get('caller_id')) === did) ? 'active' : 'pending_override',
+      completed: callerIdVerified && (normalizePhone(settings.get('caller_id')) === did || normalizePhone(settings.get('flynumber_did')) === did),
+      status: (callerIdVerified && (normalizePhone(settings.get('caller_id')) === did || normalizePhone(settings.get('flynumber_did')) === did)) ? 'active' : 'pending_override',
     },
   ];
 
@@ -453,7 +436,8 @@ function flynumberConfig() {
     sipUser,
     hasPassword,
     linphoneConfigured,
-    telnyxVerified,
+    telnyxVerified: callerIdVerified,
+    callerIdVerified,
     inboundMode,
     isWebRtcMode,
     webrtcForwardingUri,
@@ -464,7 +448,7 @@ function flynumberConfig() {
     allCompleted: completedCount === bridgeSteps.length,
     monthlyCost: '$2.95',
     inboundCost: '$0.00 / min (Free Unlimited Inbound SIP)',
-    carrier: 'FlyNumber (Inbound) + Telnyx (Outbound)',
+    carrier: 'FlyNumber Wholesale SIP',
     reputation: '180.dk Clean · Zero Spam Reports',
   };
 }

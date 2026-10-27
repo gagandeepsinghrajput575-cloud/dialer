@@ -37,6 +37,8 @@ fi
 # 2. Electron's own binary, running as plain Node. This is what a packaged .app has.
 electron_js=""
 for candidate in \
+  "$desktop/../node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
+  "$desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
   "$desktop/node_modules/.bin/electron" \
   "$desktop/../node_modules/.bin/electron" \
   "$(command -v electron 2>/dev/null || true)"

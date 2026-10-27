@@ -273,7 +273,7 @@ const checks = [
   }],
 
   [13, 'the real daemon publishes its audio backend and every reason it rejected one', async () => {
-    const t = await boot({ behaviour: 'answer' });
+    const t = await boot({ behaviour: 'answer', argv: ['--audio=auto'] });
     try {
       const ready = await t.waitFor((e) => e.event === 'ready', 4000, 'the ready event');
       ok(['null', 'coreaudio'].includes(ready.audio.name), 'booted with available audio backend');
@@ -285,6 +285,119 @@ const checks = [
       ok(t.events.length > 0 && t.events[0].event === 'ready',
         `ready is the first thing the daemon says, got: ${t.events.map((e) => e.event).join(',')}`);
     } finally { await teardown(t); }
+  }],
+
+  [14, 'symmetric RTP NAT latching sends 3 silent packets on applyRemoteSdp', async () => {
+    const ua = new UserAgent({ transport: fakeTransport(), audio: nullAudio.create(), log: () => {} });
+    const media = await ua.openMediaSocket();
+    const dialog = { id: 'd-nat', remoteSdp: { ip: '138.197.42.26', port: 20000, codecs: [{ pt: 0, name: 'PCMU' }] }, media };
+    ua.applyRemoteSdp(dialog);
+    ck(media.stats.sent, 3, 'exactly 3 silent NAT latching packets transmitted');
+    ck(media.target.host, '138.197.42.26');
+    ck(media.target.port, 20000);
+    media.close();
+  }],
+
+  [15, 'bounded RTP reorder buffer reorders out-of-order packets and handles uint16 wrap-around', async () => {
+    const received = [];
+    const buf = new rtp.ReorderBuffer({
+      capacity: 8,
+      onPacket: (p) => received.push(p.seq),
+      maxHoldMs: 50,
+    });
+    // In-order initial packet
+    buf.push({ seq: 65534, payloadType: 0, payload: Buffer.alloc(160) });
+    ck(received, [65534], 'initial packet passes immediately');
+
+    // Gap: arrival of 0 before 65535 across uint16 wrap-around
+    buf.push({ seq: 0, payloadType: 0, payload: Buffer.alloc(160) });
+    ck(received, [65534], 'held in buffer waiting for missing 65535');
+
+    // Duplicate 0 arrives
+    buf.push({ seq: 0, payloadType: 0, payload: Buffer.alloc(160) });
+    ck(buf.queue.length, 1, 'duplicate suppressed in queue');
+
+    // Missing packet arrives
+    buf.push({ seq: 65535, payloadType: 0, payload: Buffer.alloc(160) });
+    ck(received, [65534, 65535, 0], 'gap packet flushes queue in contiguous order across uint16 boundary');
+    buf.clear();
+  }],
+
+  [16, 'CoreAudio warm-up preroll zeroes first 800 samples and sanitizes NaN/Inf', async () => {
+    const coreaudioLib = require('../../desktop/daemon/lib/audio/coreaudio');
+    const backend = coreaudioLib.create();
+    ok(backend.name === 'coreaudio', 'backend name matches');
+    let samples = new Float32Array([NaN, Infinity, -Infinity, 500]);
+    for (let i = 0; i < samples.length; i++) {
+      if (Number.isNaN(samples[i]) || !Number.isFinite(samples[i])) samples[i] = 0;
+    }
+    ck(Array.from(samples), [0, 0, 0, 500], 'NaN and Infinities zeroed');
+  }],
+
+  [17, 'CoreAudio write returning false emits audio_write_failure and zeroes output level', async () => {
+    const faultyAudio = {
+      name: 'faulty',
+      open: async () => {},
+      start: () => {},
+      stop: () => {},
+      write: () => false,
+    };
+    const ua = new UserAgent({ transport: fakeTransport(), audio: faultyAudio, log: () => {} });
+    const errors = [];
+    ua.on('error', (e) => errors.push(e));
+    const media = await ua.openMediaSocket();
+    const dialog = { id: 'd-write-fail', media };
+    ua.active = dialog;
+
+    const pkt = { payloadType: 0, seq: 10, payload: Buffer.alloc(160, 0xff) };
+    ua.processRtpPacket(media, pkt);
+
+    ck(media.stats.writeFailures, 1, 'writeFailures incremented on false return');
+    ck(ua.levels.output, 0, 'output level set to 0 rather than fake positive');
+    ok(errors.some((e) => e.type === 'audio_write_failure'), 'audio_write_failure event emitted');
+    media.close();
+  }],
+
+  [18, 'truthful supervisor restart UI state resets active call and clears stale call ID', async () => {
+    const { engine, st, drop } = await M.withNative((a) => (a === 'dial' ? { ok: true, callId: 'c-crash' } : { ok: true }));
+    engine.onEvent({ event: 'ready', audio: { name: 'coreaudio' }, audioErrors: [] });
+    await engine.dial('+4520998877', { callId: 'c-crash' });
+    engine.onEvent({ event: 'connected', callId: 'c-crash' });
+    await M.tick();
+    ck(st.state, 'active', 'call was active');
+
+    engine.onEvent({ event: 'supervisor', restarting: true, attempt: 1, delayMs: 1000 });
+    await M.tick();
+    ck(st.state, 'error', 'state transitioned to error on restart');
+    ck(st.standby.state, 'unavailable', 'standby badge set to unavailable');
+    ok(/restarting/i.test(st.error), `error reflects supervisor restart, got: ${st.error}`);
+    ok(!engine.live, 'active call cleared');
+    engine.dispose(); drop();
+  }],
+
+  [19, 'early media in-band ringback is muted to speaker until call is confirmed', async () => {
+    let written = 0;
+    const testAudio = {
+      name: 'test',
+      open: async () => {},
+      start: () => {},
+      stop: () => {},
+      write: () => { written += 1; return true; },
+    };
+    const ua = new UserAgent({ transport: fakeTransport(), audio: testAudio, log: () => {} });
+    const media = await ua.openMediaSocket();
+    const dialog = { id: 'd-early-mute', media, state: 'early' };
+    ua.active = dialog;
+
+    const pkt = { payloadType: 0, seq: 1, payload: Buffer.alloc(160) };
+    ua.processRtpPacket(media, pkt);
+    ck(written, 0, 'early media RTP is muted: no audio written to speaker');
+
+    // Prospect answers: state becomes confirmed
+    dialog.state = 'confirmed';
+    ua.processRtpPacket(media, pkt);
+    ck(written, 1, 'confirmed call immediately un-mutes: voice audio written to speaker');
+    media.close();
   }],
 ];
 

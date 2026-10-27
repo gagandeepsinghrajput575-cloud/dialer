@@ -6,7 +6,6 @@
 
 const crypto = require('crypto');
 const { buildUri, parseUri, identityOf, parseCSeq, serialize } = require('./sipMessage');
-const { viaOf, contactOf } = require('./transport');
 const sdp = require('./sdp');
 const digest = require('./digest');
 
@@ -82,13 +81,13 @@ class Dialog {
     const fromUri = buildUri({ user: account.user, host: account.domain });
     const fromDisplay = account.callerId || '';
     const headers = {
-      Via: via || viaOf(ua.transport, branch()),
+      Via: via || `SIP/2.0/UDP ${ua.transport.host}:${ua.transport.port};rport;branch=${branch()}`,
       'Max-Forwards': '70',
       From: `${fromDisplay ? `"${fromDisplay}" ` : ''}<${fromUri}>;tag=${this.localTag}`,
       To: toHeader || `<${toUri}>${toTag ? `;tag=${toTag}` : ''}`,
       'Call-ID': this.callId,
       CSeq: `${this.cseq} ${method}`,
-      Contact: contactOf(ua.transport, { user: account.user, domain: account.domain, port: account.port }),
+      Contact: `<${buildUri({ user: account.user, host: ua.transport.host, port: ua.transport.port })}>`,
       'User-Agent': ua.userAgent, Allow: 'INVITE, ACK, CANCEL, BYE, OPTIONS, INFO',
     };
     return Object.assign(headers, extra);   // `extra` wins: the peer's Via/From go out verbatim
@@ -141,23 +140,15 @@ class Dialog {
   async sendInvite({ toUri, toTag = '', auth = null }) {
     const media = await this.ua.openMediaSocket();
     this.media = this.media || media;
-    // Over TLS the carrier expects secure media; an offer in the clear is refused with 488.
-    const secure = this.ua.transport.mode === 'tls';
-    if (secure && !this.srtpKey) {
-      // RFC 4568 SDES: 16-byte key + 14-byte salt, base64.
-      this.srtpKey = crypto.randomBytes(30).toString('base64');
-    }
     const body = sdp.build({
-      ip: this.media.mapped?.ip || this.ua.publicIp || this.ua.transport.localHost,
-      port: this.media.mapped?.port || this.media.port,
-      secure,
-      crypto: secure ? `1 AES_CM_128_HMAC_SHA1_80 inline:${this.srtpKey}` : '',
+      ip: this.ua.publicIp || this.ua.transport.host,
+      port: this.media.port,
     });
     this.localSdp = sdp.parse(body);
     const viaBranch = branch();
     const headers = this.baseHeaders({
       method: 'INVITE', toUri, toTag,
-      via: viaOf(this.ua.transport, viaBranch),
+      via: `SIP/2.0/UDP ${this.ua.transport.host}:${this.ua.transport.port};rport;branch=${viaBranch}`,
       extra: { 'Content-Type': 'application/sdp', ...(auth ? { [auth.name]: auth.value } : {}) },
     });
     const msg = serialize({ startLine: `INVITE ${toUri} SIP/2.0`, headers, body });
@@ -188,14 +179,6 @@ class Dialog {
   async onFinalResponse(res, { toUri }) {
     if (this.ended) return;
     if (res.synthetic || res.status === 0) return this.end('failed', { detail: res.reason });
-
-    // A rejected call is the hardest thing to diagnose from the outside: 488 "Not Acceptable Here"
-    // says nothing about *which* part of the offer the carrier refused. Carriers put that in a
-    // Warning or Reason header, so put it in the log where an operator can see it.
-    if (res.status >= 300) {
-      const why = res.first('warning') || res.first('reason') || '';
-      this.ua.log('sip', `<< ${res.status} ${res.reason || ''}${why ? ` — ${why}` : ''}`);
-    }
 
     // Digest challenge: answer it once, with the same Call-ID and a fresh CSeq/branch.
     if ((res.status === 401 || res.status === 407) && !this.triedAuth) {
@@ -260,7 +243,7 @@ class Dialog {
   async answer() {
     if (this.ended) return false;
     this.media = await this.ua.openMediaSocket();
-    const body = sdp.build({ ip: this.media?.mapped?.ip || this.ua.publicIp || this.ua.transport.localHost, port: this.media?.mapped?.port || this.media.port });
+    const body = sdp.build({ ip: this.ua.publicIp || this.ua.transport.host, port: this.media.port });
     this.localSdp = sdp.parse(body);
     const headers = this.responseHeaders({ extra: { 'Content-Type': 'application/sdp' } });
     const msg = serialize({ startLine: 'SIP/2.0 200 OK', headers, body });

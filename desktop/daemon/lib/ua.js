@@ -14,7 +14,6 @@ const crypto = require('crypto');
 const { buildUri, serialize, identityOf } = require('./sipMessage');
 const { Dialog } = require('./dialog');
 const registration = require('./register');
-const { viaOf, contactOf } = require('./transport');
 const mediaLayer = require('./media');
 const { probeCarrier } = require('./reachability');
 const sdp = require('./sdp');
@@ -84,40 +83,10 @@ class UserAgent extends EventEmitter {
    */
   async checkCarrier({ timeoutMs = 1500, force = false } = {}) {
     const domain = this.account?.domain;
-    const port = Number(this.account?.port) || (this.transport?.mode === 'tls' ? 5061 : 5060);
+    const port = Number(this.account?.port) || 5060;
     if (!domain) {
       return { ok: false, reason: 'no-account', ms: 0, host: '', port, error: 'No SIP account is configured.' };
     }
-
-    // Over TLS the connection *is* the evidence. A UDP OPTIONS probe to 5061 would be answered by
-    // nobody and would fail every dial, so ask the socket instead: connected is stronger proof
-    // than any datagram, and a connect attempt exercises the real path.
-    if (this.transport?.mode === 'tls') {
-      if (this.transport.connected) {
-        return { ok: true, cached: true, ms: 0, host: domain, port, via: 'tls' };
-      }
-      const started = Date.now();
-      try {
-        await Promise.race([
-          this.transport.ensureConnected({ host: domain, port }),
-          new Promise((_, reject) => {
-            const timer = setTimeout(() => reject(new Error('timeout')), timeoutMs);
-            timer.unref?.();
-          }),
-        ]);
-        const result = { ok: true, cached: false, ms: Date.now() - started, host: domain, port, via: 'tls' };
-        this.carrierProbe = { ...result, at: Date.now() };
-        this.carrierSuspect = false;
-        return result;
-      } catch (e) {
-        const result = { ok: false, reason: 'tls', ms: Date.now() - started, host: domain, port,
-          error: String(e?.message || e) };
-        this.carrierProbe = { ...result, at: Date.now() };
-        this.log('sip', `carrier unreachable over TLS: ${domain}:${port} (${result.error})`);
-        return result;
-      }
-    }
-
     if (!force && !this.carrierSuspect && this.registration?.state === 'registered') {
       return { ok: true, cached: true, ms: 0, host: domain, port };
     }
@@ -296,7 +265,7 @@ class UserAgent extends EventEmitter {
       // the receive path at it, and answer with the media we actually have.
       if (msg.body) existing.remoteSdp = sdp.parse(msg.body);
       const body = existing.media
-        ? sdp.build({ ip: existing.media.mapped?.ip || this.publicIp || this.transport.localHost, port: existing.media.mapped?.port || existing.media.port })
+        ? sdp.build({ ip: this.publicIp || this.transport.host, port: existing.media.port })
         : '';
       const headers = existing.responseHeaders();
       if (body) headers['Content-Type'] = 'application/sdp';
@@ -342,7 +311,7 @@ class UserAgent extends EventEmitter {
         : `${msg.first('to')};tag=${crypto.randomBytes(4).toString('hex')}`,
       'Call-ID': msg.first('call-id'),
       CSeq: method ? `${String(cseq).split(/\s+/)[0]} ${method}` : cseq,
-      Contact: contactOf(this.transport, { user: this.account.user, domain: this.account.domain, port: this.account.port }),
+      Contact: `<${buildUri({ user: this.account.user, host: this.transport.host, port: this.transport.port })}>`,
       'User-Agent': this.userAgent,
     };
   }

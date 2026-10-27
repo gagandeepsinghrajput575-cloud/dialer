@@ -485,7 +485,21 @@ acceptable and SRTP is not required. Work: a TLS transport in `desktop/daemon/li
 
 ---
 
-## 15. SIP over TLS Transport — Built (2026-10-28)
+## 15. SIP over TLS Transport — Built, then ROLLED BACK (2026-10-28)
+
+> **ROLLED BACK.** The TLS/SRTP/STUN path described in this section was removed at the operator's
+> request after it produced loud square-wave buzzes. It was a chain of four linked requirements
+> (TLS 5061 → mandatory SRTP → NAT-traversed media via STUN), and the last defect — an SRTP context
+> that was never built, so the 10-byte auth tag was played as audio — was the one that reached a
+> live call. The daemon is back on the UDP trunk from commit `12ea6bf`, which was working.
+>
+> What survives: the 1.5 s carrier preflight (§14), which is UDP-only and independent of media.
+> What was removed: `desktop/daemon/lib/{srtp,stun}.js`, the TLS mode in `transport.js`, the SDP
+> `RTP/SAVP`/crypto offer, `PULSE_SIP_TRANSPORT`, `PULSE_PUBLIC_IP`, and their four test suites.
+>
+> Restoring the UDP trunk also means the FlyNumber portal must have **TLS Encryption: OFF** again —
+> with TLS on, the portal stops accepting plaintext SIP.
+
 
 ### A. What was built
 

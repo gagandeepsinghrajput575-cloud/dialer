@@ -16,9 +16,6 @@ const path = require('path');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-native-sip-'));
 process.env.DATA_DIR = tmp;
 process.env.PULSE_TEST = '1';
-// A unit test must not inherit the operator's trunk choice from .env: this suite asserts the UDP
-// wiring (5060), while test/unit/tls-transport.test.js covers the secure path.
-process.env.PULSE_SIP_TRANSPORT = 'udp';
 
 const migrate = require('../../server/db/migrate');
 migrate.run();

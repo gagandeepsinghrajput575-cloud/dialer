@@ -257,40 +257,17 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Measured on the Tenda LAN (`192.168.0.100`, gw `192.168.0.1`, public `103.192.64.176`):* three UDP `REGISTER`s → **3/3 answered `401 Unauthorized` in 226–350 ms**; an unauthenticated `INVITE` → **`407` in 261 ms**; TCP 5060 `REGISTER` → **`401` in 440 ms**; TLS 5061 → **valid cert for `sip.flynumber.com`, `401` in 823 ms**. The daemon was registered through the same network at the time.
     - *What is actually wrong:* the ALG **rewrites the SIP text**. The `Via` we send (`192.168.0.100:<port>`) comes back as `10.180.131.111:26407` — a CGNAT address — while the real mapping is `rport=48209`. Stateless responses still arrive because `rport` sends them to the source, which is why registration and OPTIONS work. Dialog routing uses the rewritten Via/Contact, whose port never matches, so retransmissions run to **Timer B = 64 × T1 = 32 s** and the UI reports `timeout`. `traceroute` confirms CGNAT at hop 2 (`10.153.110.1`), so DMZ/port-forwarding can never fix this.
     - *Fix 1 (shipped):* a **carrier preflight** — `desktop/daemon/lib/reachability.js` sends one `OPTIONS` before the first INVITE and refuses to dial if nothing answers, so the operator gets an actionable message in **~1.5 s** instead of staring at "Calling…" for 32 s. Skipped entirely while `registered` (a live registration is better evidence, and the normal dial path pays 0 ms). New daemon action `reachability`, and `status.carrier` exposes the last result. Guarded by `VAL-NET-010` in `test/unit/reachability.test.js`.
-    - *Fix 2 (next, proven viable):* **SIP over TLS on 5061**. The ALG cannot parse TLS, so no rewriting happens — confirmed by the TLS 401, whose `Via` came back untouched with `received=103.192.64.176` (the real public IP) and **no `Require: sec-agree`**, so plain G.711 RTP can stay (no SRTP work). Requires `transport.js` to gain a TLS transport and TLS enabled in the FlyNumber portal.
+    - *Fix 2 (attempted, reverted):* **SIP over TLS on 5061**. The ALG cannot parse TLS, so the TLS 401 came back with the Via untouched and `received=103.192.64.176` — the approach was sound. It was reverted anyway because TLS turned out to require SRTP, SRTP required per-socket STUN for CGNAT media, and the third defect in that chain reached a live call as a loud buzz. See item 15.
 
 
-15. **RESOLVED (2026-10-28): SIP over TLS (5061) — Live & Verified on Home Wi-Fi:**
-    - *Why:* The Tenda router's SIP ALG on UDP 5060 rewrote plaintext Via/Contact to an internal CGNAT address with mismatched ports, causing dialog routing timeouts (item 14). TLS completely encrypts SIP headers, making them untamperable.
-    - *What changed:* `desktop/daemon/lib/transport.js` implemented TLS 5061 alongside UDP — persistent TLS socket, stream framing by `Content-Length`, RFC 5626 CRLF keep-alives, reconnect on loss, certificate validation, and zero UDP retransmits.
-    - *SDP Fix:* Fixed `c=` line to use `Transport.localHost` (IP literal) rather than `transport.host` (which was resolving to `sip.flynumber.com`).
-    - *Live Verification:* Connected to `138.197.42.26:5061 (ESTABLISHED)` over home Wi-Fi (`192.168.0.100`). Registered cleanly: `{"event":"registered","account":"a2YqM0bsm@sip.flynumber.com","expires":300}`.
-16. **RESOLVED (2026-10-28): SRTP (RFC 3711) Mandatory on FlyNumber TLS Legs:**
-    - *Symptom:* Initial TLS outbound call rejected with `488 Not Acceptable Here` (`cause=88 INCOMPATIBLE_DESTINATION`).
-    - *Root Cause:* While FlyNumber accepts unauthenticated TLS registrations without demanding `sec-agree`, its media proxy strictly enforces **SRTP (`RTP/SAVP`) with SDES crypto keys** on any call negotiated over a TLS leg. Plain `RTP/AVP` is rejected with cause 88.
-    - *Fix:* Built genuine RFC 3711 SRTP engine in `desktop/daemon/lib/srtp.js` with `AES_CM_128_HMAC_SHA1_80`:
-      - AES-CM keystream derivation (AES-128 key, salt, and HMAC-SHA1 auth key from SDES master key).
-      - Packet IV calculation: `salt ⊕ SSRC ⊕ 48-bit packet index`.
-      - 32-bit rollover counter (ROC) tracking so calls remain decryptable beyond sequence 65,535.
-      - Outbound RTP payload encryption + 10-byte HMAC-SHA1 authentication tag.
-      - Inbound RTP tag authentication before decryption (invalid packets dropped cleanly to prevent decoded noise).
-      - Offered `RTP/SAVP` with `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:...` on TLS legs.
-      - Wired `PULSE_PUBLIC_IP` through `.env` and trunk descriptor into SDP `c=` lines.
-    - *Verification:* Guarded by `VAL-NET-013` (13 checks, cross-checked against `openssl enc -aes-128-ctr`). All 36 unit suites (519 checks) and 38 integration suites (51 checks) passing.
-
-17. **RESOLVED (2026-10-28): STUN Per-Socket Port Mapping for Inbound RTP Media:**
-    - *Symptom:* Call connected over TLS + SRTP, but 0 inbound RTP audio packets were received on the wire (`wire: 0 received: 0 authFail: 0`).
-    - *Root Cause:* Under CGNAT, the carrier sends RTP media strictly to the port advertised in the SDP offer. Our SDP offered `103.192.64.176:<local port>`, but the router/CGNAT maps an entirely different source port per socket (e.g., local `52466` mapped to external `48154`). The carrier was firing RTP at a port nobody owned.
-    - *Fix:* Built `desktop/daemon/lib/stun.js` to probe STUN directly **from the media socket itself**, discovering its actual external mapped IP and port. SDP now advertises this exact STUN-mapped endpoint (with fallback to `PULSE_PUBLIC_IP`).
-    - *Live Verification:* Packets arrived, authenticated, and decrypted cleanly (`wire: 435 received: 435 authFail: 0 output: 0.98`).
-    - *Guards:* Guarded by `VAL-NET-014` (9 checks). All 37 unit suites (528 checks) and 38 integration suites (51 checks) passing.
-
-
-18. **ABANDONED & REVERTED (2026-10-28): TLS + SRTP Reverted to Clean UDP Mode:**
-    - *Symptom:* Live call produced deafening, loud buzzes / square-wave static in earphones.
-    - *Root Cause:* The SRTP decryption engine (`AES_CM_128_HMAC_SHA1_80` in `srtp.js`) had a keystream alignment/IV offset discrepancy with FlyNumber's media gateway. Raw pseudo-random decrypted bytes were fed straight into the G.711 decoder, producing full-scale square-wave acoustic buzzes (`0xF8 0xFF ...` rail clipping).
-    - *Resolution:* Abandoned the over-engineered TLS+SRTP+STUN detour. Restored `PULSE_SIP_TRANSPORT=udp` in `.env` and toggled TLS to OFF in FlyNumber. Plain UDP 5060 with unencrypted G.711 RTP works naturally without crypto artifacts, utilizing the clean Kaiser-sinc resampler in `pulse_audio.h`.
-
+15. **ATTEMPTED, THEN REVERTED (2026-10-28): SIP over TLS + SRTP + STUN:**
+    - *Why it was attempted:* the ALG rewrites plaintext Via/Contact to a CGNAT address whose port does not match the real mapping (item 14), so dialog routing timed out.
+    - *What was built:* a TLS 5061 transport in `transport.js` (stream framing by `Content-Length`, CRLF keep-alives, reconnect, certificate validation); `srtp.js` (AES_CM_128_HMAC_SHA1_80 per RFC 3711); `stun.js` (the socket's real mapped address for the SDP line). Measured along the way: TLS registration succeeded, plain `RTP/AVP` was rejected `488` / `Q.850 cause=88`, and the CGNAT mapping differs from the local port (local 52466 mapped to 48154).
+    - *Why it was reverted:* it became a chain of four linked requirements — TLS, then mandatory SRTP, then NAT-traversed media, then per-socket STUN — so every new requirement was another chance to fail on a live call. The failure that reached one was deafening square-wave buzz: the SRTP context was never built (the SDP crypto attribute kept its `crypto:` prefix and did not parse), so the 10-byte authentication tag was decoded as audio. The operator chose the working UDP trunk over a fourth round of crypto debugging.
+    - *What was removed:* `desktop/daemon/lib/{srtp,stun}.js`, the TLS mode and Via/Contact helpers in `transport.js`, the `RTP/SAVP` + crypto SDP offer, `PULSE_SIP_TRANSPORT`, `PULSE_PUBLIC_IP`, and four test suites (`VAL-NET-011`..`014`).
+    - *What was kept:* the 1.5 s UDP carrier preflight (item 14) — media-independent, and still the difference between an actionable error in 1.5 s and a 32 s hang.
+    - *Rollback point:* `12ea6bf`. The FlyNumber portal must have TLS Encryption **OFF** for the UDP trunk to register.
+    - *If ever revisited:* behind a flag, against a mock carrier that enforces SRTP, and never on the live trunk until a recorded call round-trips audio in both directions.
 
 ### B. Brute-Force Restart Runbook
 

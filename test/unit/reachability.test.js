@@ -128,33 +128,6 @@ async function fakeCarrier(reply) {
     answering.socket.close();
   }
 
-  // 6. Over TLS the gate must ask the socket, never send a UDP probe to 5061.
-  {
-    const tlsTransport = (connected, ensure) => ({
-      mode: 'tls', connected, host: 'sip.example', port: 5061,
-      send: async () => ({}), on: () => {}, close: () => {},
-      ...(ensure ? { ensureConnected: ensure } : {}),
-    });
-    const ua2 = new UserAgent({
-      transport: tlsTransport(true),
-      audio: null,
-      account: { domain: 'sip.example', port: 5061, user: 'alice', password: 'secret' },
-    });
-    const open = await ua2.checkCarrier();
-    check(open.ok === true && open.via === 'tls',
-      'an open TLS connection satisfies the gate without a UDP probe');
-
-    let attempts = 0;
-    const ua3 = new UserAgent({
-      transport: tlsTransport(false, async () => { attempts += 1; throw new Error('connect refused'); }),
-      audio: null,
-      account: { domain: 'sip.example', port: 5061, user: 'alice', password: 'secret' },
-    });
-    const failedConnect = await ua3.checkCarrier({ timeoutMs: 500 });
-    check(failedConnect.ok === false && attempts === 1,
-      'a TLS connect failure fails the gate instead of pretending to probe');
-  }
-
   console.log(`\n${failed ? '\u{1F4A5}' : '\u{1F389}'} ${passed}/${passed + failed} checks passed`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => {

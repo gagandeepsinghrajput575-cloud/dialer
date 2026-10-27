@@ -5,10 +5,14 @@
 // an allocation or a GC pause is an audible dropout.
 //
 // Shape of the pipeline, microphone to JavaScript:
-//   device (48 kHz float32) -> AudioUnitRender -> linear downsample -> 8 kHz Int16
+//   device (48 kHz float32) -> AudioUnitRender -> band-limited decimation -> 8 kHz Int16
 //     -> 160-sample frames -> lock-free ring + ThreadSafeFunction -> daemon's media pump
 // and back out again:
-//   daemon write(Int16) -> ring -> render callback -> linear upsample -> device float32
+//   daemon write(Int16) -> ring -> render callback -> band-limited interpolation -> device float32
+//
+// Both directions are windowed-sinc (see pulse::Resampler): linear interpolation is pitch-correct
+// and still sounds metallic, because it leaves images at fs_in - f on the way out and folds
+// everything above 4 kHz back into the passband on the way in.
 #include "pulse_audio.h"
 
 #if defined(__APPLE__)
@@ -138,14 +142,15 @@ OSStatus inputProc(void* userData, AudioUnitRenderActionFlags* flags, const Audi
                    UInt32 bus, UInt32 frames, AudioBufferList* io) {
   (void)flags; (void)time; (void)bus; (void)io;
   auto* unit = static_cast<Unit*>(userData);
-  if (!unit || !unit->au || frames == 0 || frames > unit->inScratch.size()) return noErr;
+  AudioUnit au = (unit && unit->inAU) ? unit->inAU : (unit ? unit->au : nullptr);
+  if (!unit || !au || frames == 0 || frames > unit->inScratch.size()) return noErr;
 
   AudioBufferList abl;
   abl.mNumberBuffers = 1;
   abl.mBuffers[0].mNumberChannels = 1;
   abl.mBuffers[0].mDataByteSize = static_cast<UInt32>(frames * sizeof(Float32));
   abl.mBuffers[0].mData = unit->inScratch.data();
-  if (AudioUnitRender(unit->au, flags, time, 1, frames, &abl) != noErr) return noErr;
+  if (AudioUnitRender(au, flags, time, 1, frames, &abl) != noErr) return noErr;
 
   const float* in = static_cast<const float*>(abl.mBuffers[0].mData);
   const size_t n = static_cast<size_t>(frames);
@@ -160,7 +165,8 @@ OSStatus inputProc(void* userData, AudioUnitRenderActionFlags* flags, const Audi
   //    replayed the same audio, so the microphone ran about six times too slow. The caller then
   //    stored `pos - n`, which was negative, and the next callback cast that negative double to
   //    size_t — undefined behaviour. `downPos` stays a double now and may legitimately be <= 0.
-  unit->down.step = g_deviceRate / static_cast<double>(kRate);
+  const double inRate = unit->inRate > 0 ? unit->inRate : g_deviceRate;
+  unit->down.step = inRate / static_cast<double>(kRate);
   unit->down.pos = unit->downPos;
   unit->down.last = unit->downLast;
   const size_t room = unit->pcm.size() - unit->have;
@@ -236,9 +242,22 @@ OSStatus renderProc(void* userData, AudioUnitRenderActionFlags* flags, const Aud
       std::memset(out + written, 0, (static_cast<size_t>(frames) - written) * sizeof(float));
       break;                                       // underrun: silence, never a replayed frame
     }
-    unit->up.step = static_cast<double>(kRate) / g_deviceRate;
-    unit->up.pos = 0.0;
-    unit->up.up(unit->outScratch.data(), kFrame, unit->upScratch.data(), expand);
+    const double outRate = unit->outRate > 0 ? unit->outRate : g_deviceRate;
+    unit->up.step = static_cast<double>(kRate) / outRate;
+    const size_t produced =
+        unit->up.up(unit->outScratch.data(), kFrame, unit->upScratch.data(), expand);
+    unit->up.pos -= static_cast<double>(kFrame);
+    // A negative pos legitimately means "read back into history" now that the kernel is causal, so
+    // it is carried rather than clamped to zero (the old clamp is what lost the fractional phase at
+    // every frame boundary). Re-anchor only if a rounded `expand` ever pushes it outside one frame.
+    if (unit->up.pos < -static_cast<double>(kFrame) ||
+        unit->up.pos > static_cast<double>(kFrame)) {
+      unit->up.pos = 0.0;
+    }
+    if (produced < expand) {
+      std::memset(unit->upScratch.data() + produced, 0,
+                  (expand - produced) * sizeof(float));
+    }
     const size_t take = std::min(expand, static_cast<size_t>(frames) - written);
     std::memcpy(out + written, unit->upScratch.data(), take * sizeof(float));
     written += take;
@@ -248,6 +267,15 @@ OSStatus renderProc(void* userData, AudioUnitRenderActionFlags* flags, const Aud
       break;
     }
   }
+
+  // Mirror buffer 0 to all other buffers (e.g. Right channel in non-interleaved stereo)
+  // so all output channels receive clean, uncorrupted audio.
+  for (UInt32 b = 1; b < io->mNumberBuffers; b++) {
+    if (io->mBuffers[b].mData && io->mBuffers[0].mData) {
+      std::memcpy(io->mBuffers[b].mData, io->mBuffers[0].mData, io->mBuffers[0].mDataByteSize);
+    }
+  }
+
   return noErr;
 }
 

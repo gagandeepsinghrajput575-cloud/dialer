@@ -19,6 +19,7 @@ echo "compiling the real coreaudio_impl.mm for the host against stubs (9 transla
   "$DSP/dsp_support.cpp" \
   "$DSP/check_mic.cpp" \
   "$DSP/check_speaker.cpp" \
+  "$DSP/check_resampler.cpp" \
   "$DSP/check_framing.cpp" \
   "$DSP/check_devices.cpp" \
   "$DSP/check_legacy.cpp" \

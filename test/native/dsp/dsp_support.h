@@ -95,6 +95,29 @@ inline std::vector<float> sineF(size_t n, double hz, double rate, double amp) {
   return v;
 }
 
+// Single-bin power by Goertzel. Exact for a bin-centred tone (choose a window whose length holds a
+// whole number of cycles), which is the point: an FFT would smear an image next to the fundamental,
+// and the defect being measured IS a pair of tones that sit far apart (f and fs_in - f).
+inline double powerAt(const std::vector<float>& x, double hz, double rate) {
+  if (x.size() < 8) return 0.0;
+  const double w = 2.0 * M_PI * hz / rate;
+  const double c = 2.0 * std::cos(w);
+  double s1 = 0.0, s2 = 0.0;
+  for (double v : x) { const double s0 = v + c * s1 - s2; s2 = s1; s1 = s0; }
+  const double n = static_cast<double>(x.size());
+  // A real tone at bin centre has |X_k| = A*N/2, so 2|X|^2/N^2 is its mean square, A^2/2.
+  return 2.0 * (s1 * s1 + s2 * s2 - c * s1 * s2) / (n * n);
+}
+
+inline double powerAt(const std::vector<int16_t>& x, double hz, double rate) {
+  std::vector<float> f(x.size());
+  for (size_t i = 0; i < x.size(); i++) f[i] = static_cast<float>(x[i]) / 32768.0f;
+  return powerAt(f, hz, rate);
+}
+
+// Power ratio in dB. Positive means the numerator is louder.
+inline double dbRatio(double num, double den) { return 10.0 * std::log10(num / den + 1e-30); }
+
 inline AudioUnit fakeUnit() { return reinterpret_cast<AudioUnit>(static_cast<uintptr_t>(0x1)); }
 
 inline void resetUnit(pulse::Unit& u) {
@@ -133,6 +156,7 @@ void testMicPath();                 // VAL-AUDIO-003
 void testSpeakerPath();             // VAL-AUDIO-004
 void testWriteFraming();            // VAL-AUDIO-005
 void testDeviceSelection();         // VAL-AUDIO-008
+void testResamplerSpectrum();       // VAL-AUDIO-009
 void testLegacyNegativeControls();  // proves the measurements above are not vacuous
 
 #endif  // PULSE_DSP_SUPPORT_H_

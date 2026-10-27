@@ -95,60 +95,87 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  if (AudioComponentInstanceNew(component, &unit->au) != noErr || !unit->au) {
-    delete unit;
-    Napi::Error::New(env, "CoreAudio: could not create the audio unit").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  UInt32 enable = 1;
-  OSStatus err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enable, sizeof(enable));
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enable, sizeof(enable));
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &useOut, sizeof(useOut));
-  // kAudioOutputUnitProperty_CurrentDevice is the ONLY CurrentDevice property: element 0 selects the
-  // output device, element 1 the input one. kAudioInputUnitProperty_CurrentDevice does not exist
-  // in any macOS SDK — it was not a typo for a real symbol, it was never a symbol at all.
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 1, &useIn, sizeof(useIn));
-
-  // One unit, one clock. The input's nominal rate is what the callbacks actually see, so it wins
-  // when the two devices disagree (a USB headset on a 48 kHz Mac is the common case).
   const double outRate = detail::rateOf(useOut);
   const double inRate = detail::rateOf(useIn);
-  g_deviceRate = inRate > 0 ? inRate : outRate;
+  unit->inRate = inRate > 0 ? inRate : 48000.0;
+  unit->outRate = outRate > 0 ? outRate : 48000.0;
+  g_deviceRate = unit->outRate;
   g_inputName = detail::nameOf(useIn);
   g_outputName = detail::nameOf(useOut);
 
-  AudioStreamBasicDescription fmt = {};
-  fmt.mSampleRate = g_deviceRate;
-  fmt.mFormatID = kAudioFormatLinearPCM;
-  fmt.mFormatFlags = kLinearPCMFormatFlagIsFloat | kLinearPCMFormatFlagIsPacked;
-  fmt.mBytesPerPacket = sizeof(Float32);
-  fmt.mFramesPerPacket = 1;
-  fmt.mBytesPerFrame = sizeof(Float32);
-  fmt.mChannelsPerFrame = 1;
-  fmt.mBitsPerChannel = 32;
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, sizeof(fmt));
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt, sizeof(fmt));
+  UInt32 enable = 1;
+  UInt32 disable = 0;
 
-  AURenderCallbackStruct inputCb = { detail::inputProc, unit };
-  AURenderCallbackStruct renderCb = { detail::renderProc, unit };
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &inputCb, sizeof(inputCb));
-  if (err == noErr) err = AudioUnitSetProperty(unit->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &renderCb, sizeof(renderCb));
-  if (err == noErr) err = AudioUnitInitialize(unit->au);
-  if (err != noErr) {
-    const std::string what = std::string("CoreAudio: could not configure the audio unit (OSStatus ") + std::to_string(err) + ")";
-    AudioComponentInstanceDispose(unit->au);
+  // 1. Configure inAU (microphone)
+  if (AudioComponentInstanceNew(component, &unit->inAU) != noErr || !unit->inAU) {
     delete unit;
-    Napi::Error::New(env, what).ThrowAsJavaScriptException();
+    Napi::Error::New(env, "CoreAudio: could not create microphone audio unit").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  OSStatus errIn = AudioUnitSetProperty(unit->inAU, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enable, sizeof(enable));
+  if (errIn == noErr) errIn = AudioUnitSetProperty(unit->inAU, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &disable, sizeof(disable));
+  if (errIn == noErr) errIn = AudioUnitSetProperty(unit->inAU, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &useIn, sizeof(useIn));
+
+  AudioStreamBasicDescription inFmt = {};
+  inFmt.mSampleRate = unit->inRate;
+  inFmt.mFormatID = kAudioFormatLinearPCM;
+  inFmt.mFormatFlags = kLinearPCMFormatFlagIsFloat | kLinearPCMFormatFlagIsPacked;
+  inFmt.mBytesPerPacket = sizeof(Float32);
+  inFmt.mFramesPerPacket = 1;
+  inFmt.mBytesPerFrame = sizeof(Float32);
+  inFmt.mChannelsPerFrame = 1;
+  inFmt.mBitsPerChannel = 32;
+  if (errIn == noErr) errIn = AudioUnitSetProperty(unit->inAU, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &inFmt, sizeof(inFmt));
+  AURenderCallbackStruct inputCb = { detail::inputProc, unit };
+  if (errIn == noErr) errIn = AudioUnitSetProperty(unit->inAU, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &inputCb, sizeof(inputCb));
+  if (errIn == noErr) errIn = AudioUnitInitialize(unit->inAU);
+  if (errIn != noErr) {
+    AudioComponentInstanceDispose(unit->inAU);
+    delete unit;
+    Napi::Error::New(env, std::string("CoreAudio: could not configure microphone unit (OSStatus ") + std::to_string(errIn) + ")").ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  unit->down.configure(g_deviceRate, kRate);
-  unit->up.configure(kRate, g_deviceRate);
+  // 2. Configure outAU (speaker)
+  if (AudioComponentInstanceNew(component, &unit->outAU) != noErr || !unit->outAU) {
+    AudioUnitUninitialize(unit->inAU);
+    AudioComponentInstanceDispose(unit->inAU);
+    delete unit;
+    Napi::Error::New(env, "CoreAudio: could not create speaker audio unit").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  OSStatus errOut = AudioUnitSetProperty(unit->outAU, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enable, sizeof(enable));
+  if (errOut == noErr) errOut = AudioUnitSetProperty(unit->outAU, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &disable, sizeof(disable));
+  if (errOut == noErr) errOut = AudioUnitSetProperty(unit->outAU, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &useOut, sizeof(useOut));
+
+  AudioStreamBasicDescription outFmt = {};
+  outFmt.mSampleRate = unit->outRate;
+  outFmt.mFormatID = kAudioFormatLinearPCM;
+  outFmt.mFormatFlags = kLinearPCMFormatFlagIsFloat | kLinearPCMFormatFlagIsPacked;
+  outFmt.mBytesPerPacket = sizeof(Float32);
+  outFmt.mFramesPerPacket = 1;
+  outFmt.mBytesPerFrame = sizeof(Float32);
+  outFmt.mChannelsPerFrame = 1;
+  outFmt.mBitsPerChannel = 32;
+  if (errOut == noErr) errOut = AudioUnitSetProperty(unit->outAU, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outFmt, sizeof(outFmt));
+  AURenderCallbackStruct renderCb = { detail::renderProc, unit };
+  if (errOut == noErr) errOut = AudioUnitSetProperty(unit->outAU, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &renderCb, sizeof(renderCb));
+  if (errOut == noErr) errOut = AudioUnitInitialize(unit->outAU);
+  if (errOut != noErr) {
+    AudioUnitUninitialize(unit->inAU);
+    AudioComponentInstanceDispose(unit->inAU);
+    AudioComponentInstanceDispose(unit->outAU);
+    delete unit;
+    Napi::Error::New(env, std::string("CoreAudio: could not configure speaker unit (OSStatus ") + std::to_string(errOut) + ")").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  unit->au = unit->outAU;
+  unit->down.configure(unit->inRate, kRate);
+  unit->up.configure(kRate, unit->outRate);
   // One 20 ms frame at 8 kHz is 160 samples and expands to 160 * deviceRate / 8000 device samples:
-  // 960 at 48 kHz, 882 at 44.1 kHz, 441 at 22.05 kHz. Derived here, once, because the render
-  // callback must not compute or allocate anything. Clamped to the scratch allocate() sized.
-  const double ratio = (g_deviceRate > 0.0) ? g_deviceRate / static_cast<double>(kRate) : 1.0;
+  // 960 at 48 kHz, 882 at 44.1 kHz, 441 at 22.05 kHz.
+  const double ratio = (unit->outRate > 0.0) ? unit->outRate / static_cast<double>(kRate) : 1.0;
   unit->expand = static_cast<size_t>(static_cast<double>(kFrame) * ratio + 0.5);
   if (unit->expand < 1) unit->expand = 1;
   if (unit->expand > unit->upScratch.size()) unit->expand = unit->upScratch.size();
@@ -171,12 +198,17 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   unit->tailLen = 0;       // nor a half-assembled frame from a write that never completed
   unit->downPos = 0.0;
   unit->downLast = 0.0f;
+  unit->up.reset();        // clear the FIR history so the new call starts from silence
+  unit->down.reset();
   unit->running = true;
-  const OSStatus err = AudioOutputUnitStart(unit->au);
-  if (err != noErr) {
+  const OSStatus errIn = unit->inAU ? AudioOutputUnitStart(unit->inAU) : noErr;
+  const OSStatus errOut = unit->outAU ? AudioOutputUnitStart(unit->outAU) : (unit->au ? AudioOutputUnitStart(unit->au) : noErr);
+  if (errIn != noErr || errOut != noErr) {
     unit->running = false;
-    Napi::Error::New(env, std::string("CoreAudio: the device would not start (OSStatus ") + std::to_string(err)
-        + "). macOS may still be asking for microphone permission.").ThrowAsJavaScriptException();
+    if (unit->inAU) AudioOutputUnitStop(unit->inAU);
+    if (unit->outAU) AudioOutputUnitStop(unit->outAU);
+    Napi::Error::New(env, std::string("CoreAudio: the device would not start (inOSStatus ") + std::to_string(errIn)
+        + ", outOSStatus " + std::to_string(errOut) + "). macOS may still be asking for microphone permission.").ThrowAsJavaScriptException();
   }
   return env.Undefined();
 }
@@ -225,7 +257,9 @@ Napi::Value Stop(const Napi::CallbackInfo& info) {
   Unit* unit = unitFrom(info, 0);
   if (!unit) return env.Undefined();
   unit->running = false;
-  if (unit->au) AudioOutputUnitStop(unit->au);
+  if (unit->inAU) AudioOutputUnitStop(unit->inAU);
+  if (unit->outAU) AudioOutputUnitStop(unit->outAU);
+  else if (unit->au) AudioOutputUnitStop(unit->au);
   if (unit->tsfnReady) { unit->tsfn.Release(); unit->tsfnReady = false; }
   return env.Undefined();
 }
@@ -235,12 +269,19 @@ Napi::Value Close(const Napi::CallbackInfo& info) {
   Unit* unit = unitFrom(info, 0);
   if (!unit) return env.Undefined();
   unit->running = false;
-  if (unit->au) {
-    AudioOutputUnitStop(unit->au);
-    AudioUnitUninitialize(unit->au);
-    AudioComponentInstanceDispose(unit->au);
-    unit->au = nullptr;
+  if (unit->inAU) {
+    AudioOutputUnitStop(unit->inAU);
+    AudioUnitUninitialize(unit->inAU);
+    AudioComponentInstanceDispose(unit->inAU);
+    unit->inAU = nullptr;
   }
+  if (unit->outAU) {
+    AudioOutputUnitStop(unit->outAU);
+    AudioUnitUninitialize(unit->outAU);
+    AudioComponentInstanceDispose(unit->outAU);
+    unit->outAU = nullptr;
+  }
+  unit->au = nullptr;
   if (unit->tsfnReady) { unit->tsfn.Release(); unit->tsfnReady = false; }
   for (auto it = g_units.begin(); it != g_units.end(); ++it) {
     if (*it == unit) { g_units.erase(it); break; }

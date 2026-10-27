@@ -38,6 +38,7 @@ int main() {
               "  queueFrames\n");
   testMicPath();
   testSpeakerPath();
+  testResamplerSpectrum();
   testWriteFraming();
   testDeviceSelection();
   testLegacyNegativeControls();

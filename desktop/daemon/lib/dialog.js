@@ -150,10 +150,13 @@ class Dialog {
     });
     this.localSdp = sdp.parse(body);
     const viaBranch = branch();
+    // The first INVITE carries credentials when we already hold the carrier's nonce, so a call does
+    // not need the INVITE → 407 → INVITE dance. See ua.preAuth: that dance rings the callee twice.
+    const credentials = auth || this.ua.preAuth?.('INVITE', toUri) || null;
     const headers = this.baseHeaders({
       method: 'INVITE', toUri, toTag,
       via: `SIP/2.0/UDP ${this.ua.transport.host}:${this.ua.transport.port};rport;branch=${viaBranch}`,
-      extra: { 'Content-Type': 'application/sdp', ...(auth ? { [auth.name]: auth.value } : {}) },
+      extra: { 'Content-Type': 'application/sdp', ...(credentials ? { [credentials.name]: credentials.value } : {}) },
     });
     const msg = serialize({ startLine: `INVITE ${toUri} SIP/2.0`, headers, body });
     const target = this.remoteAddressFor();
@@ -182,6 +185,9 @@ class Dialog {
 
   async onFinalResponse(res, { toUri }) {
     if (this.ended) return;
+    // Log what came back: without this the outbound leg was invisible, so a 407 that produced a
+    // second INVITE — and a second ring at the far end — left no trace anywhere.
+    this.ua.log('sip', `<< ${res.status} ${res.reason} (${this.number})`);
     if (res.synthetic || res.status === 0) return this.end('failed', { detail: res.reason });
 
     // Digest challenge: answer it once, with the same Call-ID and a fresh CSeq/branch.

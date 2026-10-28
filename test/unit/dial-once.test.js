@@ -11,6 +11,7 @@ const assert = require('assert');
 const { EventEmitter } = require('events');
 
 const { UserAgent } = require('../../desktop/daemon/lib/ua');
+const { parse } = require('../../desktop/daemon/lib/sipMessage');
 
 let passed = 0;
 let failed = 0;
@@ -98,6 +99,40 @@ const invites = (ua) => ua.transport.tx.filter((o) => o.method === 'INVITE').len
     const retry = await ua.dial(NUMBER);
     check(retry.ok === true, 'so the operator can simply try again');
     check(invites(ua) === 1, 'and that retry does place one INVITE');
+    [...ua.dialogs.values()].forEach((d) => d.end('normal'));
+    ua.close();
+  }
+
+  // 4. A cached challenge means the FIRST INVITE is already authenticated — one INVITE, one ring.
+  //    Without it every call was INVITE → 407 → INVITE, and the callee's phone rang for both.
+  {
+    const ua = makeUa({ preflightMs: 0 });
+    ua.authChallenge = {
+      challenge: { params: { realm: 'sip.example.test', nonce: 'n-1', qop: 'auth', algorithm: 'MD5' } },
+      proxy: true,
+    };
+    const r = await ua.dial(NUMBER);
+    check(r.ok === true, 'the dial is accepted');
+    check(invites(ua) === 1, `exactly one INVITE, no 407 round trip (saw ${invites(ua)})`);
+    const msg = parse(ua.transport.tx[0].msg);
+    const auth = msg.first('proxy-authorization') || '';
+    console.log(`  ${auth.slice(0, 74)}…`);
+    check(auth.startsWith('Digest '), 'the first INVITE carries Proxy-Authorization');
+    check(/nonce="n-1"/.test(auth), 'built from the nonce the carrier issued at REGISTER');
+    check(/uri="sip:\+4512345678@sip\.example\.test/.test(auth), "and from this INVITE's own URI");
+    check(!msg.first('authorization'), 'and not Authorization, which a proxy ignores (§22.3)');
+    [...ua.dialogs.values()].forEach((d) => d.end('normal'));
+    ua.close();
+  }
+
+  // 5. With nothing cached, no credentials are invented — the 407 path answers the challenge instead.
+  {
+    const ua = makeUa({ preflightMs: 0 });
+    await ua.dial(NUMBER);
+    const msg = parse(ua.transport.tx[0].msg);
+    check(!msg.first('proxy-authorization') && !msg.first('authorization'),
+      'an un-challenged client sends no credentials on the first INVITE');
+    check(invites(ua) === 1, 'and that is still one INVITE');
     [...ua.dialogs.values()].forEach((d) => d.end('normal'));
     ua.close();
   }

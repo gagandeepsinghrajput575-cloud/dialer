@@ -841,3 +841,38 @@ not yet proven. The log can now answer it: with tracing on, one press must produ
 `>> INVITE`.
 
 
+
+### F. The second ring was the digest retry, not a second dial
+
+With tracing on, one press produced **two** `>> INVITE` lines, 230 ms apart, to the same number:
+
+```
+17:52:50.972Z  >> INVITE +918076908159 (sip.flynumber.com:5060)
+17:52:51.202Z  >> INVITE +918076908159 (138.197.42.26:5060)
+```
+
+`sendInvite()` is the only thing that logs `>> INVITE`, and it is called from exactly two places:
+`invite()` and the 401/407 branch of `onFinalResponse`. So this is **one** dialog that got challenged
+and re-sent — the second send even targets the learned peer address instead of the domain, which is
+what `peerFor` supplies once a response has arrived.
+
+The callee hears both: the carrier alerts on the first INVITE, then the authenticated retry arrives as
+a **new transaction** (fresh branch and CSeq), so it alerts again. Nothing in our code treats it as a
+retry — SIP is stateless about "the same call" from the far end's point of view.
+
+**Fix: authenticate the first INVITE.** `register.js` now caches the challenge the carrier issued at
+REGISTER (`ua.authChallenge`) and `ua.preAuth()` builds a `Proxy-Authorization` header for the first
+INVITE from it — a fresh cnonce per request, so `nc=1` never repeats a triple. If the nonce is stale or
+scoped to REGISTER only, the carrier challenges again and the existing retry (capped at one) answers it,
+so this can only ever remove a round trip.
+
+Also fixed: **received responses were never logged** for an outbound leg, which is why the 407 that
+caused the second INVITE left no trace. `onFinalResponse` now logs `<< <code> <reason> (number)`.
+
+Guard: `VAL-SIP-020` grew to **21 checks** — with a cached challenge, a dial sends exactly one INVITE,
+and it carries `Proxy-Authorization` built from that nonce and this INVITE's own URI; with nothing
+cached, no credentials are invented and the 407 path still answers.
+
+If a caller still reports two rings while the audit log shows a single `>> INVITE`, the second ring is
+carrier-side (forking or their own retry) and belongs in FlyNumber's CDR, not in this codebase.
+

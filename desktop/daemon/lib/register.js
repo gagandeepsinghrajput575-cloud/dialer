@@ -129,6 +129,9 @@ function attach(ua) {
       const name = res.status === 407 ? 'proxy-authenticate' : 'www-authenticate';
       const challenge = digest.pick(digest.parseChallenges(res.first(name)));
       if (challenge) {
+        // Keep it: the INVITE authenticates on its first try with this nonce (ua.preAuth), which is
+        // what stops a call from being INVITE → 407 → INVITE — and the callee's phone ringing twice.
+        ua.authChallenge = { challenge, proxy: res.status === 407 };
         const header = digest.respond({
           method: 'REGISTER', uri, username: ua.account.user,
           password: ua.account.password, challenge, nc: 1,

@@ -18,6 +18,7 @@ const mediaLayer = require('./media');
 const { probeCarrier } = require('./reachability');
 const sdp = require('./sdp');
 const rtp = require('./rtp');
+const digest = require('./digest');
 const g711 = require('./g711');
 
 class UserAgent extends EventEmitter {
@@ -44,6 +45,36 @@ class UserAgent extends EventEmitter {
 
   log(scope, message) {
     try { this.logFn(scope, message); } catch { /* logging must never break a call */ }
+  }
+
+  /**
+   * Credentials for the *first* in-dialog request, built from the challenge the carrier issued when
+   * we registered.
+   *
+   * Without this, every call goes INVITE → 407 → INVITE. That costs a round trip, and it is audible:
+   * a carrier that alerts the callee on the first INVITE rings their phone once for each INVITE. The
+   * wire proved it — two `>> INVITE` lines 230 ms apart for one press, to the same number.
+   *
+   * If the nonce is stale or scoped differently, the carrier challenges again and Dialog's existing
+   * (capped at one) retry answers it, so this can only ever save a round trip.
+   */
+  preAuth(method, uri) {
+    const cached = this.authChallenge;
+    if (!cached?.challenge || !this.account?.password || !this.account?.user) return null;
+    try {
+      const value = digest.respond({
+        method,
+        uri,
+        username: this.account.user,
+        password: this.account.password,
+        challenge: cached.challenge,
+        // A fresh cnonce per request (digest.respond generates one), so nc=1 never repeats a triple.
+        nc: 1,
+      });
+      return { name: cached.proxy ? 'Proxy-Authorization' : 'Authorization', value };
+    } catch {
+      return null;   // an unsupported algorithm is a challenge problem, not a reason to fail a dial
+    }
   }
 
   setAccount(account) {

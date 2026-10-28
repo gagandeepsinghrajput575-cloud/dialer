@@ -294,6 +294,14 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Why it was invisible:* every SIP message logged at `debug` while `protocol.level` defaults to `info` — `daemon.log` held **zero** INVITE lines. `>> INVITE`, `>> BYE`, `>> CANCEL` and all final responses now log at **info**, so `grep '>> INVITE' data/daemon.log` is a permanent call ledger; `PULSE_DAEMON_LOG=debug` (passed to the daemon as `--log-level debug`) enables the full trace. Audited lines are summaries — no headers, no credentials.
     - *Still open:* whether the repeats were this race, a stale second daemon, or ordinary redials (32 `dialing` events across instances, callIds restarting at 1). One press must now produce exactly one `>> INVITE` in the audit log — that is the check to run next time it happens.
 
+19. **FIXED (2026-10-28): The second ring was the digest retry — INVITE → 407 → INVITE, one press, two rings:**
+    - *Evidence from the wire, not a guess:* with tracing on, one press produced two `>> INVITE` lines **230 ms apart** for the same number — first to `sip.flynumber.com:5060`, then to `138.197.42.26:5060` (the learned peer). `sendInvite()` is the only logger of `>> INVITE` and is called from just two places: `invite()` and the 401/407 branch of `onFinalResponse`. So it was one dialog, challenged and re-sent.
+    - *Why the callee hears two rings:* the carrier alerts on the first INVITE; the authenticated retry arrives as a **new transaction** (fresh branch + CSeq), so it alerts again. From the far end there is nothing linking the two.
+    - *Fix:* `register.js` caches the challenge from REGISTER (`ua.authChallenge`) and `ua.preAuth()` authenticates the **first** INVITE from it — fresh cnonce per request, so `nc=1` never repeats a triple. A stale nonce simply gets challenged again and the existing capped-at-one retry answers, so this can only remove a round trip.
+    - *Why it was invisible:* received responses were never logged for an outbound leg — the 407 that caused the second INVITE left no trace. `onFinalResponse` now logs `<< <code> <reason> (number)`.
+    - *Guard:* `VAL-SIP-020` is now **21 checks**: with a cached challenge a dial sends exactly one INVITE carrying `Proxy-Authorization` built from that nonce and the INVITE's own URI; with nothing cached, no credentials are invented and the 407 path still answers.
+    - *Not a thing that exists:* there is **no autodialer** in this app — no loop, no timer, no re-dial, and therefore no on/off switch for one. If a caller still reports repeated rings while the log shows a single `>> INVITE`, it is carrier-side (fork or retry) and belongs in FlyNumber's CDR.
+
 
 
 ### B. Brute-Force Restart Runbook

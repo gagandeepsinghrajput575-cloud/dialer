@@ -302,6 +302,17 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Guard:* `VAL-SIP-020` is now **21 checks**: with a cached challenge a dial sends exactly one INVITE carrying `Proxy-Authorization` built from that nonce and the INVITE's own URI; with nothing cached, no credentials are invented and the 407 path still answers.
     - *Not a thing that exists:* there is **no autodialer** in this app — no loop, no timer, no re-dial, and therefore no on/off switch for one. If a caller still reports repeated rings while the log shows a single `>> INVITE`, it is carrier-side (fork or retry) and belongs in FlyNumber's CDR.
 
+20. **FIXED (2026-10-28): The onset tick and the muffle — lookahead limiter + presence shelf in `mic-gain.js`:**
+    - *Report:* a caller heard a **spark/tick at the start of words** and a **muffled/blurry** voice on `wire-516.wav`, with the level fine (−13.5 dBFS).
+    - *Cause of the tick:* the chain used a **per-sample tanh**. Driving a curve past its knee sample-by-sample flattens the waveform top into an edge, and an edge is a tick. On a 300 Hz tone (max legitimate step ~7700 at 8 kHz) the old curve produced **119 jumps over 20000 units** (peak 23091); lowering the gain only reduced the count (13 → 7 → 5), because the loudest syllables are above the knee at any useful gain.
+    - *Fix:* `Limiter` is now an **envelope follower with 5 ms lookahead** — the gain comes from the lowest gain anywhere in the window and moves by a one-pole attack (τ 1 ms) / release (τ 120 ms). Nothing is shaped per sample. Same tone: **0 jumps**, max 11797, gain moves ≤ 0.036/sample, clamp never fires. Aims at 0.95 (−0.45 dBFS) and clamps at 0.98 only as a safety net: on a live-equivalent run of the real file it fired **0** times with ≤ 4.3 dB of reduction.
+    - *Two bugs found while building it, worth remembering:* (a) the sliding minimum must include the sample being output — expiring at `<= i - window` lets its peak escape and the clamp catches the overshoot; (b) a "linear ramp" whose step is recomputed as `(gain − needed)/window` each sample is really a first-order lag reaching only 63% in a window (0.445 of gain applied where 0.360 was needed).
+    - *Cause of the muffle:* the driver's voicing is **+5.3 dB at 120–200 Hz and −11.5…−20.7 dB from 1.6 to 3.6 kHz** versus the far end in the same recording. A peaking filter at 2.65 kHz fell away exactly where the deficit is worst (+3.6 dB at 3.2 k), so the stage is an **RBJ high shelf at 2 kHz, +9 dB** plus a **180 Hz high-pass**.
+    - *Measured on `wire-516` (EQ at unity, so EQ alone):* 60–120 Hz **−7.8 dB**, 120–200 **−5.6**, 2.0–2.6 k **+6.5**, 2.6–3.2 k **+9.2**, 3.2–3.5 k **+12.5**, while 500 Hz and 1 kHz stay within 0.3 dB. Presence is now within ~2 dB of a normal caller, where it was 9–11 dB down.
+    - *Integration:* `mic-gain.js` exports `createMicChain()`; one **stateful** instance per user agent (`media.js` creates it in `attach`, calls it where `boostPcm` was, and **resets it in `startPump`**). Verified: 160-sample framing gives byte-identical output to one-shot processing.
+    - *Guard:* `VAL-MEDIA-017` is **26 checks** — including the onset test with the old per-sample curve as a **negative control** (it must still exceed 20000, or the test is not measuring anything).
+    - *Caveat:* "jumps over 20000" is valid on a tone and **meaningless on speech** — 8 kHz speech has them naturally (sibilants). The tick fix rests on the mechanism and the controlled tone, not that counter.
+
 
 
 ### B. Brute-Force Restart Runbook

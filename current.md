@@ -876,3 +876,82 @@ cached, no credentials are invented and the 407 path still answers.
 If a caller still reports two rings while the audit log shows a single `>> INVITE`, the second ring is
 carrier-side (forking or their own retry) and belongs in FlyNumber's CDR, not in this codebase.
 
+
+---
+
+## 21. The Onset Tick and the Muffle — a Lookahead Limiter and a Presence Shelf (2026-10-28)
+
+A caller confirmed two things on `wire-516.wav` (113 s, volume fine at −13.5 dBFS): a **spark/tick right
+as words start**, and a **muffled/blurry** voice. Both were real, both had a mechanism, and neither was
+about level.
+
+### A. The tick was the limiter's *shape*, not its setting
+
+The old chain multiplied by 3.0 and then applied a **per-sample** tanh to protect the ceiling. Driving a
+curve past its knee sample-by-sample flattens the top of the waveform into an edge, and an edge is a
+tick. Measured on a tone that physically cannot contain one (a 300 Hz sine at 8 kHz has a maximum
+sample-to-sample step of ~7700): the old curve produced **119 jumps over 20000 units**, peaking at
+23091. Lowering the gain only removed some of them (13 → 7 → 5 at 3.5× → 3.0× → 2.8×), because the
+loudest syllables arrive above the knee at any useful gain — which is why gain was never the answer.
+
+`Limiter` is now an envelope follower with **5 ms of lookahead**: the gain comes from the *lowest* gain
+anything in the window needs, and moves by a first-order attack (τ = 1 ms) or release (τ = 120 ms). No
+sample is ever shaped; only the envelope moves. Same tone: **0 jumps over 20000**, max jump 11797, gain
+never moves more than 0.036 per sample (0.31 dB), and the safety clamp never fires.
+
+Two design details that were wrong on the first attempt and are worth remembering:
+
+- the sliding minimum must cover the sample being output — expiring at `<= i - window` instead of
+  `< i - window` lets that sample's own peak escape, and the clamp catches the overshoot;
+- a "linear ramp" whose step is recomputed as `(gain - needed) / window` every sample is not linear, it
+  is a first-order lag reaching only ~63% in a full window. That was 0.445 of gain applied where 0.360
+  was needed. A plain one-pole with τ = window/5 does the job and stays smooth.
+
+The limiter aims at **0.95** (−0.45 dBFS) and hard-clamps at 0.98, so the clamp is a safety net rather
+than a working part: on a live-equivalent run of the real recording it fired **0** times, with at most
+4.3 dB of reduction and 0.22 dB of gain movement per sample.
+
+### B. The muffle was a spectral tilt, so the fix is a shelf
+
+Measured against the far end in the same recording, the driver's voice was +5.3 dB at 120–200 Hz and
+−11.5 / −8.7 / −18.9 / −20.7 dB at 1.6–2.2 k / 2.2–2.8 k / 2.8–3.2 k / 3.2–3.6 k. A peaking filter at
+2.65 kHz fixed the middle and fell away exactly where the deficit is worst (+3.6 dB at 3.2 k), so the
+stage is an **RBJ high shelf at 2 kHz, +9 dB**, plus a **180 Hz high-pass** for the mud.
+
+On `wire-516.wav`, EQ applied at unity (so this is the EQ alone, not the gain):
+
+| band | before | after | change |
+| --- | --- | --- | --- |
+| 60–120 Hz | −6.6 | −14.4 | **−7.8 dB** |
+| 120–200 Hz | −6.6 | −12.2 | **−5.6 dB** |
+| 300–500 Hz | −1.5 | −1.6 | −0.1 |
+| 1–2 kHz | −15.1 | −14.0 | +1.1 |
+| 2.0–2.6 kHz | −26.0 | −19.5 | **+6.5 dB** |
+| 2.6–3.2 kHz | −30.2 | −21.0 | **+9.2 dB** |
+| 3.2–3.5 kHz | −35.4 | −22.9 | **+12.5 dB** |
+
+Against a normal caller's curve the presence band is now within ~2 dB, where it was 9–11 dB down. The
+mid-band is untouched (500 Hz −0.1 dB, 1 kHz +0.3 dB), so this is a tilt correction, not a loudness
+change.
+
+### C. Integration
+
+`mic-gain.js` now exports `createMicChain()` — one stateful instance per user agent, because resetting
+filters every 20 ms would put a step at every frame boundary. `media.js` creates it in `attach()`, calls
+`process(frame)` where it used to call `boostPcm(frame)`, and **resets it in `startPump`** so a new call
+does not begin with the previous call's attenuation. The stateful design is verified: processing the
+same signal in 160-sample frames produces byte-identical output to processing it in one go.
+
+`VAL-MEDIA-017` is 26 checks: 3.0× in the mid-band, a −3 dB corner at 180 Hz with 100 Hz at −10.6,
++5.8 / +7.9 / +8.9 / +9.0 dB at 2.2 / 2.65 / 3.2 / 3.4 kHz, silence decaying to zero within 40 ms,
+release within 2.5 dB of unity after 200 ms, framing independence, and the onset test with the old
+per-sample curve as a negative control (it must still exceed 20000 or the test is not measuring
+anything). Unit **38/38 suites (564 checks)**.
+
+### D. The honest caveat on measured "jumps"
+
+"Sample jumps over 20000 units" is a valid test on a pure tone and a **meaningless one on speech**: 8 kHz
+speech legitimately contains such steps (sibilants), which is why the recorded file shows 77 of them
+even before any processing, and *more* after the presence lift. The tick claim rests on the mechanism
+(no per-sample nonlinearity, no steps, no clamps) and on the controlled tone, not on that counter.
+

@@ -12,7 +12,7 @@ const rtp = require('./rtp');
 const g711 = require('./g711');
 const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
 const { WireTap } = require('./wiretap');
-const { boostPcm } = require('./mic-gain');
+const { createMicChain } = require('./mic-gain');
 const path = require('path');
 
 // Where the "what we transmitted" WAVs land: the same recordings directory the mix goes to.
@@ -27,6 +27,9 @@ function attach(ua) {
   ua.mediaSockets = ua.mediaSockets || [];
   ua.levels = ua.levels || { input: 0, output: 0, at: 0 };
   ua.pump = null;
+  // One microphone chain for the process: the EQ and limiter are stateful, so a fresh instance per
+  // frame would put a step at every boundary. Reset per call (see startPump).
+  ua.micChain = ua.micChain || createMicChain();
 
   ua.dialogForMedia = function dialogForMedia(media) {
     if (ua.active?.media === media) return ua.active;
@@ -199,6 +202,9 @@ function attach(ua) {
   // error the agent can see, not an exception thrown into the dialog layer mid-200-OK.
   ua.startPump = function startPump(dialog) {
     ua.stopPump();
+    // A new call starts with clean filters and a fully open limiter; carrying the previous call's
+    // envelope would begin the next one with a few hundred milliseconds of attenuation.
+    ua.micChain?.reset?.();
     let armed = dialog;
     if (!dialog.recorder) {
       dialog.recorder = new CallRecorder({ callId: dialog.id, externalId: dialog.externalId });
@@ -215,9 +221,10 @@ function attach(ua) {
         : (Buffer.isBuffer(frame)
           ? new Int16Array(frame.buffer, frame.byteOffset, Math.floor(frame.byteLength / 2))
           : (frame instanceof Float32Array ? g711.toInt16(frame) : frame));
-      // Gain once, before anything else looks at the frame: the meter, the recorder, the
-      // transmitted-audio tap and the encoder then all describe the same signal the far end hears.
-      const boosted = boostPcm(pcm);
+      // Gain, EQ and limiting happen once, before anything else looks at the frame: the meter, the
+      // recorder, the transmitted-audio tap and the encoder then all describe the same signal the far
+      // end hears. The chain is stateful across frames by design (filters and limiter envelope).
+      const boosted = ua.micChain.process(pcm);
       ua.levels.input = g711.level(boosted);
       const media = armed.media;
       if (armed.recorder) armed.recorder.recordFrame(boosted, !!media?.muted);

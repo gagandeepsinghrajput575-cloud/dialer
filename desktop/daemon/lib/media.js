@@ -74,18 +74,24 @@ function attach(ua) {
       },
     });
     socket.on('message', (buf, rinfo) => {
+      // Only a packet that parses as RTP may re-point where we send audio. Latching on any
+      // datagram let an unsolicited packet (a scan, another app, a stray probe) redirect the
+      // operator's voice to an arbitrary host and port.
+      if (rtp.isRtcp(buf)) return;
+      const packet = rtp.parse(buf);
+      if (!packet) return;
       if (media.target.host !== rinfo.address || media.target.port !== rinfo.port) {
         media.target = { host: rinfo.address, port: rinfo.port };
       }
-      ua.onRtp(media, buf);
+      ua.onRtp(media, buf, packet);
     });
     ua.mediaSockets.push(media);
     return media;
   };
 
-  ua.onRtp = function onRtp(media, buf) {
+  ua.onRtp = function onRtp(media, buf, parsed = null) {
     if (rtp.isRtcp(buf)) return;
-    const packet = rtp.parse(buf);
+    const packet = parsed || rtp.parse(buf);
     if (!packet) return;
     media.stats.received += 1;
     if (media.remoteDtmfPt && packet.payloadType === media.remoteDtmfPt) {
@@ -102,8 +108,12 @@ function attach(ua) {
     }
   };
 
+  // Codecs this build can decode. Deliberately not "the one PT the answer chose": some trunks
+  // renumber or send both, and dropping audio because the PT moved is a silent one-way call.
+  const DECODABLE_PT = new Set([sdpLib.PT_PCMU, sdpLib.PT_PCMA]);
+
   ua.processRtpPacket = function processRtpPacket(media, packet) {
-    if (packet.payloadType !== media.remotePt) return;   // a codec we did not agree to
+    if (!DECODABLE_PT.has(packet.payloadType)) return;   // a codec we cannot decode at all
     const pcm = g711.decode(packet.payload, packet.payloadType);
     const dialog = ua.dialogForMedia(media);
 

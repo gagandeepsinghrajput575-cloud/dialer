@@ -17,6 +17,12 @@ function createSession({
   seq = null,
   timestamp = null,
 } = {}) {
+  // The payload type is mutable: `applyRemoteSdp` sets it from the answer (a European trunk answers
+  // PCMA), and a closure copy here meant every packet went out labelled with the type the session
+  // was created with — A-law samples tagged PCMU, which the far end decodes as garbage. Sequence and
+  // timestamp stay in their own locals because only `packet()` advances them.
+  let pts = payloadType & 0x7f;
+  let ssrcValue = ssrc >>> 0;
   // Both counters are private and mutable; the getters below expose them for tests and logs.
   // A DTMF burst shares one timestamp but still consumes sequence numbers, which is why the
   // two are advanced separately rather than derived from one another.
@@ -28,8 +34,9 @@ function createSession({
   let seqCounter = (seq === null || seq === undefined ? crypto.randomBytes(2).readUInt16BE(0) : Number(seq) || 0) & 0xffff;
   let stamp = (timestamp === null || timestamp === undefined ? crypto.randomBytes(4).readUInt32BE(0) : Number(timestamp) || 0) >>> 0;
   return {
-    ssrc,
-    payloadType,
+    get ssrc() { return ssrcValue; },
+    get payloadType() { return pts; },
+    set payloadType(value) { pts = Number(value) & 0x7f; },
     get seq() { return seqCounter; },
     get timestamp() { return stamp; },
     nextSeq() { const value = seqCounter; seqCounter = (seqCounter + 1) & 0xffff; return value; },
@@ -41,10 +48,10 @@ function createSession({
     packet(payload, marker = false) {
       const buf = Buffer.allocUnsafe(HEADER_LEN + payload.length);
       buf[0] = 0x80;                                  // V=2, P=0, X=0, CC=0
-      buf[1] = (marker ? 0x80 : 0) | (payloadType & 0x7f);
+      buf[1] = (marker ? 0x80 : 0) | (pts & 0x7f);    // read live: the answer may change it
       buf.writeUInt16BE(seqCounter & 0xffff, 2);
       buf.writeUInt32BE(stamp >>> 0, 4);
-      buf.writeUInt32BE(ssrc >>> 0, 8);
+      buf.writeUInt32BE(ssrcValue >>> 0, 8);
       payload.copy(buf, HEADER_LEN);
       seqCounter = (seqCounter + 1) & 0xffff;
       stamp = (stamp + payload.length) >>> 0;

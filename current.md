@@ -558,3 +558,42 @@ Outbound calling should work as soon as the portal is on. **Inbound** depends on
 outbound works, the next step is RFC 5626 `outbound` (`;ob`, `reg-id`, `+sip.instance`) — which the
 carrier did not advertise in `Supported`, so it may need their support to enable.
 
+
+---
+
+## 16. Media-Path Bugs Found Before the Live Test (2026-10-28)
+
+A read-only audit of the rolled-back UDP path found one defect that would have corrupted outbound
+audio on a European trunk, plus two that produce silent, confusing failures. All three are fixed and
+covered by `VAL-MEDIA-015` (`test/unit/media-path.test.js`, 9 checks).
+
+### A. Outbound payload type never reached the wire
+
+`rtp.createSession().packet()` captured `payloadType` in a closure, while `applyRemoteSdp` changed
+`session.payloadType` afterwards. So the encoder switched to A-law when the answer chose PCMA, but
+every packet still went out **labelled PCMU** — the carrier decoding A-law bytes as µ-law. That is a
+garbled-voice bug on any trunk that answers PCMA (FlyNumber answered PCMU on our calls, which is
+why it had not bitten yet). Fixed by making the payload type a live property of the session.
+
+### B. Inbound audio dropped on a payload-type mismatch
+
+`processRtpPacket` rejected any packet whose PT differed from the one the answer chose, even when it
+was a codec we support. A trunk that renumbers, or sends both, produced a one-way call with
+`received` still climbing, so the watchdog stayed quiet. Now any decodable PT (0 or 8) is decoded
+with the packet's own type; anything else is still ignored rather than decoded into noise.
+
+### C. Any datagram could re-point where the voice goes
+
+The media socket re-latched `media.target` before parsing, so an unsolicited packet redirected the
+operator's outbound audio to an arbitrary host:port. Now only a packet that parses as RTP (and is
+not RTCP) may re-latch, which keeps symmetric RTP working while closing the hijack.
+
+### D. Left alone deliberately
+
+The absence of any limiter before G.711 (hard `clamp16` only, mic meter reaching 1.000) is a quality
+risk, not a defect to fix blind: gain control changes what the far end hears and should be tuned
+against a real recording. Watch the input meter on the next call; if it pins at maximum during
+normal speech, add a limiter then.
+
+Verification: unit **34/34 (492 checks)**, integration **38/38 (51 checks)**.
+

@@ -646,3 +646,20 @@ manual daemon test had run `set -a; . ./.env` earlier in the same terminal, so `
 exported and the test server seeded an AI key into its fresh database. With a clean environment the
 suite is green. Anyone running these tests after sourcing `.env` will see the same false failure.
 
+### E. Live validation (+8 dB)
+
+Second review pass, on a call made at deliberately **relaxed conversational volume**
+(`docs/AUDIO-REVIEW-2026-10-28.md`, `wire-481.wav`):
+
+| Measurement | Value |
+| --- | --- |
+| Active speech RMS | **−22.6 dBFS** (was −27.5 at +0 dB) |
+| Peak, at the operator's loudest natural volume | **−3.1 dBFS** |
+| Clipped samples | **0.000%** |
+| Reviewer's verdict | "crisp, warm and audible… you do not have to shout or push your vocal cords" |
+
+That closes the level question: relaxed speech is now intelligible without projection, and the
+loudest syllable of a normal speaking voice still has ~3 dB of headroom before the limiter is asked
+to do anything.
+
+

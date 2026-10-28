@@ -54,4 +54,26 @@
 - **Distortion / Clipping:** **Zero.** The soft-knee tanh limiter cleanly capped the loudest syllables at −0.2 dBFS without rail square-wave clipping (0.000% clipped).
 - **Intelligibility:** Crystal clear telephone presence with zero strain required by the listener.
 
+---
+
+## Relaxed Speech Review — `wire-481.wav` & `call-481.wav` (+8 dB / 2.5× Gain)
+
+| file | duration | peak dBFS | RMS dBFS | clipped % | notes |
+| --- | --- | --- | --- | --- | --- |
+| `wire-481.wav` | 34.14s | -3.1 dBFS | -26.8 dBFS | 0.000% | **Active speech: −22.6 dBFS** spoken in a completely relaxed, low-effort conversational voice. Zero clipped samples. |
+| `call-481.wav` | 34.38s | -0.4 dBFS | -17.9 dBFS | 0.000% | Mixed call: effortless conversational voice sits naturally with the remote IVR without straining. |
+
+### Transcription of wire-481.wav
+
+> *"You are trying to listen to me, Gemini, huh? So finding where my voice is going to come...*  
+> *It did came now. Say hi to me on... on the chat.*  
+> *This is how I will speak, and most probably, the most high I can go is like this much, right?*  
+> *Yes, this is what the highest of my sound looks like, first of all. Yep."*
+
+### Final Verdict on Effortless Speech
+- **Effortless Speaking:** You spoke in a calm, relaxed, conversational voice (no shouting, no projection), and your voice came through crisp, warm, and audible at **−22.6 dBFS active speech**.
+- **Dynamic Headroom:** When you demonstrated your highest natural volume ("the most high I can go is like this much"), the signal peaked at **−3.1 dBFS** with **0.000% clipping** (more than 3 dB of safety margin before the limiter even engages).
+- **Intelligibility & Comfort:** 100% clear. You do not have to shout or push your vocal cords.
+
+
 

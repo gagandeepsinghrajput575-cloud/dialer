@@ -92,10 +92,14 @@ async function releasePhone() {
 
 // --------------------------------------------------------------------------- the daemon
 function daemonCommand() {
+  // Full SIP tracing: every message both ways, written to stderr and appended to data/daemon.log.
+  // Off by default because it is verbose; `PULSE_DAEMON_LOG=debug` is how you answer "did we ring
+  // that number twice?" when the audit lines alone are not enough.
+  const extra = process.env.PULSE_DAEMON_LOG ? ['--log-level', process.env.PULSE_DAEMON_LOG] : [];
   // Prefer the packaged launcher; development runs daemon JS through system Node.
-  if (fs.existsSync(DAEMON_BIN)) return { file: DAEMON_BIN, args: [] };
+  if (fs.existsSync(DAEMON_BIN)) return { file: DAEMON_BIN, args: extra };
   const nodeBin = process.env.NODE_BINARY || '/Users/gaganrajput11/.nvm/versions/node/v24.16.0/bin/node';
-  return { file: nodeBin, args: [DAEMON_MAIN], env: {} };
+  return { file: nodeBin, args: [DAEMON_MAIN, ...extra], env: {} };
 }
 
 function sendToDaemon(payload) {

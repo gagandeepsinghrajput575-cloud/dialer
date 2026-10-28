@@ -778,3 +778,66 @@ full scale landing at the 32113 ceiling without railing, and the −8.8 dBFS rea
 
 
 
+
+---
+
+## 20. Numbers Ringing Repeatedly — a 1.5 s Window Where the Guard Was Blind (2026-10-28)
+
+Report: dialled numbers kept ringing "again and again within minutes". The investigation mattered more
+than the fix, because most of the usual suspects turned out to be innocent — and the log could not
+answer the question at all.
+
+### A. Ruled out, by reading the code rather than guessing
+
+| Suspect | Verdict |
+| --- | --- |
+| an auto-redial / power-dial loop in the UI | none exists — `startCall` is the only trigger (button, `C`, or the call control) |
+| anything on a timer in the server | none; `setInterval` appears only in the email sweep, the keep-alive, the call timer and the audio pump |
+| the server placing calls itself | it only mints a `sip:`/`tel:` URI; no HTTP call to the carrier |
+| auth retry loop | `!this.triedAuth` — at most one re-INVITE after a 401/407 |
+| Timer A retransmissions ringing the far end again | retransmits resend the **same buffer**, i.e. the same branch and Call-ID, which is a retransmission to any proxy |
+| double-pressing `C` | the renderer sets `dialLockRef` and `phase='dialing'` **before** its first await, and a cross-tab lock covers the server call |
+
+### B. What was actually broken: `dial()` guarded a state that did not exist yet
+
+`ua.dial()` refused when `standingCall()` was set — but it then `await`ed the carrier preflight (~1.5 s)
+and only *afterwards* created the dialog. Two dial commands arriving inside that window both saw "no
+call is up" and both sent an INVITE.
+
+`VAL-SIP-020` (`test/unit/dial-once.test.js`, 13 checks) pins the fix, and against the previous code it
+fails with **`saw 2`** — one press, two INVITEs, for every dial that raced. The fix is a `dialing` latch
+set before the await and released in a `finally`, so a failed preflight still leaves the operator able
+to retry.
+
+This is a *hardening* rather than a proven cause: the renderer already latched its own button, so the
+race needs a second caller (a retrying controller, a reconnected renderer, or a rebuilt UI) to be hit.
+It is the last line of defence and it was absent.
+
+### C. Two daemons were also found running at once
+
+While restarting, the supervisor left **two daemons live, both REGISTERed to the same AOR** (pids 79758
+and 80657). Duplicate registrations mean duplicate contacts at the carrier, and any controller that
+talks to the "other" daemon places a second call. Cleaned by killing the whole tree and launching once;
+verify with `pgrep -f 'Electron.*daemon/main.js' | wc -l` → must print `1`.
+
+### D. The real problem: it was invisible
+
+Every SIP message was logged at `debug`, and `protocol.level` defaults to `info` — so `daemon.log`
+contained **no INVITE lines at all**, only "shutting down". The evidence needed to answer "did we ring
+that number twice?" was generated and then thrown away.
+
+- `>> INVITE`, `>> BYE`, `>> CANCEL` and every final response now log at **info** (audit), so
+  `grep '>> INVITE' data/daemon.log` is a permanent call ledger.
+- `PULSE_DAEMON_LOG=debug` (passed through to the daemon as `--log-level debug`) turns on full
+  message-by-message tracing when that is not enough. It is off by default: verbose, and the daemon
+  writes it to stderr, which is appended to `data/daemon.log`.
+- None of the audited lines contain headers or credentials — they are one-line summaries.
+
+### E. Still open
+
+Whether the operator's repeats were this race, a leftover second daemon, or simply redials after failed
+attempts (32 `dialing` events across many daemon instances, with callIds restarting at 1 each time) is
+not yet proven. The log can now answer it: with tracing on, one press must produce exactly one
+`>> INVITE`.
+
+

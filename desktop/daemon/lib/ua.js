@@ -32,6 +32,7 @@ class UserAgent extends EventEmitter {
     this.logFn = log;
     this.dialogs = new Map();
     this.active = null;
+    this.dialing = false;      // a dial is mid-preflight; a second one must be refused, not queued
     this.cseq = Math.floor(Math.random() * 100) + 1;
     this.muted = false;
     registration.attach(this);
@@ -107,9 +108,24 @@ class UserAgent extends EventEmitter {
   // ---- calls ---------------------------------------------------------------------------
   async dial(number, { callId: externalId = null } = {}) {
     if (this.standingCall()) return { ok: false, reason: 'busy', error: 'A call is already in progress.' };
+    if (this.dialing) return { ok: false, reason: 'busy', error: 'A call is already being placed.' };
     const clean = String(number || '').trim();
     if (!clean) return { ok: false, reason: 'invalid', error: 'No number to dial.' };
+    // The preflight inside placeCall() is awaited, and no dialog exists until it returns. Two dial
+    // commands arriving inside that ~1.5 s window therefore both passed the standingCall() guard and
+    // both sent an INVITE — one press could ring a customer twice, and a retrying caller twice more.
+    // The renderer latches its own button before its first await, but this is the last line of
+    // defence and it must not depend on every caller getting that right.
+    this.dialing = true;
+    try {
+      return await this.placeCall(clean, externalId);
+    } finally {
+      this.dialing = false;
+    }
+  }
 
+  /** The half of dial() that runs once the busy/latch checks have passed. */
+  async placeCall(clean, externalId) {
     // The INVITE client transaction waits Timer B = 64 * T1 = 32 s before it gives up, which is
     // exactly the "stuck on Calling…" the operator sees on a network that swallows SIP. Ask the
     // carrier first: if it is not answering, fail in ~1.5 s with something actionable.

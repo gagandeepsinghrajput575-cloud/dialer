@@ -81,7 +81,15 @@ async function main(argv = process.argv.slice(2)) {
     account: { transport: 'udp', ...opts.account },
     publicIp: opts.publicIp,
     apiBase: opts.apiBase,
-    log: (scope, message) => protocol.log('debug', `[${scope}] ${message}`),
+    log: (scope, message) => {
+      // A dial is a money event, so the things that cost money are logged at `info` instead of
+      // `debug`: every INVITE, BYE and CANCEL we send, and every final response we receive. Without
+      // this, "that number rang three times" was unanswerable from the log — the messages existed
+      // but were filtered out, so the only evidence was the customer's complaint. Everything else
+      // stays at debug, which is off unless PULSE_DAEMON_LOG=debug.
+      const audit = scope === 'sip' && /^(>> (INVITE|BYE|CANCEL)|<< (200|[4-6]\d\d))/.test(message);
+      protocol.log(audit ? 'info' : 'debug', `[${scope}] ${message}`);
+    },
   });
 
   // Daemon -> controller. `ended` and `registered` are the two the UI cannot function without.

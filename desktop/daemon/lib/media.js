@@ -11,6 +11,13 @@ const sdpLib = require('./sdp');
 const rtp = require('./rtp');
 const g711 = require('./g711');
 const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
+const { WireTap } = require('./wiretap');
+const path = require('path');
+
+// Where the "what we transmitted" WAVs land: the same recordings directory the mix goes to.
+const WIRE_DIR = process.env.DATA_DIR
+  ? path.join(path.resolve(process.env.DATA_DIR), 'recordings')
+  : path.join(__dirname, '..', '..', '..', 'data', 'recordings');
 
 const LEVEL_INTERVAL_MS = 120;
 
@@ -195,6 +202,11 @@ function attach(ua) {
     if (!dialog.recorder) {
       dialog.recorder = new CallRecorder({ callId: dialog.id, externalId: dialog.externalId });
     }
+    // The mixed recording cannot answer "how did I sound to them" — it contains the far end too,
+    // and an IVR or voicemail makes it useless for that. This keeps only what we transmit.
+    if (!dialog.wiretap) {
+      dialog.wiretap = new WireTap({ dir: WIRE_DIR, callId: dialog.externalId || dialog.id });
+    }
     const onFrame = (frame) => {
       if (!armed) return;
       const pcm = frame instanceof Int16Array
@@ -206,7 +218,9 @@ function attach(ua) {
       const media = armed.media;
       if (armed.recorder) armed.recorder.recordFrame(pcm, !!media?.muted);
       if (!media || media.muted) return;
-      media.send(media.session.packet(g711.encode(pcm, media.codec), media.stats.sent === 0));
+      const payload = g711.encode(pcm, media.codec);
+      armed.wiretap?.write(payload, media.codec);
+      media.send(media.session.packet(payload, media.stats.sent === 0));
       ua.maybeEmitLevels();
     };
     const fail = (message) => {
@@ -283,6 +297,12 @@ function attach(ua) {
   };
 
   ua.releaseMedia = function releaseMedia(dialog) {
+    if (dialog.wiretap) {
+      const tap = dialog.wiretap;
+      dialog.wiretap = null;
+      const written = tap.finish();
+      if (written) ua.log('media', `transmitted audio saved: ${written.path} (${written.seconds.toFixed(1)}s)`);
+    }
     if (dialog.recorder) {
       const rec = dialog.recorder;
       dialog.recorder = null;

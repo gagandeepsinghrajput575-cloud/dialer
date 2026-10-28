@@ -4,13 +4,14 @@
 // -8.8 dBFS peak, against the far end's -17.7 dBFS — the caller hears a distant voice. The
 // CrystalSound driver hands CoreAudio a low-amplitude signal and nothing downstream added gain.
 //
-// +6 dB (2x) puts active speech near -21 dBFS, which is standard telephone level, and leaves the
-// peak around -2.8 dBFS. The soft limiter exists for the calls that are louder than this one was:
-// above the knee it compresses toward a ceiling with tanh, so a shout can never wrap or rail. It is
-// stateless on purpose — no attack/release to pump, no lookahead to add latency.
+// +8 dB (2.5x) puts active speech near -19.5 dBFS, which is comfortable telephone level: +6 dB
+// still required the operator to project on long calling blocks. The soft limiter is what makes
+// this safe rather than a trade — that same -8.8 dBFS peak now lands at 0.907 full scale, inside the
+// knee, so it is compressed to about -1.2 dBFS instead of clipping. The limiter is stateless on
+// purpose: no attack/release to pump, no lookahead to add latency.
 'use strict';
 
-const GAIN = 2.0;        // +6 dB
+const GAIN = 2.5;        // +8 dB
 const KNEE = 0.72;       // soft limiting starts here (fraction of full scale)
 const CEIL = 0.98;       // and can never exceed this
 

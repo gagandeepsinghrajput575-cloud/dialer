@@ -23,19 +23,19 @@ const peakOf = (pcm) => pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
 
 console.log('\n=== VAL-MEDIA-017: microphone boost + soft limiter ===\n');
 
-// 1. The headline: a quiet frame becomes 6 dB louder, sample for sample.
+// 1. The headline: a quiet frame becomes 8 dB louder, sample for sample.
 {
-  check(GAIN === 2.0, 'the boost is +6 dB (2x)');
+  check(GAIN === 2.5, 'the boost is +8 dB (2.5x)');
   const quiet = frame(8000);
   const boosted = boostPcm(quiet);
   let worst = 0;
   for (let i = 0; i < quiet.length; i++) {
-    const expected = quiet[i] * 2;
+    const expected = quiet[i] * 2.5;
     if (Math.abs(boosted[i] - expected) > 1) worst = Math.max(worst, Math.abs(boosted[i] - expected));
   }
   console.log(`  quiet frame: peak ${peakOf(quiet)} -> ${peakOf(boosted)}`);
-  check(worst <= 1, 'below the knee the output is exactly 2x the input (within rounding)');
-  check(peakOf(boosted) === 16000, 'peak doubles: 8000 -> 16000 (-6.2 dBFS)');
+  check(worst <= 1, 'below the knee the output is exactly 2.5x the input (within rounding)');
+  check(peakOf(boosted) === 20000, 'peak scales: 8000 -> 20000 (-4.3 dBFS)');
 }
 
 // 2. Silence stays exactly silent (CrystalSound gates between phrases; a boost must not invent noise).
@@ -78,6 +78,18 @@ console.log('\n=== VAL-MEDIA-017: microphone boost + soft limiter ===\n');
   const boosted = boostPcm(odd);
   check(boosted.length === odd.length && boosted instanceof Int16Array, 'frame length and type are preserved');
   check(boosted[0] === 0 && odd[0] === 0, 'a silent first sample stays silent');
+}
+
+// 6. The measurement this gain was chosen against (docs/AUDIO-REVIEW-2026-10-28.md): a -8.8 dBFS peak.
+//    At 2.5x that is 0.907 full scale — inside the knee — so it must come out loud, unclipped.
+{
+  const measuredPeak = Math.round(0.363 * 32768);        // -8.8 dBFS
+  const boosted = boostPcm(frame(measuredPeak));
+  const peak = peakOf(boosted);
+  const dbfs = 20 * Math.log10(peak / 32768);
+  console.log(`  observed call peak: ${measuredPeak} -> ${peak} (${dbfs.toFixed(1)} dBFS)`);
+  check(dbfs > -2 && dbfs < 0, 'the loudest syllable of that call lands just under 0 dBFS, compressed');
+  check(!boosted.includes(32767) && !boosted.includes(-32768), 'and does not rail');
 }
 
 assert.strictEqual(failed, 0, `${failed} mic-gain check(s) failed`);

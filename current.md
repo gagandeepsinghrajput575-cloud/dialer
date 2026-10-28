@@ -618,21 +618,24 @@ that recording was 100% confident, so intelligibility was marginal rather than b
 
 ### B. Fix
 
-`desktop/daemon/lib/mic-gain.js` adds **+6 dB** (2×) with a **stateless soft-knee limiter**:
+`desktop/daemon/lib/mic-gain.js` adds **+8 dB** (2.5×) with a **stateless soft-knee limiter**:
 
 - identity below 0.72 FS (−2.8 dBFS), tanh compression above it, hard ceiling 0.98 FS
 - applied **once**, immediately after the resampler, so the level meter, the call recording, the
   transmitted-audio tap and the G.711 encoder all describe the same signal
 - no attack/release to pump, no lookahead, no latency, nothing to tune per call
 
-Expected result on the next call: active speech ≈ **−21.5 dBFS**, peak ≈ **−2.8 dBFS** — standard
-telephone level with the loudest syllables just touching the knee, so they cannot clip.
+The gain was raised from +6 dB after a live block: at +6 the operator still had to project to be heard
+comfortably. +8 dB puts active speech near **−19.5 dBFS**, and the same −8.8 dBFS peak that was
+measured lands at 0.907 full scale — inside the knee — so it is compressed to about **−1.2 dBFS**
+rather than clipping. The limiter is what makes the extra 2 dB free.
 
 ### C. Guards
 
-`VAL-MEDIA-017` (14 checks): the +6 dB is exact below the knee, digital silence stays silent, a
+`VAL-MEDIA-017` (16 checks): the +8 dB is exact below the knee, digital silence stays silent, a
 full-scale frame lands under the ceiling without ever hitting 32767/‑32768, the curve never folds
-over, and crossing the knee is continuous.
+over, crossing the knee is continuous, and the −8.8 dBFS peak from the real call is pinned to land
+just under 0 dBFS without railing.
 
 Unit **36/36 suites (518 checks)**, integration **38/38 (51 checks)**.
 

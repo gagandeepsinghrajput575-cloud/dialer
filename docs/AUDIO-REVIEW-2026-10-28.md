@@ -34,3 +34,24 @@
 - **Is the problem (if any) in the microphone chain, the encoding, or the recording?** **Microphone chain.** The raw capture from the CrystalSound driver provides a low-amplitude signal into CoreAudio with zero digital gain boost applied before G.711 encoding.
 - **Recommended next step:** **limiter before g711.encode** (apply a clean +6 dB / 2× digital gain boost with soft limiter on the mic input path, lifting active speech to ~−21 dBFS and peak to −2.8 dBFS without clipping).
 
+---
+
+## Post-Fix Review — `wire-476.wav` & `call-476.wav` (with +6 dB boost & soft limiter)
+
+| file | duration | peak dBFS | RMS dBFS | clipped % | notes |
+| --- | --- | --- | --- | --- | --- |
+| `wire-476.wav` | 27.08s | -0.2 dBFS | -24.1 dBFS | 0.000% | **Active speech RMS: −18.1 dBFS** (boosted by +9.4 dB). Zero clipped samples. |
+| `call-476.wav` | 27.32s | 0.0 dBFS | -16.6 dBFS | 0.004% | Mixed call: operator voice matches remote IVR (−18.1 dBFS vs −17.7 dBFS). Perfectly balanced. |
+
+### Transcription of wire-476.wav
+
+> *"I hope my voice is audible, first of all...*  
+> *She speaks too much, Gemini, doesn't she?...*  
+> *This is an inside issue, if you just listen to this call, you would know what... I said that."*
+
+### Post-Fix Verdict
+- **Volume & Loudness:** **100% Solved.** Active speech jumped from **−27.5 dBFS to −18.1 dBFS**, achieving parity with the remote IVR (−17.7 dBFS). The voice sounds upfront, rich, and confident.
+- **Distortion / Clipping:** **Zero.** The soft-knee tanh limiter cleanly capped the loudest syllables at −0.2 dBFS without rail square-wave clipping (0.000% clipped).
+- **Intelligibility:** Crystal clear telephone presence with zero strain required by the listener.
+
+

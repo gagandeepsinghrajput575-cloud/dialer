@@ -597,3 +597,49 @@ normal speech, add a limiter then.
 
 Verification: unit **34/34 (492 checks)**, integration **38/38 (51 checks)**.
 
+
+---
+
+## 17. Microphone Boost — the Caller Could Barely Hear the Operator (2026-10-28)
+
+### A. What the measurement showed
+
+An audio-capable reviewer listened to `wire-471.wav` (the transmitted leg only, from §16's tap) and
+measured what the far end received:
+
+| Leg | Active speech RMS | Peak |
+| --- | --- | --- |
+| Operator (wire-471) | **−27.5 dBFS** | −8.8 dBFS |
+| Far end (call-471 mix) | −17.7 dBFS | −2.2 dBFS |
+
+A ~10 dB deficit: the operator sounded distant, about half the loudness of a normal telephone call.
+Zero clipping, zero hum, zero periodic buzz — the tone was clean, just too quiet. The transcription of
+that recording was 100% confident, so intelligibility was marginal rather than broken.
+
+### B. Fix
+
+`desktop/daemon/lib/mic-gain.js` adds **+6 dB** (2×) with a **stateless soft-knee limiter**:
+
+- identity below 0.72 FS (−2.8 dBFS), tanh compression above it, hard ceiling 0.98 FS
+- applied **once**, immediately after the resampler, so the level meter, the call recording, the
+  transmitted-audio tap and the G.711 encoder all describe the same signal
+- no attack/release to pump, no lookahead, no latency, nothing to tune per call
+
+Expected result on the next call: active speech ≈ **−21.5 dBFS**, peak ≈ **−2.8 dBFS** — standard
+telephone level with the loudest syllables just touching the knee, so they cannot clip.
+
+### C. Guards
+
+`VAL-MEDIA-017` (14 checks): the +6 dB is exact below the knee, digital silence stays silent, a
+full-scale frame lands under the ceiling without ever hitting 32767/‑32768, the curve never folds
+over, and crossing the knee is continuous.
+
+Unit **36/36 suites (518 checks)**, integration **38/38 (51 checks)**.
+
+### D. Note on the integration suite
+
+Group 1 failed during this work with `has_ai_key: true`, and it was **the shell, not the code**: a
+manual daemon test had run `set -a; . ./.env` earlier in the same terminal, so `PULSE_AI_API_KEY` was
+exported and the test server seeded an AI key into its fresh database. With a clean environment the
+suite is green. Anyone running these tests after sourcing `.env` will see the same false failure.
+

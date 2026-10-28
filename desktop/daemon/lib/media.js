@@ -12,6 +12,7 @@ const rtp = require('./rtp');
 const g711 = require('./g711');
 const { CallRecorder, uploadOrSaveRecording } = require('./recorder');
 const { WireTap } = require('./wiretap');
+const { boostPcm } = require('./mic-gain');
 const path = require('path');
 
 // Where the "what we transmitted" WAVs land: the same recordings directory the mix goes to.
@@ -214,11 +215,14 @@ function attach(ua) {
         : (Buffer.isBuffer(frame)
           ? new Int16Array(frame.buffer, frame.byteOffset, Math.floor(frame.byteLength / 2))
           : (frame instanceof Float32Array ? g711.toInt16(frame) : frame));
-      ua.levels.input = g711.level(pcm);
+      // Gain once, before anything else looks at the frame: the meter, the recorder, the
+      // transmitted-audio tap and the encoder then all describe the same signal the far end hears.
+      const boosted = boostPcm(pcm);
+      ua.levels.input = g711.level(boosted);
       const media = armed.media;
-      if (armed.recorder) armed.recorder.recordFrame(pcm, !!media?.muted);
+      if (armed.recorder) armed.recorder.recordFrame(boosted, !!media?.muted);
       if (!media || media.muted) return;
-      const payload = g711.encode(pcm, media.codec);
+      const payload = g711.encode(boosted, media.codec);
       armed.wiretap?.write(payload, media.codec);
       media.send(media.session.packet(payload, media.stats.sent === 0));
       ua.maybeEmitLevels();

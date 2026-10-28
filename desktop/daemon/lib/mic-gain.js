@@ -4,14 +4,20 @@
 // -8.8 dBFS peak, against the far end's -17.7 dBFS — the caller hears a distant voice. The
 // CrystalSound driver hands CoreAudio a low-amplitude signal and nothing downstream added gain.
 //
-// +8 dB (2.5x) puts active speech near -19.5 dBFS, which is comfortable telephone level: +6 dB
-// still required the operator to project on long calling blocks. The soft limiter is what makes
-// this safe rather than a trade — that same -8.8 dBFS peak now lands at 0.907 full scale, inside the
-// knee, so it is compressed to about -1.2 dBFS instead of clipping. The limiter is stateless on
-// purpose: no attack/release to pump, no lookahead to add latency.
+// +11 dB (3.5x) is the third step, and the first that assumes the operator speaks at zero effort:
+// +6 dB still required projection, +8 dB left a relaxed sentence at -21.2 dBFS against the far end's
+// -15.4 (docs/AUDIO-REVIEW-2026-10-28.md, second pass). At 3.5x that sentence lands near -18.4 dBFS
+// and its loudest syllable near -0.8 dBFS — the first point where the limiter does real work on an
+// ordinary voice. The soft knee is what makes that safe rather than a trade: the curve is an
+// asymptote at 0.98, so no input can rail, and the -8.8 dBFS peak measured on the louder pass
+// becomes 1.27 full scale and comes out at -0.26 dBFS compressed instead of clipping. The limiter is
+// stateless on purpose: no attack/release to pump, no lookahead to add latency.
+//
+// It does not change the timbre: gain is a flat multiplier, so the presence deficit measured above
+// 1.6 kHz (see docs/AUDIO-REVIEW-2026-10-28.md) is untouched. This closes the level gap, not the tone.
 'use strict';
 
-const GAIN = 2.5;        // +8 dB
+const GAIN = 3.5;        // +11 dB
 const KNEE = 0.72;       // soft limiting starts here (fraction of full scale)
 const CEIL = 0.98;       // and can never exceed this
 

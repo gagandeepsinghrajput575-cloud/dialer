@@ -77,3 +77,38 @@
 
 
 
+
+---
+
+## Addendum — +11 dB (3.5×), and what gain cannot fix (2026-10-28)
+
+`GAIN` in `desktop/daemon/lib/mic-gain.js` is now **3.5× (+11 dB)**, because a relaxed voice at
+−21.2 dBFS still sat 5–6 dB below the far end (−15.4 dBFS). Predicted result: active speech
+**≈ −18.4 dBFS**, loudest syllable of a relaxed sentence **≈ −0.8 dBFS** (≈0.8 dB of soft limiting),
+and the −8.8 dBFS peak from the louder pass arriving at **−0.26 dBFS** instead of clipping. The
+limiter's ceiling is an asymptote at 0.98 FS, so no input can rail.
+
+Measured on `wire-481.wav` itself, comparing the operator leg against the **far end in the same
+recording** (the two are sample-aligned at lag 0, so `call − wire` isolates the other party — a real
+phone voice through the same recorder and codec):
+
+| band | far end | operator | delta |
+| --- | --- | --- | --- |
+| 120–200 Hz | −10.3 | −5.0 | **+5.3 dB** (more chest than a normal caller) |
+| 300–500 Hz | −3.1 | −1.8 | +1.3 (boxy) |
+| 500–1000 Hz | −2.9 | −4.7 | −1.8 |
+| 1–1.6 kHz | −9.8 | −13.0 | −3.2 |
+| 1.6–2.2 kHz | −9.7 | −21.2 | **−11.5 dB** |
+| 2.2–2.8 kHz | −17.0 | −25.7 | **−8.7 dB** |
+| 2.8–3.2 kHz | −19.4 | −38.3 | **−18.9 dB** |
+| 3.2–3.6 kHz | −20.5 | −41.2 | **−20.7 dB** |
+
+Level and noise were already fine (SNR **51.5 dB**, floor −72.8 dBFS), which is why no amount of
+gain removes the "muffled / basement" character: the tilt is spectral, and a flat multiplier moves
+both ends by the same amount. Cleared along the way: the resampler (flat to 3.2 kHz from the actual
+coefficients) and the capture path (single-channel tap, no L+R comb). The prime suspect is the input
+device — "CrystalSound Microphone" is `Transport: Virtual` (NamiTech JSC), so a driver is voicing the
+signal. Its noise cancellation is wanted, so the next step, if the tone is still wrong, is a measured
+compensating EQ in `mic-gain.js` (low cut ~120–200 Hz, −2 dB at 300–500 Hz, presence shelf from
+1.6 kHz), held to the same RMS and peak as today.
+

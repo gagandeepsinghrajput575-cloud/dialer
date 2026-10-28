@@ -647,7 +647,6 @@ exported and the test server seeded an AI key into its fresh database. With a cl
 suite is green. Anyone running these tests after sourcing `.env` will see the same false failure.
 
 ### E. Live validation (+8 dB)
-
 Second review pass, on a call made at deliberately **relaxed conversational volume**
 (`docs/AUDIO-REVIEW-2026-10-28.md`, `wire-481.wav`):
 
@@ -719,5 +718,48 @@ Verified: unit **37/37 suites (533 checks)** — the new suite fails 5 checks ag
 and integration **38/38 (51 checks)**. Outbound untouched: the only shared code changed is the
 re-INVITE reply, whose outbound assertions still pass.
 
+
+
+
+---
+
+## 19. Microphone Gain, Third Step — +11 dB (3.5×) (2026-10-28)
+
+`GAIN` goes 2.5 → **3.5** in `desktop/daemon/lib/mic-gain.js`. +8 dB was still leaving a relaxed
+voice **5–6 dB below the far end** (−21.2 dBFS against −15.4), which reads as "distant" however clean
+it is, so the operator asked for enough gain to speak at zero effort.
+
+### A. What changes at the top end
+
+3.5× is the first gain where an ordinary voice touches the limiter, so the numbers matter:
+
+| | 2.5× | 3.5× |
+| --- | --- | --- |
+| active speech (relaxed) | −21.2 dBFS | **≈ −18.4 dBFS** |
+| loudest syllable of that call | −3.1 dBFS, below the knee | **≈ −0.8 dBFS**, ≈0.8 dB of limiting |
+| the −8.8 dBFS peak from the louder pass | 0.907 FS → −1.2 dBFS | 1.27 FS → **−0.26 dBFS** |
+| clipping | 0.000% | **0.000%** — CEIL 0.98 is an asymptote, not a threshold |
+
+Matching the far end exactly would need ~4.2×, which pushes stressed syllables further into the tanh
+knee where the curve starts adding audible grit. 3.5× closes most of the gap and stops there.
+
+### B. What it does not do
+
+Gain is a flat multiplier, so it cannot change timbre. The presence deficit in the new measurement —
+**+5.3 dB** at 120–200 Hz versus the far end, but **−11.5 / −8.7 / −18.9 / −20.7 dB** at 1.6–2.2 k,
+2.2–2.8 k, 2.8–3.2 k and 3.2–3.6 k — is untouched by this change. Two suspects were cleared along the
+way: the resampler (its Kaiser design is flat to 3.2 kHz, −0.9 dB at 3.4 k, −6 dB at 3.6 k, computed
+from the actual coefficients) and the capture path (the audio unit asks for one channel, so there is no
+L+R comb). That points upstream at the input device: "CrystalSound Microphone" reports
+`Transport: Virtual` (NamiTech JSC), i.e. a virtual driver is generating the signal, and its voicing
+is the likely cause. Turning it off is not on the table — its noise cancellation is wanted — so a
+measured compensating EQ is the remaining option, capped by whatever that driver still passes.
+
+### C. Guards
+
+`VAL-MEDIA-017` (18 checks) now pins: the boost is exactly 3.5× below the knee (a 6000-peak frame →
+21000), an 8000-peak frame **enters the limiter and lands at 27397** (so a later gain change cannot
+silently start squashing ordinary speech), full scale still lands at the 32113 ceiling without railing,
+and the −8.8 dBFS real-world peak comes out at −0.26 dBFS compressed. Unit **37/37 (535 checks)**.
 
 

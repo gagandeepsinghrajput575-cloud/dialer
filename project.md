@@ -276,6 +276,14 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Bug 3 — a re-INVITE while ringing got an empty 200:* only `answer()` opened the media socket, so a carrier media update during ringing was answered with no SDP (not allowed by RFC 3261 §14). *Fix:* the in-dialog branch opens the socket on demand, `answer()` reuses it rather than opening a second, and `releaseMedia()` closes it on every exit path including CANCEL.
     - *Still open, and not code:* inbound **reachability** through the Tenda ALG is unproven (item 14: its rewrite port did not match the real mapping). Test by ringing the DID and watching `data/daemon.log` for `>> INVITE` / `<< 180 Ringing`; silence there means the network, not the dialog.
 
+17. **CHANGED (2026-10-28): Microphone gain raised to +11 dB (3.5×) — and why gain cannot fix the tone:**
+    - *Why:* at +8 dB a deliberately relaxed voice measured **−21.2 dBFS** active against the far end's **−15.4 dBFS** — a 5–6 dB level gap that reads as "distant" no matter how clean the signal is.
+    - *What was changed:* `GAIN = 3.5` in `desktop/daemon/lib/mic-gain.js`, nothing else. Predicted: active speech **≈ −18.4 dBFS**, loudest relaxed syllable **≈ −0.8 dBFS** (≈0.8 dB of tanh limiting), the old **−8.8 dBFS** peak arriving at **−0.26 dBFS**, and still **0.000%** clipping — CEIL 0.98 is an asymptote so no input can rail. Matching −15.4 exactly would need ~4.2×, which pushes stressed syllables into the knee where the curve audibly grits; 3.5× stops short of that on purpose.
+    - *What it cannot do:* gain is a flat multiplier, so the measured **presence deficit** is untouched — versus the far end in the same recording: **+5.3 dB** at 120–200 Hz but **−11.5 / −8.7 / −18.9 / −20.7 dB** at 1.6–2.2 k / 2.2–2.8 k / 2.8–3.2 k / 3.2–3.6 k. That is the "basement" character, and it is spectral.
+    - *Suspects cleared by measurement:* the resampler (its Kaiser design is flat to 3.2 kHz; −0.9 dB at 3.4 k, −6 dB at 3.6 k, computed from the real coefficients) and the capture path (the audio unit requests one channel, so there is no L+R comb). Prime suspect is the input device: **"CrystalSound Microphone" reports `Transport: Virtual`** (NamiTech JSC) — a driver is voicing the signal. Its noise cancellation is deliberately kept, so the remaining option is a measured compensating EQ in `mic-gain.js`, capped by whatever that driver still passes.
+    - *Guard:* `VAL-MEDIA-017` (18 checks) pins the exact 3.5× below the knee, that an 8000-peak frame now enters the limiter and lands at **27397**, and that full scale stays at the 32113 ceiling.
+
+
 
 ### B. Brute-Force Restart Runbook
 

@@ -82,11 +82,17 @@
 
 ## Addendum — +11 dB (3.5×), and what gain cannot fix (2026-10-28)
 
-`GAIN` in `desktop/daemon/lib/mic-gain.js` is now **3.5× (+11 dB)**, because a relaxed voice at
-−21.2 dBFS still sat 5–6 dB below the far end (−15.4 dBFS). Predicted result: active speech
-**≈ −18.4 dBFS**, loudest syllable of a relaxed sentence **≈ −0.8 dBFS** (≈0.8 dB of soft limiting),
-and the −8.8 dBFS peak from the louder pass arriving at **−0.26 dBFS** instead of clipping. The
-limiter's ceiling is an asymptote at 0.98 FS, so no input can rail.
+`GAIN` in `desktop/daemon/lib/mic-gain.js` is now **3.0× (+9.5 dB)**. The route: +8 dB left a relaxed
+voice at −21.2 dBFS against the far end's −15.4; **3.5×** closed that gap correctly (measured −16.2
+dBFS on a live call) but introduced an audible **spark on stressed syllables** — 13 sample-to-sample
+jumps over 20000 units at 18.18 s in `wire-502.wav`, peak −0.18 dBFS, 0.000 % clipped — so it was
+backed down to **3.0×**: same call, 7 jumps, −16.3 dBFS active.
+
+Why gain is the wrong knob for the spark: replaying the *same* syllable at each setting leaves the peak
+frozen at −0.18 dBFS (3.5× → 2.6×), because those syllables already arrive near −7 dBFS before any
+gain, so every usable setting saturates the per-sample tanh and flattens the waveform top into an
+edge. Jumps fall 13 → 7 → 5 → 5 as gain drops; only an envelope-following limiter removes them
+properly. See `dialer/current.md` §19.
 
 Measured on `wire-481.wav` itself, comparing the operator leg against the **far end in the same
 recording** (the two are sample-aligned at lag 0, so `call − wire` isolates the other party — a real

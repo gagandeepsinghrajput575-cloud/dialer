@@ -1,10 +1,10 @@
 // The microphone boost, and the limiter that keeps a louder call from clipping.
 //
 // Evidence (docs/AUDIO-REVIEW-2026-10-28.md): active speech first left the daemon at -27.5 dBFS RMS,
-// while the far end sat at -17.7; +8 dB then left a *relaxed* voice at -21.2 against the far end's
-// -15.4. The operator sounded distant; nothing in the path applied gain. These checks pin the two
-// properties that matter: quiet speech gets exactly 3.5x, and loud speech does not rail — including
-// at 3.5x, where an ordinary voice now reaches the knee.
+// while the far end sat at -17.7; +8 dB then left a *relaxed* voice at -21.2 against -15.4. +11 dB
+// (3.5x) then produced an audible spark on stressed syllables (wire-502.wav), so the setting is 3.0x
+// and these checks pin it: quiet speech gets exactly 3x, an ordinary syllable only just touches the
+// knee, and loud speech never rails at any level.
 const assert = require('assert');
 
 const { boostPcm, shape, GAIN, KNEE, CEIL } = require('../../desktop/daemon/lib/mic-gain');
@@ -24,27 +24,26 @@ const peakOf = (pcm) => pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
 
 console.log('\n=== VAL-MEDIA-017: microphone boost + soft limiter ===\n');
 
-// 1. The headline: a quiet frame becomes 11 dB louder, sample for sample.
+// 1. The headline: a quiet frame becomes 9.5 dB louder, sample for sample.
 {
-  check(GAIN === 3.5, 'the boost is +11 dB (3.5x)');
-  // 6000 x 3.5 = 21000, still below the knee (0.72 x 32768 = 23593), so this is a pure gain check.
-  const quiet = frame(6000);
+  check(GAIN === 3.0, 'the boost is +9.5 dB (3.0x)');
+  // 7000 x 3 = 21000, still below the knee (0.72 x 32768 = 23593), so this is a pure gain check.
+  const quiet = frame(7000);
   const boosted = boostPcm(quiet);
   let worst = 0;
   for (let i = 0; i < quiet.length; i++) {
-    const expected = quiet[i] * 3.5;
+    const expected = quiet[i] * 3.0;
     if (Math.abs(boosted[i] - expected) > 1) worst = Math.max(worst, Math.abs(boosted[i] - expected));
   }
   console.log(`  quiet frame: peak ${peakOf(quiet)} -> ${peakOf(boosted)}`);
-  check(worst <= 1, 'below the knee the output is exactly 3.5x the input (within rounding)');
-  check(peakOf(boosted) === 21000, 'peak scales: 6000 -> 21000 (-3.9 dBFS)');
+  check(worst <= 1, 'below the knee the output is exactly 3.0x the input (within rounding)');
+  check(peakOf(boosted) === 21000, 'peak scales: 7000 -> 21000 (-3.9 dBFS)');
 
-  // 8000 x 3.5 = 28000 is now past the knee: the gain the operator asked for is only reachable
-  // because the limiter absorbs the top. Pin it, so a future gain change cannot silently start
-  // squashing ordinary speech without a test noticing.
+  // 8000 x 3 = 24000 is only ~0.4 dB past the knee (23593). At 3.5x this same frame sat 6 dB past it,
+  // and the resulting near-square edge was the spark the operator heard; pin the gentler margin.
   const ordinary = boostPcm(frame(8000));
-  console.log(`  ordinary syllable: peak 8000 -> ${peakOf(ordinary)} (unlimited would be 28000)`);
-  check(peakOf(ordinary) === 27397, 'at 3.5x an 8000 input enters the limiter and lands at 27397');
+  console.log(`  ordinary syllable: peak 8000 -> ${peakOf(ordinary)} (unlimited would be 24000)`);
+  check(peakOf(ordinary) === 23971, 'an 8000 input only just enters the limiter: 23971 of 24000');
   check(peakOf(ordinary) < Math.round(CEIL * 32768), 'and still sits under the ceiling');
 }
 
@@ -91,7 +90,7 @@ console.log('\n=== VAL-MEDIA-017: microphone boost + soft limiter ===\n');
 }
 
 // 6. The measurement this gain was chosen against (docs/AUDIO-REVIEW-2026-10-28.md): a -8.8 dBFS peak.
-//    At 3.5x that is 1.27 full scale — past the knee — so it must come out loud, compressed, unclipped.
+//    At 3.0x that is 1.09 full scale — past the knee — so it must come out loud, compressed, unclipped.
 {
   const measuredPeak = Math.round(0.363 * 32768);        // -8.8 dBFS
   const boosted = boostPcm(frame(measuredPeak));

@@ -723,43 +723,58 @@ re-INVITE reply, whose outbound assertions still pass.
 
 ---
 
-## 19. Microphone Gain, Third Step — +11 dB (3.5×) (2026-10-28)
+## 19. Microphone Gain — 2.5× → 3.5× → **3.0×**, and the Spark That Sent It Back (2026-10-28)
 
-`GAIN` goes 2.5 → **3.5** in `desktop/daemon/lib/mic-gain.js`. +8 dB was still leaving a relaxed
-voice **5–6 dB below the far end** (−21.2 dBFS against −15.4), which reads as "distant" however clean
-it is, so the operator asked for enough gain to speak at zero effort.
+`GAIN` in `desktop/daemon/lib/mic-gain.js` is **3.0** (+9.5 dB). The path there is the story:
 
-### A. What changes at the top end
+1. At **2.5× (+8 dB)** a deliberately relaxed voice measured **−21.2 dBFS** active against the far
+   end's **−15.4** — 5–6 dB light, which reads as "distant" however clean the signal is.
+2. **3.5× (+11 dB)** was shipped to close the gap. Predicted −18.4 dBFS active, peak −0.83, no
+   clipping — and those numbers were right.
+3. A live call then produced an audible **spark/crackle on stressed syllables** (`wire-502.wav`,
+   ~18.18 s). Measured: **13 sample-to-sample jumps over 20000 units**, peak **−0.18 dBFS**, 0.000 %
+   clipped. The level was never in doubt (−16.2 dBFS active, louder than the far end).
+4. **3.0×** is the retreat: same call, same syllables, **7** jumps instead of 13, level **−16.3 dBFS**.
 
-3.5× is the first gain where an ordinary voice touches the limiter, so the numbers matter:
+### A. Why gain is the wrong knob for this artefact
 
-| | 2.5× | 3.5× |
-| --- | --- | --- |
-| active speech (relaxed) | −21.2 dBFS | **≈ −18.4 dBFS** |
-| loudest syllable of that call | −3.1 dBFS, below the knee | **≈ −0.8 dBFS**, ≈0.8 dB of limiting |
-| the −8.8 dBFS peak from the louder pass | 0.907 FS → −1.2 dBFS | 1.27 FS → **−0.26 dBFS** |
-| clipping | 0.000% | **0.000%** — CEIL 0.98 is an asymptote, not a threshold |
+Reconstructing the pre-gain signal from `wire-502.wav` (the limiter is invertible above the knee) and
+re-applying each gain to the *same* syllable gives:
 
-Matching the far end exactly would need ~4.2×, which pushes stressed syllables further into the tanh
-knee where the curve starts adding audible grit. 3.5× closes most of the gap and stops there.
+| gain | jumps >20k | max jump | peak | active speech |
+| --- | --- | --- | --- | --- |
+| 3.5× | **13** | 28992 | −0.18 dBFS | −15.0 dBFS |
+| 3.0× | 7 | 27520 | −0.18 dBFS | −16.3 dBFS |
+| 2.8× | 5 | 26424 | −0.18 dBFS | −16.9 dBFS |
+| 2.6× | 5 | 25002 | −0.19 dBFS | −17.6 dBFS |
 
-### B. What it does not do
+The peak does not move: those stressed syllables already arrive at roughly **−7 dBFS before any
+gain**, so every usable setting saturates the curve, and a per-sample tanh that is driven ~6 dB past
+its knee flattens the waveform top into an edge — which is what "spark" is. Gain reduction lowers how
+*many* syllables saturate; it cannot stop the loudest ones. Removing it entirely would mean ~1.6×,
+quieter than the setting we started from.
 
-Gain is a flat multiplier, so it cannot change timbre. The presence deficit in the new measurement —
-**+5.3 dB** at 120–200 Hz versus the far end, but **−11.5 / −8.7 / −18.9 / −20.7 dB** at 1.6–2.2 k,
-2.2–2.8 k, 2.8–3.2 k and 3.2–3.6 k — is untouched by this change. Two suspects were cleared along the
-way: the resampler (its Kaiser design is flat to 3.2 kHz, −0.9 dB at 3.4 k, −6 dB at 3.6 k, computed
-from the actual coefficients) and the capture path (the audio unit asks for one channel, so there is no
-L+R comb). That points upstream at the input device: "CrystalSound Microphone" reports
-`Transport: Virtual` (NamiTech JSC), i.e. a virtual driver is generating the signal, and its voicing
-is the likely cause. Turning it off is not on the table — its noise cancellation is wanted — so a
-measured compensating EQ is the remaining option, capped by whatever that driver still passes.
+**The real fix** is an envelope-following limiter (attack/release, optional lookahead) instead of a
+per-sample clip: it turns the gain down *before* the peak so the waveform keeps its shape and only the
+envelope is compressed. That also allows more gain without the artefact. Not done here — this change
+is only the retreat the operator asked for.
+
+### B. What gain cannot do (unchanged)
+
+A flat multiplier cannot change timbre. The presence deficit stands — **+5.3 dB** at 120–200 Hz versus
+the far end, but **−11.5 / −8.7 / −18.9 / −20.7 dB** at 1.6–2.2 k, 2.2–2.8 k, 2.8–3.2 k, 3.2–3.6 k.
+Two suspects were cleared by measurement: the resampler (Kaiser design flat to 3.2 kHz; −0.9 dB at
+3.4 k, −6 dB at 3.6 k, computed from the real coefficients) and the capture path (one channel
+requested, so no L+R comb). That points at the input device: **"CrystalSound Microphone" reports
+`Transport: Virtual`** (NamiTech JSC) — a driver is voicing the signal, and its noise cancellation is
+wanted, so a measured compensating EQ is the remaining option, capped by what that driver still passes.
 
 ### C. Guards
 
-`VAL-MEDIA-017` (18 checks) now pins: the boost is exactly 3.5× below the knee (a 6000-peak frame →
-21000), an 8000-peak frame **enters the limiter and lands at 27397** (so a later gain change cannot
-silently start squashing ordinary speech), full scale still lands at the 32113 ceiling without railing,
-and the −8.8 dBFS real-world peak comes out at −0.26 dBFS compressed. Unit **37/37 (535 checks)**.
+`VAL-MEDIA-017` (18 checks) pins: exactly **3.0×** below the knee (7000-peak frame → 21000), an
+8000-peak frame only **just** entering the limiter (**23971** of 24000, versus 6 dB past it at 3.5×),
+full scale landing at the 32113 ceiling without railing, and the −8.8 dBFS real-world peak arriving at
+−0.49 dBFS compressed. Unit **37/37 (535 checks)**.
+
 
 

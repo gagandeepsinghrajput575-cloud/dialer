@@ -264,11 +264,12 @@ class UserAgent extends EventEmitter {
       // putting a customer on hold dropped the call. Renegotiate instead: take their offer, point
       // the receive path at it, and answer with the media we actually have.
       if (msg.body) existing.remoteSdp = sdp.parse(msg.body);
-      const body = existing.media
-        ? sdp.build({ ip: this.publicIp || this.transport.host, port: existing.media.port })
-        : '';
-      const headers = existing.responseHeaders();
-      if (body) headers['Content-Type'] = 'application/sdp';
+      // A media update can arrive before the phone is answered. Answering an offer with an empty
+      // body is not allowed (RFC 3261 §14 needs an answer), and the old code left such a dialog with
+      // no media at all because only answer() ever opened the socket.
+      if (!existing.media) existing.media = await this.openMediaSocket();
+      const { body } = existing.answerSdp(existing.media.port);
+      const headers = existing.responseHeaders({ extra: { 'Content-Type': 'application/sdp' } });
       this.applyRemoteSdp(existing);
       ctx.reply(serialize({ startLine: 'SIP/2.0 200 OK', headers, body }));
       return;

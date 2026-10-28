@@ -49,6 +49,10 @@ class Dialog {
       this.remoteTag = parseTag(request.first('from'));
       this.requestUri = parseUri(request.uri || request.first('to')).raw || String(request.uri || '');
       this.remoteSdp = sdp.parse(request.body);
+      // Where in-dialog requests go: the caller's Contact, not the INVITE's request-URI (that is
+      // *our* address). Left empty, our BYE was addressed to ourselves — the carrier either 404s it
+      // or ignores it, and the caller's leg stays up after the operator hangs up.
+      this.remoteTarget = parseUri(contactUri(request.first('contact'))).raw || this.requestUri;
     }
   }
 
@@ -228,6 +232,26 @@ class Dialog {
   }
 
   // ---- inbound -------------------------------------------------------------------------
+  /**
+   * The SDP we send as an answer: **exactly the codec we will encode**, chosen from the caller's
+   * offer.
+   *
+   * An inbound call is the mirror of an outbound one. Outbound, the peer's answer tells us what it
+   * will decode, so `negotiate()` reading it is right. Inbound, we are the answerer: the offer only
+   * says what the caller *can* do, and whatever we list first in our answer is what it will decode.
+   * Listing PCMU while encoding PCMA makes the caller decode A-law through the µ-law table — the
+   * voice arrives as noise, inbound only.
+   */
+  answerSdp(port) {
+    const chosen = sdp.negotiate(this.remoteSdp) || { pt: sdp.PT_PCMU, name: 'PCMU' };
+    const body = sdp.build({
+      ip: this.ua.publicIp || this.ua.transport.host,
+      port,
+      payloadTypes: [chosen.pt],
+    });
+    return { chosen, body };
+  }
+
   async ring() {
     const headers = this.responseHeaders();
     delete headers['Content-Type'];   // a 180 carries no body
@@ -242,8 +266,10 @@ class Dialog {
 
   async answer() {
     if (this.ended) return false;
-    this.media = await this.ua.openMediaSocket();
-    const body = sdp.build({ ip: this.ua.publicIp || this.ua.transport.host, port: this.media.port });
+    // Reuse the socket if a re-INVITE already opened one; a second would orphan the first, and the
+    // answer would advertise a port nothing reads.
+    this.media = this.media || await this.ua.openMediaSocket();
+    const { body } = this.answerSdp(this.media.port);
     this.localSdp = sdp.parse(body);
     const headers = this.responseHeaders({ extra: { 'Content-Type': 'application/sdp' } });
     const msg = serialize({ startLine: 'SIP/2.0 200 OK', headers, body });

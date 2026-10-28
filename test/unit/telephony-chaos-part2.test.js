@@ -250,7 +250,10 @@ const checks = [
     const reply = ua.transport.replies[0].text;
     ok(reply.startsWith('SIP/2.0 200 OK'), reply.split(M.CRLF)[0]);
     ck(line(reply, 'Content-Type:'), 'Content-Type: application/sdp', 'an answer without SDP is a call with no audio');
-    ok(reply.includes('m=audio 16384 RTP/AVP 0 8 101'), reply.slice(-200));
+    // An answerer may list any subset of the offer, and it must list only the codec it will encode:
+    // a menu here means the caller may pick a codec we never send (inbound-audio garble, see
+    // test/unit/inbound-sip.test.js). The offer here has no SDP body, so the chosen codec is PCMU.
+    ok(reply.includes('m=audio 16384 RTP/AVP 0 101'), reply.slice(-200));
     ck(line(reply, 'To:'), `To: <sip:15551234567@sip.flynumber.com>;tag=${d.localTag}`);
     ck(d.reply.status, 200); ck(d.reply.key, 'z9hG4bKin1|INVITE'); ck(d.state, 'confirmed');
     ck(ua.confirmed.length, 1); ck(d.localSdp.port, 16384);

@@ -662,4 +662,62 @@ That closes the level question: relaxed speech is now intelligible without proje
 loudest syllable of a normal speaking voice still has ~3 dB of headroom before the limiter is asked
 to do anything.
 
+---
+
+## 18. Inbound SIP Audit — Three Dialog Defects the Outbound Path Never Hit (2026-10-28)
+
+The inbound leg was never exercised end-to-end (nobody has rung the DID), so it was audited the way
+the outbound leg was: read the code against the RFC, then pin each finding with a test that fails on
+the old code. Three defects, all asymmetric — the outbound direction was correct, which is exactly why
+they survived a working outbound call.
+
+### A. An inbound BYE was addressed to us
+
+`Dialog` only ever learned its remote target from a **200 OK's `Contact`** — the *outbound* direction.
+An inbound dialog kept `remoteTarget = ''`, so `inDialogRequest()` fell back to its `requestUri`,
+which for an inbound INVITE is **our own AOR**:
+
+```
+BYE sip:a2YqM0bsm@sip.flynumber.com SIP/2.0     ← ours, sent to the carrier
+```
+
+The carrier either 404s it or ignores it. Our side marks the call ended either way, so the visible
+symptom is a caller whose leg stays up after the operator hangs up (and a re-INVITE we send lands at
+the wrong place). Fixed by taking the target from the INVITE's `Contact`, falling back to the
+request-URI. `test/unit/inbound-sip.test.js` asserts the BYE's request-URI is the caller's Contact.
+
+### B. The answer could advertise a codec we were not encoding
+
+`answer()` built the 200 OK's SDP *before* negotiation, with the default list (`0 8 101`, µ-law
+first). The encoder's payload type then came from `negotiate()`, which reads the **offer's** order —
+correct outbound (the peer's answer says what it will decode), wrong inbound (we are the answerer, and
+whatever we list first is what the caller decodes). A carrier offering PCMA first would get A-law
+bytes through a µ-law table: inbound voice that arrives as noise, with outbound unaffected.
+
+Fixed with `Dialog.answerSdp(port)`: negotiate from the offer, then answer with **that one payload
+type only** (an answer may legitimately list a subset). Both `answer()` and the re-INVITE reply use
+it, so the SDP and the encoder can no longer disagree.
+
+### C. A re-INVITE while ringing was answered with an empty body
+
+The in-dialog branch replied with SDP only if `existing.media` already existed, and only `answer()`
+created it — so a carrier media update that arrived during ringing got `200 OK` with no body, which
+RFC 3261 §14 does not allow. That branch now opens the media socket if needed (and `answer()` reuses
+it instead of opening a second, orphaned one). `releaseMedia()` closes it on every exit path,
+including a CANCEL, so the early socket cannot leak.
+
+### D. Still unproven: inbound reachability
+
+Nothing above can be validated without a real call. The REGISTER `Contact` carries the LAN address and
+the Tenda ALG rewrites it; on the outbound side its rewrite port did not match the measured mapping
+(`26407` vs `rport=48209`), so it may rewrite `Contact` to a port nothing owns — in which case inbound
+INVITEs never arrive and no amount of dialog correctness helps. **Ring the DID from a mobile and watch
+`data/daemon.log`** for `>> INVITE`, `<< 100 Trying`, `<< 180 Ringing`. If nothing appears, the problem
+is the network, not this code.
+
+Verified: unit **37/37 suites (533 checks)** — the new suite fails 5 checks against the pre-fix code —
+and integration **38/38 (51 checks)**. Outbound untouched: the only shared code changed is the
+re-INVITE reply, whose outbound assertions still pass.
+
+
 

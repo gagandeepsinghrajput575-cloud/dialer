@@ -269,6 +269,14 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Rollback point:* `12ea6bf`. The FlyNumber portal must have TLS Encryption **OFF** for the UDP trunk to register.
     - *If ever revisited:* behind a flag, against a mock carrier that enforces SRTP, and never on the live trunk until a recorded call round-trips audio in both directions.
 
+16. **FIXED (2026-10-28): Inbound Calls — Three Dialog Defects the Outbound Path Could Not Reveal:**
+    - *How they were found:* inbound was never exercised (nobody has rung the DID), so `dialog.js`/`ua.js` were read against RFC 3261 and each finding pinned with a test that fails on the pre-fix code (`test/unit/inbound-sip.test.js`).
+    - *Bug 1 — the BYE was addressed to us:* `remoteTarget` was only ever set from a **200 OK's `Contact`** (the outbound direction). Inbound it stayed `''`, so `inDialogRequest()` fell back to `requestUri`, which for an inbound INVITE is *our own* AOR. Hanging up sent `BYE sip:<our-aor>` to the carrier (404/silence) while our side marked the call ended — the caller's leg would have stayed up. *Fix:* take the target from the INVITE's `Contact`.
+    - *Bug 2 — the answer could name a codec we do not send:* `answer()` built the 200 OK's SDP *before* negotiation with a fixed `0 8 101` list, while the encoder's payload type came from the **offer's** order. That is right outbound (the peer's answer says what it decodes) and wrong inbound (the answerer decides, so our first listed PT is what the caller decodes). A PCMA-first carrier would have had A-law decoded as µ-law — inbound voice as noise, outbound fine. *Fix:* `Dialog.answerSdp(port)` negotiates first and answers with that single payload type; both `answer()` and the re-INVITE reply use it.
+    - *Bug 3 — a re-INVITE while ringing got an empty 200:* only `answer()` opened the media socket, so a carrier media update during ringing was answered with no SDP (not allowed by RFC 3261 §14). *Fix:* the in-dialog branch opens the socket on demand, `answer()` reuses it rather than opening a second, and `releaseMedia()` closes it on every exit path including CANCEL.
+    - *Still open, and not code:* inbound **reachability** through the Tenda ALG is unproven (item 14: its rewrite port did not match the real mapping). Test by ringing the DID and watching `data/daemon.log` for `>> INVITE` / `<< 180 Ringing`; silence there means the network, not the dialog.
+
+
 ### B. Brute-Force Restart Runbook
 
 If launching Pulse Dialer on a new machine or recovering after a system restart:

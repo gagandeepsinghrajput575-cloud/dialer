@@ -22,6 +22,29 @@ const WIRE_DIR = process.env.DATA_DIR
 
 const LEVEL_INTERVAL_MS = 120;
 
+// A confirmed call that stops receiving RTP altogether is over. 15 s is far longer than any jitter or
+// comfort-noise gap, and short enough that the operator is not left talking to nobody.
+const DEAD_AIR_MS = 15000;
+
+/**
+ * Should this call be ended because the far end has gone?
+ *
+ * Only "no RTP at all" counts. A call where audio never arrived in the first place is a different
+ * problem, reported by the 12 s watchdog (one-way or blocked media) — hanging up on that would throw
+ * away a call the other person may be able to hear perfectly. Neither is *silence* evidence: the other
+ * person thinking is not a reason to end the call, so this keys off packet arrival, not audio level.
+ *
+ * @returns {string|null} a human-readable reason, or null to keep the call
+ */
+function deadLegReason(media, now, thresholdMs = DEAD_AIR_MS) {
+  if (!media || !media.stats || !media.stats.received) return null;
+  const last = media.lastRxAt || 0;
+  if (!last) return null;
+  const idle = now - last;
+  if (idle < thresholdMs) return null;
+  return `no RTP for ${Math.round(idle / 1000)} s`;
+}
+
 /** Attach media behaviour to a user agent ({ transport, audio, emit, log }). */
 function attach(ua) {
   ua.mediaSockets = ua.mediaSockets || [];
@@ -105,6 +128,7 @@ function attach(ua) {
     const packet = parsed || rtp.parse(buf);
     if (!packet) return;
     media.stats.received += 1;
+    media.lastRxAt = Date.now();
     if (media.remoteDtmfPt && packet.payloadType === media.remoteDtmfPt) {
       const code = packet.payload?.[0];
       const digit = Object.keys(rtp.DTMF_CODES).find((k) => rtp.DTMF_CODES[k] === code);
@@ -266,6 +290,28 @@ function attach(ua) {
               : 'The call is up but no audio has moved in either direction.',
           });
         }, ms);
+
+        // ---- dead leg -------------------------------------------------------------------------
+        // Someone hanging up normally sends a BYE and everything above handles it. The case that
+        // leaves the operator sitting in a silent call is a BYE that never arrives — the carrier sent
+        // it to a Contact our router's ALG had rewritten, or the far end simply vanished — so the
+        // screen says "active" for a call that no longer exists and the operator has to notice and
+        // hang up by hand.
+        //
+        // RTP flows continuously on a live call (comfort noise fills the pauses), so "no packets at
+        // all" is the one signal that is safe to act on. Silence in the audio is not: the other person
+        // thinking is not a reason to hang up on them.
+        const deadAirMs = ua.deadAirMs || DEAD_AIR_MS;
+        dialog.deadAirTimer = setInterval(() => {
+          if (ua.pump !== dialog || dialog.ended || dialog.state !== 'confirmed') return;
+          const detail = deadLegReason(dialog.media, Date.now(), deadAirMs);
+          if (!detail) return;
+          ua.log('media', `${detail} — the far end is gone, ending the call`);
+          // End it at the carrier as well: a dialog the trunk still believes is up keeps billing.
+          try { dialog.bye?.(); } catch { /* the leg is gone; the local end still has to close */ }
+          dialog.end('remote-ended', { detail });
+        }, Math.max(250, Math.min(2000, Math.floor(deadAirMs / 4))));
+        dialog.deadAirTimer.unref?.();
       })
       .catch((e) => fail(`The audio pump stopped: ${e?.message || e}`));
   };
@@ -274,6 +320,7 @@ function attach(ua) {
     const dialog = ua.pump;
     ua.pump = null;
     if (dialog?.mediaWatchdog) { clearTimeout(dialog.mediaWatchdog); dialog.mediaWatchdog = null; }
+    if (dialog?.deadAirTimer) { clearInterval(dialog.deadAirTimer); dialog.deadAirTimer = null; }
     try { ua.audio?.stop?.(); } catch { /* nothing running */ }
   };
 
@@ -351,4 +398,4 @@ function attach(ua) {
   return ua;
 }
 
-module.exports = { attach, LEVEL_INTERVAL_MS };
+module.exports = { attach, LEVEL_INTERVAL_MS, DEAD_AIR_MS, deadLegReason };

@@ -955,3 +955,54 @@ speech legitimately contains such steps (sibilants), which is why the recorded f
 even before any processing, and *more* after the presence lift. The tick claim rests on the mechanism
 (no per-sample nonlinearity, no steps, no clamps) and on the controlled tone, not on that counter.
 
+
+---
+
+## 22. When the Other Side Hangs Up — and When Their BYE Never Arrives (2026-10-28)
+
+The request: "if someone cuts the call, I also know and it automatically gets cut — I don't have to
+jiggle around."
+
+### A. The normal path already worked
+
+A remote `BYE` reaches `ua.onRequest`, which answers `200 OK`, calls `dialog.end('remote-ended')`, and
+that becomes an `ended` event. `nativeSip` plays the hang-up chime, tears the session down, and calls
+`onEnded`, which is the same path as the operator hanging up — the call screen closes and the
+classification step appears. Nothing needed changing there, and `sip-daemon` covers it.
+
+### B. The gap: a BYE that never arrives
+
+With this network that is the likely case, not the exception: our `Contact` carries a LAN address that
+the router's ALG rewrites, so the carrier can send the BYE to an address nothing owns. The call then
+looks "active" forever while the far end is long gone — which is exactly the "jiggle around" the
+operator described.
+
+The daemon already had a 12 s watchdog, but it only *warns*, and only when **nothing** has ever
+arrived: "reported once, never acted on: tearing down a call that may be one-way audio would hang up on
+a customer who can still hear the agent." That is the right instinct, and the new check keeps it —
+it must not fire on audio that never flowed.
+
+What it keys off instead is **packet arrival**, which is the only safe signal:
+
+- RTP flows continuously on a live call — comfort noise fills the pauses — so *no packets at all* means
+  the leg is gone, while silence in the audio means the other person is thinking.
+- `media.lastRxAt` is stamped on every inbound RTP packet.
+- `deadLegReason(media, now, threshold)` returns a reason only when packets previously arrived **and**
+  none have for 15 s (`DEAD_AIR_MS`).
+- `startPump` arms a check every `threshold/4` while the call is confirmed; on a verdict it logs, calls
+  `dialog.bye()` so the trunk stops billing the leg, and ends the dialog as `remote-ended` — i.e. the
+  same "normal hang-up" the UI already understands, with `no RTP for N s` in the detail.
+- The timer is cleared in `stopPump`, and it is `unref`'d so it can never hold the process open.
+
+### C. Guards
+
+`VAL-MEDIA-018` (`test/unit/dead-leg.test.js`, 18 checks) pins both halves:
+
+- the pure rule: no media, never-received, missing timestamp and one millisecond under the threshold all
+  keep the call; a stale `lastRxAt` ends it with a readable reason; the threshold is overridable and its
+  default stays within 10–20 s;
+- the wiring, on a real `UserAgent`: a confirmed call whose RTP stopped is **ended once, as
+  `remote-ended`, with a BYE sent**, and a call whose RTP keeps arriving is **never** ended by it.
+
+Unit **39/39 suites (582 checks)**.
+

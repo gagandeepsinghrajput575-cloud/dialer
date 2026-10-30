@@ -313,6 +313,14 @@ During initial setup and live testing, several real-world telecommunication, net
     - *Guard:* `VAL-MEDIA-017` is **26 checks** — including the onset test with the old per-sample curve as a **negative control** (it must still exceed 20000, or the test is not measuring anything).
     - *Caveat:* "jumps over 20000" is valid on a tone and **meaningless on speech** — 8 kHz speech has them naturally (sibilants). The tick fix rests on the mechanism and the controlled tone, not that counter.
 
+21. **ADDED (2026-10-28): the call ends itself when the other side hangs up and no BYE ever arrives:**
+    - *Request:* "if someone cuts the call, I also know and it automatically gets cut — I don't have to jiggle around."
+    - *Already worked:* a remote `BYE` → `200 OK` → `dialog.end('remote-ended')` → `ended` event → chime, teardown, classification. Same path as the operator hanging up.
+    - *The real gap:* with this network the BYE can be sent to a `Contact` the router's ALG rewrote, so nothing arrives and the call looks active forever. The existing 12 s watchdog only *warns*, and only when nothing ever arrived — deliberately, because hanging up on one-way audio would drop a customer who can still hear the agent.
+    - *Fix:* key off **packet arrival**, not audio level. RTP flows continuously on a live call (comfort noise fills pauses), so no packets at all means the leg is gone, while silence means the other person is thinking. `media.lastRxAt` is stamped per packet; `deadLegReason()` says "dead" only when packets previously arrived **and** none have for 15 s (`DEAD_AIR_MS`). `startPump` checks every threshold/4, then sends `dialog.bye()` (so the trunk stops billing) and ends as `remote-ended` with `no RTP for N s` — the UI's normal hang-up path, so the operator gets the chime and the classification step with no extra gesture.
+    - *Guard:* `VAL-MEDIA-018` (`test/unit/dead-leg.test.js`, 18 checks) — the rule (never-received and just-under-threshold keep the call; stale ends it; default 10–20 s) and the wiring on a real `UserAgent` (ended exactly once, BYE sent, and a call with RTP still arriving is **never** ended).
+    - *Not covered:* a far end that keeps sending RTP but is gone (a stuck carrier leg). That is indistinguishable from a live call at this layer.
+
 
 
 ### B. Brute-Force Restart Runbook

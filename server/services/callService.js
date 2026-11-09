@@ -9,6 +9,7 @@ const { recordingsDir } = require('../config/env');
 const telephony = require('./telephonyService');
 const softphoneSession = require('./softphoneSession');
 const prospectService = require('./prospectService');
+const { notifyCallStarted } = require('./teleprompterNotify');
 const { ApiError } = require('../middleware/errorHandler');
 const { OUTCOMES } = require('../config/defaults');
 const { db, withBusyRetry } = require('../db');
@@ -95,6 +96,10 @@ function start(prospectId, { tzOffset = null } = {}) {
   }
 
   const readiness = webrtc ? telephony.webrtcReadiness() : null;
+
+  // Tell the local teleprompter who is being called. Fire-and-forget: it cannot delay or break
+  // the dial even if the HUD is closed or slow.
+  notifyCallStarted(p);
 
   return {
     callId: call.id,
